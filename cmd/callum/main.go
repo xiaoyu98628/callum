@@ -1,7 +1,14 @@
 package main
 
-import "fmt"
+import (
+	"context"
+	"os"
+
+	"github.com/xiaoyu98628/callum/internal/bootstrap"
+)
 
 func main() {
-	fmt.Print("hello world")
+	if err := bootstrap.Run(context.Background(), os.Args[1:]); err != nil {
+		os.Exit(1)
+	}
 }
