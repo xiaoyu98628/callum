@@ -6,12 +6,25 @@ Go 应用的启动装配、SQLite 连接和日志管理。
 
 需要 Go 1.27.3 或更高版本。
 
+开发时从 Callum 仓库根目录运行：
+
 ```sh
 go run ./cmd/callum
 ```
 
-默认应用数据目录为 `os.UserConfigDir()` 下的 `callum`。它与各个项目的工作目录无关。
-Electron 后续可以通过 `--data-dir` 传入客户端选定的应用数据目录：
+默认应用数据目录按构建模式选择：
+
+| 构建方式 | 默认数据目录 |
+| --- | --- |
+| 普通构建，未指定 `release` 标签 | 启动工作目录下的 `.callum/` |
+| 发布构建，指定 `-tags release` | 用户家目录下的 `~/.callum/` |
+
+GoLand 开发运行时，将 Working directory 设为 Callum 仓库根目录，Go tool arguments 不添加 `-tags release`。
+这样开发数据保存在仓库的 `.callum/` 下，该目录已加入 `.gitignore`。
+这个目录用于保存 Callum 自身的数据，各个工作空间的项目目录仍然单独管理。
+
+显式传入 `--data-dir` 时，以指定目录为准，覆盖两种模式的默认值。
+Electron 后续也可以通过这个参数传入客户端选定的应用数据目录：
 
 ```sh
 go run ./cmd/callum --data-dir /absolute/path/to/callum-data --log-level debug
@@ -21,10 +34,11 @@ go run ./cmd/callum --data-dir /absolute/path/to/callum-data --log-level debug
 
 | 参数 | 默认值 | 用途 |
 | --- | --- | --- |
-| `--data-dir` | 系统用户配置目录下的 `callum` | 数据库和日志保存位置 |
+| `--data-dir` | 开发为 `./.callum`，发布为 `~/.callum` | 数据库和日志保存位置 |
 | `--log-level` | `info` | `debug`、`info`、`warn`、`error` |
 
 应用启动后等待退出信号，按 Ctrl+C 正常停止。
+原来系统用户配置目录下的 `callum` 数据会保留，不会自动迁移到新的默认目录。
 
 ## 数据库
 
@@ -85,7 +99,13 @@ main
 ## 检查与构建
 
 ```sh
-go vet ./...
-go test -race -timeout 60s ./...
-CGO_ENABLED=0 go build -o bin/callum ./cmd/callum
+go vet -mod=readonly ./...
+go vet -mod=readonly -tags release ./...
+go test -mod=readonly -race -timeout 60s ./...
+go test -mod=readonly -tags release -race -timeout 60s ./...
+CGO_ENABLED=0 go build -mod=readonly -o bin/callum-dev ./cmd/callum
+CGO_ENABLED=0 go build -mod=readonly -tags release -o bin/callum ./cmd/callum
 ```
+
+打包流程使用带 `-tags release` 的构建命令。构建模式在编译时确定，
+生成的发布程序启动时无需再传入模式参数。

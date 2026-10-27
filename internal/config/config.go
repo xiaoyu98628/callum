@@ -22,7 +22,7 @@ func Load(args []string, output io.Writer) (Config, error) {
 
 	flags := flag.NewFlagSet("callum", flag.ContinueOnError)
 	flags.SetOutput(output)
-	dataDir := flags.String("data-dir", "", "应用数据目录，默认使用系统用户配置目录下的 callum")
+	dataDir := flags.String("data-dir", "", "应用数据目录，开发默认 ./.callum，发布默认 ~/.callum")
 	logLevel := flags.String("log-level", "info", "日志级别：debug、info、warn、error")
 	if err := flags.Parse(args); err != nil {
 		return Config{}, err
