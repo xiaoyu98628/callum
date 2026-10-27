@@ -60,7 +60,7 @@ func Run(parent context.Context, args []string) (runErr error) {
 	logger, closeLog = configuredLogger, cleanup
 
 	startupCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	application, err := app.Compose(startupCtx, cfg)
+	application, err := app.Compose(startupCtx, cfg, logger)
 	cancel()
 	if err != nil {
 		return fmt.Errorf("业务装配失败: %w", err)
