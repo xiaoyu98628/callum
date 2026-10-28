@@ -1,6 +1,6 @@
 # Callum
 
-Go 应用的启动装配、SQLite 连接和日志管理。
+Go 服务的启动装配、SQLite、日志、工作空间管理和 stdio 通信。
 
 ## 启动
 
@@ -37,13 +37,23 @@ go run ./cmd/callum --data-dir /absolute/path/to/callum-data --log-level debug
 | `--data-dir` | 开发为 `./.callum`，发布为 `~/.callum` | 数据库和日志保存位置 |
 | `--log-level` | `info` | `debug`、`info`、`warn`、`error` |
 
-应用启动后等待退出信号，按 Ctrl+C 正常停止。
+应用启动后通过 stdin/stdout 处理逐行 JSON 请求，按 Ctrl+C 正常停止。
+客户端关闭 stdin 时，服务也会退出并关闭数据库和日志。
 原来系统用户配置目录下的 `callum` 数据会保留，不会自动迁移到新的默认目录。
 
 ## 数据库
 
 SQLite 文件保存为 `<data-dir>/callum.db`，由 Go 服务持有。
 驱动使用 [modernc.org/sqlite](https://pkg.go.dev/modernc.org/sqlite@v1.61.0)，构建不需要 C 工具链。
+
+工作空间读写使用 [GORM](https://gorm.io/) `v1.31.2`，通过
+[libtnb/sqlite](https://github.com/libtnb/sqlite) `v1.2.2` 适配现有的 modernc 驱动。
+`internal/storage/sqlite/orm.go` 在数据库迁移完成后初始化 ORM，复用同一个连接池，
+连接池仍由 App 统一关闭。ORM 初始化的版本查询使用启动上下文，
+后续读写使用各个请求的上下文，不受已结束的启动上下文影响。
+ORM 默认日志关闭，业务错误继续由现有的 slog 日志边界记录，stdout 仅用于 JSON 响应。
+模型映射放在 SQLite 存储层，时间由业务层以 Unix 毫秒写入，关闭 ORM 自动时间赋值。
+表结构继续使用下述 SQL 迁移管理，不执行 GORM 的 `AutoMigrate`。
 
 连接初始化统一配置：
 
@@ -95,7 +105,7 @@ SQL 文件不自行执行 `BEGIN`、`COMMIT`、`ROLLBACK`，事务由迁移执�
 ## 日志
 
 使用 `log/slog` 输出 JSON 日志，同时写入 stderr 和 `<data-dir>/logs/callum.log`。
-stdout 保留给后续的进程通信协议。
+stdout 用于进程通信的 JSON 响应。
 
 多个 Go 进程可以共同写入这个日志文件，每条日志带有 `pid`，用于区分进程。
 文件锁使用 [gofrs/flock](https://pkg.go.dev/github.com/gofrs/flock@v0.13.1)，
@@ -113,22 +123,93 @@ stdout 保留给后续的进程通信协议。
 获取锁最多等待 5 秒，超时或文件写入失败会向 stderr 报告，原日志也会写入 stderr。
 共享目录应位于同一台机器的本地磁盘，所有写入者都需要遵守这套文件锁协议。
 
-业务组件以后通过注入的 `*slog.Logger` 记录日志，可用 `With` 添加模块和请求标识。
-运行错误在 bootstrap 边界统一记录，main 负责错误退出码。
+业务组件通过注入的 `*slog.Logger` 记录日志，用 `With` 添加模块和请求标识。
+工作空间创建记录为 INFO，重复添加和列表查询记录为 DEBUG。
+请求内部错误在 stdio 边界记录一次，响应不暴露数据库内部错误细节；
+参数错误直接返回错误响应。进程运行错误在 bootstrap 边界记录，main 负责错误退出码。
 
 ## 装配与关闭
 
 ```text
 main
   → bootstrap：解析配置、创建日志
-  → app.Compose：打开数据库、执行迁移
-  → App.Run：等待取消
+  → app.Compose：打开数据库、执行迁移、初始化 ORM、装配工作空间服务和 stdio 处理
+  → App.Run：处理请求，等待 stdin 关闭或上下文取消
+  → stdio：关闭输入输出，结束正在进行的读写
   → App.Close：关闭数据库
   → bootstrap：记录停止日志、关闭日志文件
 ```
 
 `internal/config` 管理配置与路径，`internal/logging` 管理日志，
-`internal/storage/sqlite` 管理连接与迁移，`internal/app` 负责业务装配和资源所有权。
+`internal/storage/sqlite` 管理连接、迁移、ORM 初始化和工作空间读写，
+`internal/workspace` 管理工作空间业务规则，`internal/transport/stdio` 管理通信请求和响应，
+`internal/app` 负责业务装配和资源所有权。
+
+## 工作空间与 stdio 协议
+
+服务使用逐行 JSON 协议，每个请求和响应各占一行，当前按接收顺序处理。
+请求必须是 JSON 对象，包含字符串或数字 `id`、非空字符串 `method`；
+`params` 可以省略，省略时按 `{}` 处理，提供时必须是对象。
+这是一套本项目的请求协议，不要求 `jsonrpc` 字段，不支持批量请求和通知。
+空白行忽略；每行请求最多 1 MiB，超过限制会结束服务，避免无界读取。
+
+| 方法 | params | 返回结果 |
+| --- | --- | --- |
+| `workspace.create` | 必填 `root_path`，可选 `name` | 一个工作空间对象 |
+| `workspace.list` | 可选 `include_archived`，默认 `false` | 工作空间对象数组，空列表为 `[]` |
+
+方法参数不接受未知字段。`root_path` 必须是已存在目录的绝对路径；
+服务清理路径并解析符号链接，以规范化后的路径字符串去重，不创建或修改项目目录。
+名称省略或仅有空白时使用目录名称。重复添加返回已有记录，不覆盖名称、置顶或归档状态。
+数据库唯一约束协调多个进程的重复创建，服务不会切换全局工作目录。
+
+列表默认隐藏归档记录，`include_archived: true` 时包含归档记录。
+置顶记录优先，按置顶时间倒序，再按更新时间倒序、ID 升序排列。
+当前提供创建和列表查询；置顶、归档、重命名和删除尚未提供操作入口。
+
+### 命令行手动测试
+
+从仓库根目录运行 `go run ./cmd/callum`，或在 GoLand 中启动服务后，
+将下面的 JSON 粘贴到程序的标准输入并按回车。每条请求各占一行，服务通过标准输出返回响应。
+
+查询工作空间列表：
+
+```json
+{"id":"2","method":"workspace.list","params":{}}
+```
+
+创建工作空间，将当前 Callum 仓库注册为工作空间：
+
+```json
+{"id":"1","method":"workspace.create","params":{"root_path":"/Users/xiaoyu/www/go/works/callum"}}
+```
+
+`root_path` 必须是本机已存在目录的绝对路径，测试其他项目时替换为对应路径。
+创建会写入当前配置的数据目录中的数据库；重复提交同一路径会返回已有工作空间。
+创建后再次发送上面的列表请求，即可查看结果。按 Ctrl+C 停止服务。
+
+### 响应与错误
+
+成功响应包含相同 `id` 和 `result`：
+
+```json
+{"id":"list-1","result":[]}
+```
+
+工作空间对象包含 `id`、`name`、`root_path`、`pinned_at`、`archived_at`、`created_at`、`updated_at`。
+时间使用 Unix 毫秒，未置顶和未归档的时间字段为 `null`。
+
+失败响应包含 `id` 和 `error`，例如：
+
+```json
+{"id":"request-1","error":{"code":"method_not_found","message":"未知方法: unknown"}}
+```
+
+错误码为 `parse_error`（JSON 无效）、`invalid_request`（请求结构无效）、
+`method_not_found`（方法不存在）、`invalid_params`（业务参数无效）和 `internal_error`（内部错误）。
+无法解析 JSON 或 `id` 无效时，响应的 `id` 为 `null`。
+单条请求失败后服务继续处理下一条；管道读写失败则结束服务并清理资源。
+没有请求级超时或取消指令；进程退出信号会取消正在处理的操作，并关闭标准输入输出以中断等待。
 
 ## 检查与构建
 

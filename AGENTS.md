@@ -51,7 +51,9 @@
 - internal/app：应用资源装配、持有和运行。
 - internal/config：配置解析、默认值和路径计算。
 - internal/logging：日志初始化、输出、轮转和关闭。
-- internal/storage/sqlite：SQLite 连接及初始化。
+- internal/storage/sqlite：SQLite 连接、迁移及工作空间持久化。
+- internal/workspace：工作空间参数校验、创建和列表查询规则。
+- internal/transport/stdio：逐行 JSON 请求解析、业务调用和响应输出。
 
 底层模块不得反向依赖 app 或 bootstrap。新增模块应保持职责清晰，避免循环依赖和跨层访问内部实现。
 
@@ -149,7 +151,7 @@
 
 ## 当前阶段与审查范围
 
-- 当前项目重点为 Go 服务的启动装配、配置、SQLite、日志和生命周期管理。
+- 当前项目重点为 Go 服务的启动装配、配置、SQLite、日志、生命周期、工作空间创建和查询，以及 stdio 通信。
 - Electron、进程通信、工作空间和对话等能力，在未进入明确任务范围时，不自动列为必须补齐的缺陷或待办。
 - 不强制引入 Web 框架、ORM、依赖注入框架或完整的分层体系。
 - 新增业务能力时，根据实际需求讨论目录、协议、数据模型和测试策略。
