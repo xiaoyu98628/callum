@@ -43,6 +43,9 @@ func Run(ctx context.Context, db *gorm.DB, models ...any) (err error) {
 			return err
 		}
 	case modelConfigVersion:
+		if err := validateModelConfig(tx, models); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("不支持数据库结构版本 %d", version)
 	}

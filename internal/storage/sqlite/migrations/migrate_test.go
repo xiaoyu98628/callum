@@ -86,7 +86,7 @@ func TestMigrationRollback(t *testing.T) {
 	if err := pool.QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_schema WHERE name IN ('model_providers', 'models')").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 || tables != 2 {
+	if version != 1 || tables != 2 {
 		t.Fatalf("具体迁移未完整提交: version=%d tables=%d", version, tables)
 	}
 }
@@ -106,17 +106,23 @@ func TestFutureVersionPreserved(t *testing.T) {
 	if err := db.DB.Raw("PRAGMA user_version").Scan(&initializedVersion).Error; err != nil {
 		t.Fatal(err)
 	}
-	if initializedVersion != 2 {
+	if initializedVersion != 1 {
 		t.Fatalf("新库结构版本错误: %d", initializedVersion)
 	}
-	if err := db.DB.WithContext(t.Context()).Exec("PRAGMA user_version = 3").Error; err != nil {
+	if err := db.DB.WithContext(t.Context()).Exec("PRAGMA user_version = 2").Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := sqlite.Open(t.Context(), path); err == nil {
-		t.Fatal("接受了更高版本")
+	opened, openErr := sqlite.Open(t.Context(), path)
+	if opened != nil {
+		if err := opened.Close(); err != nil {
+			t.Error(err)
+		}
+	}
+	if openErr == nil || !strings.Contains(openErr.Error(), "不支持数据库结构版本 2") {
+		t.Fatalf("未明确拒绝版本 2: %v", openErr)
 	}
 	pool, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -131,7 +137,7 @@ func TestFutureVersionPreserved(t *testing.T) {
 	if err := pool.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
+	if version != 2 {
 		t.Fatal("更高版本被修改")
 	}
 }
@@ -143,11 +149,11 @@ func TestUnsupportedExistingSchemaPreservesData(t *testing.T) {
 		wantError string
 	}{
 		{name: "缺少结构版本", version: 0, wantError: "缺少结构版本"},
-		{name: "整数主键结构", version: 1, wantError: "不支持数据库结构版本 1"},
+		{name: "整数主键结构", version: 1, wantError: "数据库主键结构与 UUIDv7 版本 1 不匹配"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path, pool := fixtureDatabase(t)
-			// 仅构造版本检查所需的旧结构和数据，不保留旧结构升级逻辑。
+			// 相同版本号的旧整数主键库必须被拒绝，并保留原有结构和数据。
 			const originalSchema = "CREATE TABLE model_providers (id INTEGER PRIMARY KEY, name TEXT NOT NULL)"
 			if _, err := pool.ExecContext(t.Context(), originalSchema); err != nil {
 				t.Fatal(err)
