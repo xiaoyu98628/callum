@@ -1,4 +1,4 @@
-package provider_test
+package sqlite_test
 
 import (
 	"context"
@@ -8,12 +8,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xiaoyu98628/callum/internal/database"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
+	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 )
 
 func TestWaitingForConnectionCanTimeout(t *testing.T) {
-	db, err := database.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
+	db, err := sqlite.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,7 +22,7 @@ func TestWaitingForConnectionCanTimeout(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	s, err := provider.NewStore(db.DB)
+	s, err := newService(db.DB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestWaitingForConnectionCanTimeout(t *testing.T) {
 }
 
 func TestGORMZeroValues(t *testing.T) {
-	db, err := database.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
+	db, err := sqlite.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +62,7 @@ func TestGORMZeroValues(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	s, err := provider.NewStore(db.DB)
+	s, err := newService(db.DB)
 	if err != nil {
 		t.Fatal(err)
 	}

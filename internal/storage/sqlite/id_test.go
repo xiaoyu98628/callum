@@ -1,15 +1,15 @@
-package provider_test
+package sqlite_test
 
 import (
 	"path/filepath"
 	"testing"
 
-	"github.com/xiaoyu98628/callum/internal/database"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
+	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 )
 
 func TestUUIDPrimaryKeysAndConstraints(t *testing.T) {
-	db, err := database.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
+	db, err := sqlite.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -18,7 +18,7 @@ func TestUUIDPrimaryKeysAndConstraints(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	store, err := provider.NewStore(db.DB)
+	store, err := newService(db.DB)
 	if err != nil {
 		t.Fatal(err)
 	}

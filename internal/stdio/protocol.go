@@ -74,13 +74,13 @@ func decodeParams(raw json.RawMessage, target any) *rpcError {
 	return nil
 }
 
-func (c *connection) reply(req request, result any, err *rpcError) error {
+func (c *Connection) reply(req request, result any, err *rpcError) error {
 	if req.ID == nil {
 		return nil
 	}
 	return c.send(response{JSONRPC: "2.0", ID: req.ID, Result: result, Error: err})
 }
 
-func (c *connection) notify(method string, params any) error {
+func (c *Connection) notify(method string, params any) error {
 	return c.send(notification{JSONRPC: "2.0", Method: method, Params: params})
 }

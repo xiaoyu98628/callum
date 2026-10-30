@@ -11,6 +11,7 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/app"
 	"github.com/xiaoyu98628/callum/internal/config"
+	"github.com/xiaoyu98628/callum/internal/stdio"
 )
 
 func main() {
@@ -32,7 +33,7 @@ func run() int {
 	defer stop()
 	// stdout 管道中断时通过 Write 错误进入资源清理，不由 SIGPIPE 直接终止进程。
 	signal.Ignore(syscall.SIGPIPE)
-	in, out, err := openStdio()
+	in, out, err := stdio.OpenStandardStreams()
 	if err != nil {
 		logger.Error("初始化标准输入输出失败", "module", "main", "error", err)
 		return 1

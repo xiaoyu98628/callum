@@ -1,32 +1,27 @@
-package provider
+package sqlite
 
 import (
 	"database/sql"
 	"errors"
 	"fmt"
 
+	"github.com/xiaoyu98628/callum/internal/model/provider"
 	"gorm.io/gorm"
-	"modernc.org/sqlite"
+	sqliteengine "modernc.org/sqlite"
 	sqlitelib "modernc.org/sqlite/lib"
 )
 
-var (
-	ErrNotFound      = errors.New("配置不存在")
-	ErrConflict      = errors.New("模型标识重复")
-	ErrReferenced    = errors.New("关联配置不存在或仍被引用")
-	ErrInvalidConfig = errors.New("配置无效")
-	ErrDisabled      = errors.New("模型已禁用")
-)
+// CatalogRepository 使用 GORM 实现厂商与模型配置存储，数据库所有权仍属于调用方。
+type CatalogRepository struct{ db *gorm.DB }
 
-// Store 使用调用方持有的 GORM 实例，不负责关闭数据库。
-type Store struct{ db *gorm.DB }
+var _ provider.Repository = (*CatalogRepository)(nil)
 
-// NewStore 创建配置访问对象，数据库所有权仍属于调用方。
-func NewStore(db *gorm.DB) (*Store, error) {
+// NewCatalogRepository 创建配置存储实现，不创建或关闭数据库。
+func NewCatalogRepository(db *gorm.DB) (*CatalogRepository, error) {
 	if db == nil {
 		return nil, errors.New("数据库连接不能为空")
 	}
-	return &Store{db: db}, nil
+	return &CatalogRepository{db: db}, nil
 }
 
 func storageError(err error) error {
@@ -34,17 +29,17 @@ func storageError(err error) error {
 		return nil
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, sql.ErrNoRows) {
-		return errors.Join(ErrNotFound, err)
+		return errors.Join(provider.ErrNotFound, err)
 	}
-	if e, ok := errors.AsType[*sqlite.Error](err); ok {
+	if e, ok := errors.AsType[*sqliteengine.Error](err); ok {
 		switch e.Code() {
 		case sqlitelib.SQLITE_CONSTRAINT_UNIQUE:
-			return errors.Join(ErrConflict, err)
+			return errors.Join(provider.ErrConflict, err)
 		case sqlitelib.SQLITE_CONSTRAINT_FOREIGNKEY, sqlitelib.SQLITE_CONSTRAINT_TRIGGER:
 			// 当前结构没有自定义触发器；SQLite 的 RESTRICT 外键检查可能返回触发器约束码。
-			return errors.Join(ErrReferenced, err)
+			return errors.Join(provider.ErrReferenced, err)
 		case sqlitelib.SQLITE_CONSTRAINT_CHECK, sqlitelib.SQLITE_CONSTRAINT_NOTNULL, sqlitelib.SQLITE_CONSTRAINT_DATATYPE:
-			return errors.Join(ErrInvalidConfig, err)
+			return errors.Join(provider.ErrInvalidConfig, err)
 		}
 	}
 	return fmt.Errorf("配置存储操作失败: %w", err)
@@ -55,7 +50,7 @@ func changed(result *gorm.DB) error {
 		return storageError(result.Error)
 	}
 	if result.RowsAffected == 0 {
-		return ErrNotFound
+		return provider.ErrNotFound
 	}
 	return nil
 }

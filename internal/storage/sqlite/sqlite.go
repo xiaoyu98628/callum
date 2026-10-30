@@ -1,4 +1,4 @@
-package database
+package sqlite
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"path/filepath"
 
+	"github.com/xiaoyu98628/callum/internal/storage/sqlite/migrations"
 	gormsqlite "gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -59,7 +60,7 @@ func Open(ctx context.Context, path string) (*Database, error) {
 	if err != nil {
 		return nil, errors.Join(err, pool.Close())
 	}
-	if err := migrate(ctx, db); err != nil {
+	if err := migrations.Run(ctx, db, &providerRecord{}, &modelRecord{}); err != nil {
 		return nil, errors.Join(err, pool.Close())
 	}
 	// 不将初始化上下文绑定在返回的 GORM 实例上。

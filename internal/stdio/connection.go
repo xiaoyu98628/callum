@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 )
@@ -20,9 +21,10 @@ const (
 
 var errSlowConsumer = errors.New("协议输出阻塞超过时限")
 
-// connection 持有输入输出，关闭必须能够中断正在进行的读写。
-// 有界队列统一串行输出，防止多个执行交叉写入一条 JSON。
-type connection struct {
+// Connection 持有标准流、取消信号和有界输出队列，统一串行输出协议消息。
+// 创建者必须停止请求处理及事件生产者后再调用 Close。
+type Connection struct {
+	parent       context.Context
 	ctx          context.Context
 	cancel       context.CancelCauseFunc
 	in           io.ReadCloser
@@ -32,18 +34,61 @@ type connection struct {
 	writeTimeout time.Duration
 	closeOnce    sync.Once
 	closeErr     error
+	watchDone    chan struct{}
+	stopWatch    func() bool
+	finishOnce   sync.Once
+	finishErr    error
 }
 
-func newConnection(ctx context.Context, in io.ReadCloser, out io.WriteCloser, timeout time.Duration) *connection {
+// NewConnection 接管输入输出并启动写入循环，Close 必须能够中断底层 Read/Write。
+// 外部取消或通信失败会关闭管道，创建失败时输入输出仍由调用方持有。
+func NewConnection(ctx context.Context, in io.ReadCloser, out io.WriteCloser) (*Connection, error) {
+	if in == nil || out == nil {
+		return nil, errors.New("协议输入输出不能为空")
+	}
+	parent := ctx
 	ctx, cancel := context.WithCancelCause(ctx)
-	return &connection{ctx: ctx, cancel: cancel, in: in, out: out, queue: make(chan []byte, outputQueueSize), done: make(chan struct{}), writeTimeout: timeout}
+	c := &Connection{parent: parent, ctx: ctx, cancel: cancel, in: in, out: out, queue: make(chan []byte, outputQueueSize), done: make(chan struct{}), writeTimeout: defaultWriteTimeout, watchDone: make(chan struct{})}
+	c.stopWatch = context.AfterFunc(ctx, func() { c.closeStreams(); close(c.watchDone) })
+	go c.writeLoop()
+	return c, nil
 }
 
-func (c *connection) closeStreams() {
+// Context 在父上下文取消或通信失败时结束，可作为执行管理器的运行上下文。
+func (c *Connection) Context() context.Context { return c.ctx }
+
+// Close 在连接正常时排空输出，关闭管道并保留通信与清理错误，可重复调用。
+// 调用前必须停止 Serve 与所有事件生产者，防止关闭队列后继续发送事件。
+func (c *Connection) Close() error {
+	c.finishOnce.Do(func() {
+		close(c.queue)
+		<-c.done
+		if !c.stopWatch() {
+			<-c.watchDone
+		}
+		c.closeStreams()
+		cause := context.Cause(c.ctx)
+		if c.parent.Err() != nil && errors.Is(cause, context.Cause(c.parent)) {
+			cause = nil
+		}
+		c.finishErr = errors.Join(cause, c.closeErr)
+		c.cancel(context.Canceled)
+	})
+	return c.finishErr
+}
+
+// 通信取消造成的读写错误由 Close 统一报告，避免覆盖原因或重复返回同一故障。
+func (c *Connection) normalizeError(err error) error {
+	if c.ctx.Err() != nil && (errors.Is(err, context.Cause(c.ctx)) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, os.ErrClosed)) {
+		return nil
+	}
+	return err
+}
+func (c *Connection) closeStreams() {
 	c.closeOnce.Do(func() { c.closeErr = errors.Join(c.in.Close(), c.out.Close()) })
 }
 
-func (c *connection) send(value any) error {
+func (c *Connection) send(value any) error {
 	data, err := json.Marshal(value)
 	if err != nil {
 		c.cancel(errors.New("协议响应编码失败"))
@@ -68,7 +113,7 @@ func (c *connection) send(value any) error {
 	}
 }
 
-func (c *connection) writeLoop() {
+func (c *Connection) writeLoop() {
 	defer close(c.done)
 	for data := range c.queue {
 		if c.ctx.Err() != nil {

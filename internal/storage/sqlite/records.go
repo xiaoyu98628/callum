@@ -1,8 +1,10 @@
-package provider
+package sqlite
 
-// ProviderRecord 映射 model_providers（模型厂商连接配置表），不直接作为通信返回值。
+import "github.com/xiaoyu98628/callum/internal/model/provider"
+
+// providerRecord 映射 model_providers（模型厂商连接配置表），不直接作为通信返回值。
 // 每条记录保存一组协议、地址和凭据，同一厂商可以配置多个连接。
-type ProviderRecord struct {
+type providerRecord struct {
 	// ID 是由服务端生成的 UUIDv7 主键，以标准小写文本保存。
 	ID string `gorm:"type:text;primaryKey;not null;check:ck_provider_id,id GLOB '????????-????-7???-[89ab]???-????????????' AND length(replace(id,'-','')) = 32 AND replace(id,'-','') NOT GLOB '*[^0-9a-f]*'"`
 	// Name 是厂商连接的展示名称，不要求唯一。
@@ -20,10 +22,26 @@ type ProviderRecord struct {
 }
 
 // TableName 指定模型厂商连接配置表名，避免依赖 GORM 的默认命名推断。
-func (ProviderRecord) TableName() string { return "model_providers" }
+func (providerRecord) TableName() string { return "model_providers" }
 
-// ModelRecord 映射 models（模型配置表），与客户端展示结构分开。
-type ModelRecord struct {
+// providerSummary 是厂商公开查询的数据库投影，既不读取明文凭据，也不让 ORM 映射业务类型。
+type providerSummary struct {
+	ID        string
+	Name      string
+	Protocol  string
+	BaseURL   string
+	HasAPIKey bool
+	CreatedAt int64
+	UpdatedAt int64
+}
+
+func (r providerSummary) toProvider() provider.Provider {
+	return provider.Provider{ID: r.ID, Name: r.Name, Protocol: r.Protocol, BaseURL: r.BaseURL,
+		HasAPIKey: r.HasAPIKey, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
+}
+
+// modelRecord 映射 models（模型配置表），与客户端展示结构分开。
+type modelRecord struct {
 	// ID 是客户端选择模型时使用的 UUIDv7 本地主键，由服务端生成。
 	ID string `gorm:"type:text;primaryKey;not null;check:ck_model_id,id GLOB '????????-????-7???-[89ab]???-????????????' AND length(replace(id,'-','')) = 32 AND replace(id,'-','') NOT GLOB '*[^0-9a-f]*'"`
 	// ProviderID 关联厂商连接，并与 RemoteModelID 组成联合唯一索引。
@@ -43,43 +61,40 @@ type ModelRecord struct {
 	// ModelType 以 JSON 数组保存用户选中的功能，必须属于 Capabilities 中明确支持的功能。
 	ModelType []string `gorm:"type:text;serializer:json;not null;default:('[]');check:ck_model_type,json_valid(model_type) AND json_type(model_type) = 'array'"`
 	// ReasoningLevels 保存推理等级的展示名称和远端值；NULL 表示未知，空数组表示没有选项。
-	ReasoningLevels []ReasoningLevel `gorm:"type:text;serializer:json;check:ck_reasoning_levels,reasoning_levels IS NULL OR (json_valid(reasoning_levels) AND json_type(reasoning_levels) = 'array')"`
+	ReasoningLevels []provider.ReasoningLevel `gorm:"type:text;serializer:json;check:ck_reasoning_levels,reasoning_levels IS NULL OR (json_valid(reasoning_levels) AND json_type(reasoning_levels) = 'array')"`
 	// CreatedAt 是创建时间，使用 UTC Unix 毫秒时间戳。
 	CreatedAt int64 `gorm:"not null;autoCreateTime:milli"`
 	// UpdatedAt 是最近更新时间，使用 UTC Unix 毫秒时间戳。
 	UpdatedAt int64 `gorm:"not null;autoUpdateTime:milli"`
 	// Provider 定义外键关系；仍被模型引用的厂商连接不能删除，不随模型读写自动保存关联。
-	Provider *ProviderRecord `gorm:"foreignKey:ProviderID;references:ID;constraint:OnDelete:RESTRICT" json:"-"`
+	Provider *providerRecord `gorm:"foreignKey:ProviderID;references:ID;constraint:OnDelete:RESTRICT" json:"-"`
 }
 
 // TableName 指定模型配置表名。
-func (ModelRecord) TableName() string { return "models" }
+func (modelRecord) TableName() string { return "models" }
 
 // toRecord 将配置转为数据库记录，统一将未选择功能保存为空数组。
-func toRecord(in ModelInput) ModelRecord {
+func toRecord(in provider.ModelInput) modelRecord {
 	types := in.ModelType
 	if types == nil {
 		types = []string{}
 	}
-	return ModelRecord{
+	return modelRecord{
 		ProviderID: in.ProviderID, DisplayName: in.DisplayName, RemoteModelID: in.RemoteModelID,
 		Enabled: new(in.Enabled), ContextWindow: in.ContextWindow, MaxOutputTokens: in.MaxOutputTokens,
 		Capabilities: in.Capabilities, ModelType: types, ReasoningLevels: in.ReasoningLevels,
 	}
 }
 
-// fromRecord 还原并校验持久化配置，避免将无效记录用于展示或运行配置解析。
-func fromRecord(row ModelRecord) (Model, error) {
+// fromRecord 还原数据库映射并检查必需的启用值，配置业务校验由 provider.Service 负责。
+func fromRecord(row modelRecord) (provider.Model, error) {
 	if row.Enabled == nil {
-		return Model{}, ErrInvalidConfig
+		return provider.Model{}, provider.ErrInvalidConfig
 	}
-	in := ModelInput{
+	in := provider.ModelInput{
 		ProviderID: row.ProviderID, DisplayName: row.DisplayName, RemoteModelID: row.RemoteModelID,
 		Enabled: *row.Enabled, ContextWindow: row.ContextWindow, MaxOutputTokens: row.MaxOutputTokens,
 		Capabilities: row.Capabilities, ModelType: row.ModelType, ReasoningLevels: row.ReasoningLevels,
 	}
-	if err := validateModel(in); err != nil {
-		return Model{}, err
-	}
-	return Model{ModelInput: in, ID: row.ID, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}, nil
+	return provider.Model{ModelInput: in, ID: row.ID, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt}, nil
 }

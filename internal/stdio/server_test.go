@@ -8,12 +8,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/xiaoyu98628/callum/internal/database"
+	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
 )
@@ -46,32 +45,46 @@ type peer struct {
 	cancel     context.CancelFunc
 }
 
-func storeForTest(t *testing.T) *provider.Store {
+func storeForTest(t *testing.T) *provider.Service {
 	t.Helper()
-	db, err := database.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
+	service, err := provider.NewService(&memoryRepository{providers: make(map[string]provider.ProviderInput), models: make(map[string]provider.Model)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	store, err := provider.NewStore(db.DB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return store
+	return service
 }
-func serverForTest(t *testing.T, store *provider.Store) *Server {
+
+type serverFixture struct {
+	providers    *provider.Service
+	resolve      inference.Resolver
+	writeTimeout time.Duration
+}
+
+func serverForTest(t *testing.T, providers *provider.Service) *serverFixture {
 	t.Helper()
-	server, err := New(store, func(context.Context, string) (model.Client, string, error) { return testClient{}, "remote", nil }, Options{MaxConcurrentRuns: 2, CallTimeout: time.Second}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return server
+	return &serverFixture{providers: providers, resolve: func(context.Context, string) (model.Client, string, error) { return testClient{}, "remote", nil }, writeTimeout: defaultWriteTimeout}
 }
-func openPeer(t *testing.T, server *Server) *peer {
+
+// 测试装配独立的连接和执行管理器，遵循应用中的关闭顺序。
+func (f *serverFixture) Serve(ctx context.Context, in io.ReadCloser, out io.WriteCloser) (retErr error) {
+	connection, err := NewConnection(ctx, in, out)
+	if err != nil {
+		return err
+	}
+	connection.writeTimeout = f.writeTimeout
+	defer func() { retErr = errors.Join(retErr, connection.Close()) }()
+	runs, err := inference.New(connection.Context(), f.resolve, 2, time.Second, connection.Emit)
+	if err != nil {
+		return err
+	}
+	defer runs.Close()
+	server, err := New(f.providers, runs, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	if err != nil {
+		return err
+	}
+	return server.Serve(connection)
+}
+func openPeer(t *testing.T, server *serverFixture) *peer {
 	t.Helper()
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
@@ -324,6 +337,19 @@ func TestCleanupAndBrokenOutputErrorsPreserved(t *testing.T) {
 	err = server.Serve(t.Context(), io.NopCloser(strings.NewReader("")), failingWrite{writeErr})
 	if !errors.Is(err, writeErr) {
 		t.Fatalf("写入错误丢失: %v", err)
+	}
+}
+
+func TestConnectionCloseIsRepeatableAndPreservesCleanupError(t *testing.T) {
+	closeErr := errors.New("关闭输入失败")
+	connection, err := NewConnection(t.Context(), failingClose{Reader: strings.NewReader(""), err: closeErr}, discardCloser{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := connection.Close(); !errors.Is(err, closeErr) {
+			t.Fatalf("重复关闭丢失清理错误: %v", err)
+		}
 	}
 }
 

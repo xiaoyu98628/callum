@@ -1,4 +1,4 @@
-package provider_test
+package sqlite_test
 
 import (
 	"context"
@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/xiaoyu98628/callum/internal/config"
-	"github.com/xiaoyu98628/callum/internal/database"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
+	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 )
 
 func TestCatalogPersistenceAndConstraints(t *testing.T) {
@@ -20,7 +20,7 @@ func TestCatalogPersistenceAndConstraints(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := cfg.DatabasePath
-	db, err := database.Open(t.Context(), path)
+	db, err := sqlite.Open(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +30,7 @@ func TestCatalogPersistenceAndConstraints(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	s, err := provider.NewStore(db.DB)
+	s, err := newService(db.DB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +85,7 @@ func TestCatalogPersistenceAndConstraints(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	db, err = database.Open(t.Context(), path)
+	db, err = sqlite.Open(t.Context(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestCatalogPersistenceAndConstraints(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	s, err = provider.NewStore(db.DB)
+	s, err = newService(db.DB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestCatalogPersistenceAndConstraints(t *testing.T) {
 }
 
 func TestUnknownAndEmptyMetadata(t *testing.T) {
-	db, err := database.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
+	db, err := sqlite.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestUnknownAndEmptyMetadata(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	s, err := provider.NewStore(db.DB)
+	s, err := newService(db.DB)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -68,6 +68,9 @@ func New(ctx context.Context, resolve Resolver, limit int, timeout time.Duration
 	return &Manager{ctx: ctx, resolve: resolve, emit: emit, limit: limit, timeout: timeout, runs: make(map[string]*execution)}, nil
 }
 
+// Limits 返回创建时确定的最大并发数和单次调用超时，供调用方展示运行限制。
+func (m *Manager) Limits() (int, time.Duration) { return m.limit, m.timeout }
+
 // Start 校验并解析配置，accepted 成功后异步执行；接受失败时不调用模型。
 // ctx 只控制配置解析，执行使用 Manager 的运行上下文与独立超时。
 func (m *Manager) Start(ctx context.Context, in Request, accepted func(string) error) error {

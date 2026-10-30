@@ -8,7 +8,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model/provider"
 )
 
-func (s *Server) invoke(ctx context.Context, c *connection, manager *inference.Manager, req request) error {
+func (s *Server) invoke(ctx context.Context, c *Connection, req request) error {
 	var p struct {
 		ModelID  string `json:"model_id"`
 		Stream   *bool  `json:"stream"`
@@ -33,7 +33,7 @@ func (s *Server) invoke(ctx context.Context, c *connection, manager *inference.M
 		}
 		in.Messages = append(in.Messages, model.Message{Role: message.Role, Content: *message.Content})
 	}
-	err := manager.Start(ctx, in, func(id string) error { return c.reply(req, map[string]any{"run_id": id}, nil) })
+	err := s.runs.Start(ctx, in, func(id string) error { return c.reply(req, map[string]any{"run_id": id}, nil) })
 	if err != nil {
 		return c.reply(req, nil, publicError(err, true))
 	}
@@ -53,12 +53,12 @@ func (s *Server) catalog(ctx context.Context, req request) (any, *rpcError) {
 			return nil, invalidParams()
 		}
 		if req.Method == "provider.delete" {
-			if err := s.store.DeleteProvider(ctx, p.ID); err != nil {
+			if err := s.providers.DeleteProvider(ctx, p.ID); err != nil {
 				return nil, publicError(err, false)
 			}
 			return idResult{p.ID}, nil
 		}
-		row, err := s.store.GetProvider(ctx, p.ID)
+		row, err := s.providers.GetProvider(ctx, p.ID)
 		if err != nil {
 			return nil, publicError(err, false)
 		}
@@ -67,7 +67,7 @@ func (s *Server) catalog(ctx context.Context, req request) (any, *rpcError) {
 		if err := decodeParams(req.Params, &struct{}{}); err != nil {
 			return nil, err
 		}
-		rows, err := s.store.ListProviders(ctx)
+		rows, err := s.providers.ListProviders(ctx)
 		if err != nil {
 			return nil, publicError(err, false)
 		}
@@ -87,12 +87,12 @@ func (s *Server) catalog(ctx context.Context, req request) (any, *rpcError) {
 			return nil, invalidParams()
 		}
 		if req.Method == "model.delete" {
-			if err := s.store.DeleteModel(ctx, p.ID); err != nil {
+			if err := s.providers.DeleteModel(ctx, p.ID); err != nil {
 				return nil, publicError(err, false)
 			}
 			return idResult{p.ID}, nil
 		}
-		row, err := s.store.GetModel(ctx, p.ID)
+		row, err := s.providers.GetModel(ctx, p.ID)
 		if err != nil {
 			return nil, publicError(err, false)
 		}
@@ -104,7 +104,7 @@ func (s *Server) catalog(ctx context.Context, req request) (any, *rpcError) {
 		if err := decodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
-		rows, err := s.store.ListModels(ctx, p.SelectableOnly)
+		rows, err := s.providers.ListModels(ctx, p.SelectableOnly)
 		if err != nil {
 			return nil, publicError(err, false)
 		}
@@ -124,7 +124,7 @@ func (s *Server) catalog(ctx context.Context, req request) (any, *rpcError) {
 		if !provider.ValidID(p.ID) || p.Enabled == nil {
 			return nil, invalidParams()
 		}
-		if err := s.store.SetModelEnabled(ctx, p.ID, *p.Enabled); err != nil {
+		if err := s.providers.SetModelEnabled(ctx, p.ID, *p.Enabled); err != nil {
 			return nil, publicError(err, false)
 		}
 		return idResult{p.ID}, nil
@@ -149,7 +149,7 @@ func (s *Server) saveProvider(ctx context.Context, req request) (any, *rpcError)
 		if p.ID != "" {
 			return nil, invalidParams()
 		}
-		id, err := s.store.CreateProvider(ctx, in)
+		id, err := s.providers.CreateProvider(ctx, in)
 		if err != nil {
 			return nil, publicError(err, false)
 		}
@@ -158,7 +158,7 @@ func (s *Server) saveProvider(ctx context.Context, req request) (any, *rpcError)
 	if !provider.ValidID(p.ID) {
 		return nil, invalidParams()
 	}
-	if err := s.store.UpdateProvider(ctx, p.ID, in); err != nil {
+	if err := s.providers.UpdateProvider(ctx, p.ID, in); err != nil {
 		return nil, publicError(err, false)
 	}
 	return idResult{p.ID}, nil
@@ -180,7 +180,7 @@ func (s *Server) saveModel(ctx context.Context, req request) (any, *rpcError) {
 		if p.ID != "" {
 			return nil, invalidParams()
 		}
-		id, err := s.store.CreateModel(ctx, in)
+		id, err := s.providers.CreateModel(ctx, in)
 		if err != nil {
 			return nil, publicError(err, false)
 		}
@@ -189,7 +189,7 @@ func (s *Server) saveModel(ctx context.Context, req request) (any, *rpcError) {
 	if !provider.ValidID(p.ID) {
 		return nil, invalidParams()
 	}
-	if err := s.store.UpdateModel(ctx, p.ID, in); err != nil {
+	if err := s.providers.UpdateModel(ctx, p.ID, in); err != nil {
 		return nil, publicError(err, false)
 	}
 	return idResult{p.ID}, nil

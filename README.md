@@ -42,15 +42,22 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | --- | --- | --- |
 | `internal/model` | 业务使用的模型接口、请求、响应、流式事件和错误类型 | 已实现文本接口 |
 | `internal/model/adapter/chatcompletions` | Chat Completions 请求、认证、响应转换和流式解析 | 已实现，含模拟测试 |
-| `internal/model/provider` | 厂商连接、模型规格、启用设置、GORM 映射及运行配置解析 | 已实现配置持久化 |
+| `internal/model/provider` | 厂商与模型配置类型、业务校验、UUIDv7 分配、启用规则及存储接口 | 已实现业务服务 |
 | `internal/config` | 应用数据目录与数据库路径计算 | 已实现模块路径配置 |
-| `internal/database` | SQLite 连接池、私有文件检查和结构迁移 | 已实现 |
+| `internal/storage/sqlite` | SQLite 连接池、私有文件检查、GORM 映射及配置存储 | 已实现 |
+| `internal/storage/sqlite/migrations` | 事务建表、结构版本检查及迁移测试 | 已实现 |
 | `internal/app` | 启动装配、运行配置解析与适配器创建、资源清理 | 已实现 |
-| `internal/stdio` | 逐行 JSON 协议、接口参数转换、响应与事件输出 | 已实现 |
+| `internal/stdio` | 标准流适配、逐行 JSON 协议、接口参数转换、响应与事件输出 | 已实现 |
 | `internal/inference` | 模型调用并发限制、执行标识、超时与独立取消 | 已实现 |
 
 普通对话、Agent 调度、工具和上下文管理模块随对应功能引入。
 其他协议和供应商兼容差异按实际需求接入。
+
+`provider.Service` 通过该业务包定义的 `Repository` 接口访问配置，SQLite 包实现该接口。
+GORM 映射和驱动错误处理集中在存储包，业务服务不导入 ORM 或数据库驱动。
+stdio 将协议参数转换为业务输入，调用注入的配置服务和执行管理器；
+执行管理器只依赖统一模型接口，具体适配器由 app 中的工厂装配。
+app 创建连接、配置服务及执行管理器，并负责资源关闭顺序；程序入口处理参数、信号和退出码。
 
 ## 厂商与模型配置持久化
 
@@ -59,11 +66,23 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 因此新增这些依赖。官方方言接收显式创建的 modernc 连接池，支持 `CGO_ENABLED=0`；
 `mattn/go-sqlite3` 是方言的间接依赖，本模块不使用它建立连接。
 
-模块调用顺序为 `config.LoadArgs(args)` / `config.Load(dataDir)` → `database.Open(ctx, cfg.DatabasePath)` →
-`provider.NewStore(db.DB)`。`database.Open` 成功后，创建者负责调用 `db.Close()`，
-`Store` 只使用传入的 GORM 实例，不关闭数据库。`Close` 可以重复调用。
+配置存储的装配顺序为 `config.LoadArgs(args)` / `config.Load(dataDir)` →
+`sqlite.Open(ctx, cfg.DatabasePath)` → `sqlite.NewCatalogRepository(db.DB)` → `provider.NewService(repository)`。
+数据库打开成功后由创建者调用 `db.Close()`；存储实现使用传入的 GORM 实例，
+业务服务使用传入的存储接口，二者均不关闭数据库。数据库 `Close` 可以重复调用。
+`sqlite.Open` 将 `records.go` 中的 GORM 表映射传给 `migrations.Run`；
+迁移逻辑及其测试集中在独立目录，迁移包不反向导入 SQLite 存储包，也不重复定义表映射。
+`migrations/migrate.go` 负责版本判断、事务和回滚；
+`migrations/000002_create_model_config.go` 负责创建厂商表、模型表及其约束和索引。
+新库执行该具体迁移后，在同一事务中记录结构版本；已有版本 `2` 的数据库跳过建表步骤。
 初始化失败会关闭此前创建的连接池；初始化上下文不绑定到运行时实例，
 每次配置操作都接收自己的 `context.Context`。
+
+通信装配由 app 创建 `stdio.Connection`，再使用连接的运行上下文和事件回调创建 `inference.Manager`，
+最后将配置服务和执行管理器注入 `stdio.Server`。`Server.Serve` 返回后，
+app 依次关闭执行管理器、协议连接、HTTP 空闲连接及数据库；关闭连接前执行管理器会取消并等待全部任务，
+连接随后排空可发送的终态事件。外部取消或通信失败时，连接会关闭标准流以解除阻塞。
+macOS/Linux 标准流副本与非阻塞标志的恢复封装在 stdio 模块，入口不直接操作文件描述符。
 
 ### 数据路径与访问权限
 
@@ -104,7 +123,7 @@ API Key 按已确认的方案保存在 SQLite 中，数据库没有额外加密�
 `provider_id` 使用同一格式；客户端按字符串传递本地 ID，不能自行指定新记录的 ID。
 UUID 生成复用 `github.com/google/uuid v1.6.0`，已从间接依赖改为直接依赖，版本不变。
 时间戳继续使用 UTC 毫秒。SQLite 没有原生表、字段 COMMENT 元数据，
-`records.go` 中的中文注释用于源码说明，不会作为数据库注释保存。
+`internal/storage/sqlite/records.go` 中的中文注释用于源码说明，不会作为数据库注释保存。
 协议、根地址和凭据属于厂商配置；当前只允许 `chatcompletions` 协议。
 同一厂商可以配置多个连接，厂商名称不强制唯一；同一厂商配置下的远端模型标识必须唯一。
 模型通过外键关联厂商，仍有模型引用时不能删除厂商。
@@ -140,12 +159,11 @@ Token 容量未知时保存 SQL `NULL`，填写时必须大于零，不自动推
 
 数据库使用 STRICT 表、外键约束、联合唯一索引及字段检查约束。
 结构版本保存在 SQLite `user_version` 中，当前版本为 `2`。
-首次建表及版本更新在同一写事务中执行，失败时回滚；
-已有配置表但没有结构版本，或数据库版本高于程序支持版本时会返回错误并保留原数据。
-版本 `1` 的整数主键数据库会在事务中升级为 UUIDv7 主键，并重新映射厂商关联。
-配置、密钥、JSON 原文、NULL 值和时间戳保留；失败时恢复旧表、索引、记录及版本。
-迁移成功后旧整数 ID 不再有效，调用方需要重新查询模型列表。旧表存在自定义索引或触发器时，
-程序拒绝自动迁移并保留数据，避免丢失额外结构。
+新库直接创建 UUIDv7 表结构，并在同一写事务中将结构版本设置为 `2`，失败时回滚。
+已有版本 `2` 的 UUID 数据库可继续使用，初始化不会重新分配记录标识。
+版本 `1` 的整数主键结构不再提供自动升级；已有配置表但没有结构版本，
+或版本不受支持时会返回错误并保留原有数据、结构和版本号，不自动删除或重建数据库。
+开发时可通过 `--data-dir` 指向独立的新数据目录。
 启动不使用 `AutoMigrate` 自动改写已有业务表；后续结构变化需要增加版本迁移与兼容测试。
 
 连接池上限为一个连接，外键检查和 5 秒锁等待对每个连接生效。
@@ -301,15 +319,17 @@ CGO_ENABLED=0 go build -mod=readonly -tags release -o bin/callum ./cmd/callum
 这些模拟测试不能替代具体供应商端点的真实 API 联调。
 
 持久化测试仅使用临时数据库，覆盖配置读写与重新打开、凭据保留和清空、JSON 空值、
-GORM 零值更新、UUIDv7 主键约束、模型禁用、关联删除限制、上下文取消、迁移回滚、
-整数主键升级及并发初始化、访问权限。通信与执行测试覆盖响应顺序、协议错误、独立取消、
-并发限制、超时、输出阻塞和清理错误。应用集成测试通过本机模拟 HTTP 服务验证
+GORM 零值更新、UUIDv7 主键约束、模型禁用、关联删除限制、上下文取消、初始化回滚、
+不支持的旧结构拒绝及数据保留、并发初始化和访问权限。配置业务测试使用存储替身验证业务规则与上下文传递；
+协议测试通过业务服务和内存存储替身验证请求映射，不依赖 SQLite。
+通信与执行测试覆盖响应顺序、协议错误、独立取消、并发限制、超时、输出阻塞和清理错误。
+应用集成测试通过真实临时 SQLite 与本机模拟 HTTP 服务验证
 “保存配置 → 查询 → 生成 → 并发与取消 → 重启读取”的调用链，不调用真实模型 API。
 运行该测试需要允许监听本机临时回环端口。
 可单独执行：
 
 ```sh
-go test -mod=readonly -race -timeout 60s ./internal/config ./internal/database ./internal/model/provider
-go test -mod=readonly -tags release -race -timeout 60s ./internal/config ./internal/database ./internal/model/provider
-CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config ./internal/database ./internal/model/provider
+go test -mod=readonly -race -timeout 60s ./internal/config ./internal/model/provider ./internal/storage/sqlite/... ./internal/stdio ./internal/inference
+go test -mod=readonly -tags release -race -timeout 60s ./internal/config ./internal/model/provider ./internal/storage/sqlite/... ./internal/stdio ./internal/inference
+CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config ./internal/model/provider ./internal/storage/sqlite/... ./internal/stdio ./internal/inference
 ```

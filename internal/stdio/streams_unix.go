@@ -1,6 +1,6 @@
 //go:build darwin || linux
 
-package main
+package stdio
 
 import (
 	"errors"
@@ -94,7 +94,8 @@ func restoreTogether(in, out *pollableFile) {
 	in.afterClose, out.afterClose = afterClose, afterClose
 }
 
-func openStdio() (io.ReadCloser, io.WriteCloser, error) {
+// OpenStandardStreams 创建可取消的标准流副本，接收方负责关闭；原始标准流保持打开。
+func OpenStandardStreams() (io.ReadCloser, io.WriteCloser, error) {
 	in, err := newPollableFile(os.Stdin)
 	if err != nil {
 		return nil, nil, err
