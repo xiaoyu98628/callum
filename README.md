@@ -42,20 +42,33 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | --- | --- | --- |
 | `internal/model` | 业务使用的模型接口、请求、响应、流式事件和错误类型 | 已实现文本接口 |
 | `internal/model/adapter/chatcompletions` | Chat Completions 请求、认证、响应转换和流式解析 | 已实现，含模拟测试 |
-| `internal/model/provider` | 厂商与模型配置类型、业务校验、UUIDv7 分配、启用规则及存储接口 | 已实现业务服务 |
-| `internal/config` | 应用数据目录与数据库路径计算 | 已实现模块路径配置 |
-| `internal/storage/sqlite` | SQLite 连接池、私有文件检查、GORM 映射及配置存储 | 已实现 |
+| `internal/model/provider` | 厂商与模型配置类型、存储接口、错误与标识校验 | 已实现契约 |
+| `internal/model/provider/service` | 配置业务校验、UUIDv7 分配及启用规则 | 已实现业务服务 |
+| `internal/config` | 应用配置加载及启动参数 | 已实现 |
+| `internal/config/paths` | 开发与发布构建的数据路径计算 | 已实现 |
+| `internal/storage/sqlite` | SQLite 连接池与私有文件检查 | 已实现 |
+| `internal/storage/sqlite/schema` | 仓储与迁移共用的 GORM 表映射 | 已实现 |
+| `internal/storage/sqlite/catalog` | 厂商与模型配置仓储、映射转换及存储错误处理 | 已实现 |
 | `internal/storage/sqlite/migrations` | 事务建表、结构版本检查及迁移测试 | 已实现 |
 | `internal/app` | 启动装配、运行配置解析与适配器创建、资源清理 | 已实现 |
-| `internal/stdio` | 标准流适配、逐行 JSON 协议、接口参数转换、响应与事件输出 | 已实现 |
-| `internal/inference` | 模型调用并发限制、执行标识、超时与独立取消 | 已实现 |
+| `internal/stdio` | 通信服务入口、就绪信息及请求路由 | 已实现 |
+| `internal/stdio/protocol` | JSON-RPC 消息结构及请求、参数解析 | 已实现 |
+| `internal/stdio/transport` | 标准流适配、连接、输出队列及通信关闭 | 已实现 |
+| `internal/stdio/catalog` | 厂商与模型配置接口、参数和业务错误转换 | 已实现 |
+| `internal/stdio/execution` | 模型调用、取消接口及执行事件转换 | 已实现 |
+| `internal/inference` | 模型调用请求、执行事件及错误契约 | 已实现 |
+| `internal/inference/executor` | 模型调用并发限制、执行标识、超时与独立取消 | 已实现 |
 
 普通对话、Agent 调度、工具和上下文管理模块随对应功能引入。
 其他协议和供应商兼容差异按实际需求接入。
 
-`provider.Service` 通过该业务包定义的 `Repository` 接口访问配置，SQLite 包实现该接口。
+目录按业务与职责划分；契约保留在模块根包，具体业务、存储和通信实现进入职责明确的子包。
+测试跟随对应实现，跨模块测试通过公开入口组装；不为规划能力创建空包或占位实现。
+
+`provider/service.Service` 通过 `provider.Repository` 接口访问配置，由 `sqlite/catalog.Repository` 实现该接口。
 GORM 映射和驱动错误处理集中在存储包，业务服务不导入 ORM 或数据库驱动。
-stdio 将协议参数转换为业务输入，调用注入的配置服务和执行管理器；
+stdio 路由调用 catalog、execution 接口处理器，后者将协议参数转换为业务输入；
+protocol 和 transport 包不依赖配置业务、模型执行或 stdio 根包。
 执行管理器只依赖统一模型接口，具体适配器由 app 中的工厂装配。
 app 创建连接、配置服务及执行管理器，并负责资源关闭顺序；程序入口处理参数、信号和退出码。
 
@@ -67,10 +80,11 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 `mattn/go-sqlite3` 是方言的间接依赖，本模块不使用它建立连接。
 
 配置存储的装配顺序为 `config.LoadArgs(args)` / `config.Load(dataDir)` →
-`sqlite.Open(ctx, cfg.DatabasePath)` → `sqlite.NewCatalogRepository(db.DB)` → `provider.NewService(repository)`。
+`sqlite.Open(ctx, cfg.DatabasePath)` → `catalog.NewRepository(db.DB)` → `providerservice.New(repository)`。
+这里的 `catalog` 为 `internal/storage/sqlite/catalog`，`providerservice` 为 `internal/model/provider/service` 的导入别名。
 数据库打开成功后由创建者调用 `db.Close()`；存储实现使用传入的 GORM 实例，
 业务服务使用传入的存储接口，二者均不关闭数据库。数据库 `Close` 可以重复调用。
-`sqlite.Open` 将 `records.go` 中的 GORM 表映射传给 `migrations.Run`；
+`sqlite.Open` 将 `schema.Provider`、`schema.Model` 的 GORM 表映射传给 `migrations.Run`；
 迁移逻辑及其测试集中在独立目录，迁移包不反向导入 SQLite 存储包，也不重复定义表映射。
 `migrations/migrate.go` 负责版本判断、事务和回滚；
 `migrations/000001_create_model_config.go` 负责创建厂商表、模型表及其约束和索引，以及已有库的主键类型检查。
@@ -78,11 +92,12 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 初始化失败会关闭此前创建的连接池；初始化上下文不绑定到运行时实例，
 每次配置操作都接收自己的 `context.Context`。
 
-通信装配由 app 创建 `stdio.Connection`，再使用连接的运行上下文和事件回调创建 `inference.Manager`，
+通信装配由 app 通过 `transport.New` 创建连接，再使用连接的运行上下文创建 `executor.Manager`；
+执行事件通过 `execution.Emit` 转换，调用连接的 `Notify` 排队输出，传输包不识别业务事件。
 最后将配置服务和执行管理器注入 `stdio.Server`。`Server.Serve` 返回后，
 app 依次关闭执行管理器、协议连接、HTTP 空闲连接及数据库；关闭连接前执行管理器会取消并等待全部任务，
 连接随后排空可发送的终态事件。外部取消或通信失败时，连接会关闭标准流以解除阻塞。
-macOS/Linux 标准流副本与非阻塞标志的恢复封装在 stdio 模块，入口不直接操作文件描述符。
+macOS/Linux 标准流副本与非阻塞标志的恢复封装在 `stdio/transport`，入口不直接操作文件描述符。
 
 ### 数据路径与访问权限
 
@@ -92,7 +107,7 @@ macOS/Linux 标准流副本与非阻塞标志的恢复封装在 stdio 模块，�
 | 带 `-tags release` 的发布构建 | `config.Load("")` 自动解析为用户家目录下 `.callum/callum.db` |
 | 自动化测试 | 每个测试使用 `t.TempDir()` 下独立的数据子目录 |
 
-构建选择由 `internal/config/mode_dev.go`（`!release`）和 `mode_release.go`（`release`）控制，
+构建选择由 `internal/config/paths/dev.go`（`!release`）和 `internal/config/paths/release.go`（`release`）控制，
 调用方继续使用 `config.Load(dataDir)`，无需传递运行模式或修改源代码。
 显式指定的数据目录始终优先，相对路径按当前工作目录解析。
 开发默认路径从当前工作目录向上查找模块标识为 `github.com/xiaoyu98628/callum` 的 `go.mod`，
@@ -123,7 +138,7 @@ API Key 按已确认的方案保存在 SQLite 中，数据库没有额外加密�
 `provider_id` 使用同一格式；客户端按字符串传递本地 ID，不能自行指定新记录的 ID。
 UUID 生成复用 `github.com/google/uuid v1.6.0`，已从间接依赖改为直接依赖，版本不变。
 时间戳继续使用 UTC 毫秒。SQLite 没有原生表、字段 COMMENT 元数据，
-`internal/storage/sqlite/records.go` 中的中文注释用于源码说明，不会作为数据库注释保存。
+`internal/storage/sqlite/schema` 中的中文注释用于源码说明，不会作为数据库注释保存。
 协议、根地址和凭据属于厂商配置；当前只允许 `chatcompletions` 协议。
 同一厂商可以配置多个连接，厂商名称不强制唯一；同一厂商配置下的远端模型标识必须唯一。
 模型通过外键关联厂商，仍有模型引用时不能删除厂商。
@@ -330,7 +345,7 @@ GORM 零值更新、UUIDv7 主键约束、模型禁用、关联删除限制、�
 可单独执行：
 
 ```sh
-go test -mod=readonly -race -timeout 60s ./internal/config ./internal/model/provider ./internal/storage/sqlite/... ./internal/stdio ./internal/inference
-go test -mod=readonly -tags release -race -timeout 60s ./internal/config ./internal/model/provider ./internal/storage/sqlite/... ./internal/stdio ./internal/inference
-CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config ./internal/model/provider ./internal/storage/sqlite/... ./internal/stdio ./internal/inference
+go test -mod=readonly -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/...
+go test -mod=readonly -tags release -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/...
+CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/...
 ```

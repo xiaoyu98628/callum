@@ -1,12 +1,14 @@
 //go:build release
 
-package config
+package config_test
 
 import (
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/xiaoyu98628/callum/internal/config"
 )
 
 func TestReleaseDefaultDataDir(t *testing.T) {
@@ -14,7 +16,7 @@ func TestReleaseDefaultDataDir(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
 	t.Chdir(t.TempDir())
-	cfg, err := Load("")
+	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +32,7 @@ func TestReleaseMissingHomeReturnsError(t *testing.T) {
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "")
 	t.Chdir(t.TempDir())
-	if _, err := Load(""); err == nil {
+	if _, err := config.Load(""); err == nil {
 		t.Fatal("家目录缺失时应返回错误")
 	}
 }
@@ -39,7 +41,7 @@ func TestReleaseRejectsRelativeHome(t *testing.T) {
 	t.Setenv("HOME", "relative-home")
 	t.Setenv("USERPROFILE", "relative-home")
 	t.Chdir(t.TempDir())
-	if _, err := Load(""); err == nil {
+	if _, err := config.Load(""); err == nil {
 		t.Fatal("家目录为相对路径时应返回错误")
 	}
 }

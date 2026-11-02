@@ -1,12 +1,14 @@
 //go:build !release
 
-package config
+package config_test
 
 import (
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/xiaoyu98628/callum/internal/config"
 )
 
 func TestDevelopmentDefaultDataDir(t *testing.T) {
@@ -22,7 +24,7 @@ func TestDevelopmentDefaultDataDir(t *testing.T) {
 	// 开发默认路径无需访问用户家目录。
 	t.Setenv("HOME", "")
 	t.Setenv("USERPROFILE", "")
-	cfg, err := Load("")
+	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +49,7 @@ func TestDevelopmentUsesCallumModuleRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Chdir(other)
-	cfg, err := Load("")
+	cfg, err := config.Load("")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +67,7 @@ func TestDevelopmentMissingRootDoesNotFallBackToHome(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	if _, err := Load(""); err == nil {
+	if _, err := config.Load(""); err == nil {
 		t.Fatal("未找到 Callum 根目录时应返回错误")
 	}
 	if _, err := os.Stat(filepath.Join(home, ".callum")); !errors.Is(err, os.ErrNotExist) {

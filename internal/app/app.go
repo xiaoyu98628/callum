@@ -9,9 +9,13 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/config"
 	"github.com/xiaoyu98628/callum/internal/inference"
-	"github.com/xiaoyu98628/callum/internal/model/provider"
+	"github.com/xiaoyu98628/callum/internal/inference/executor"
+	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
 	"github.com/xiaoyu98628/callum/internal/stdio"
+	"github.com/xiaoyu98628/callum/internal/stdio/execution"
+	"github.com/xiaoyu98628/callum/internal/stdio/transport"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
+	"github.com/xiaoyu98628/callum/internal/storage/sqlite/catalog"
 )
 
 // Run 持有数据库、HTTP 连接池和输入输出，初始化失败或运行结束时均负责清理。
@@ -36,24 +40,24 @@ func Run(ctx context.Context, cfg config.Config, in io.ReadCloser, out io.WriteC
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, db.Close()) }()
-	repository, err := sqlite.NewCatalogRepository(db.DB)
+	repository, err := catalog.NewRepository(db.DB)
 	if err != nil {
 		return err
 	}
-	providers, err := provider.NewService(repository)
+	providers, err := providerservice.New(repository)
 	if err != nil {
 		return err
 	}
-	client, transport := newHTTPClient(cfg.MaxConcurrentRuns)
-	defer transport.CloseIdleConnections()
+	client, httpTransport := newHTTPClient(cfg.MaxConcurrentRuns)
+	defer httpTransport.CloseIdleConnections()
 	resolve := newModelResolver(providers, client)
-	connection, err := stdio.NewConnection(ctx, in, out)
+	connection, err := transport.New(ctx, in, out)
 	if err != nil {
 		return err
 	}
 	owned = false
 	defer func() { retErr = errors.Join(retErr, connection.Close()) }()
-	runs, err := inference.New(connection.Context(), resolve, cfg.MaxConcurrentRuns, cfg.CallTimeout, connection.Emit)
+	runs, err := executor.New(connection.Context(), resolve, cfg.MaxConcurrentRuns, cfg.CallTimeout, func(event inference.Event) error { return execution.Emit(connection.Notify, event) })
 	if err != nil {
 		return err
 	}

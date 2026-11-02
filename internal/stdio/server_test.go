@@ -13,8 +13,13 @@ import (
 	"time"
 
 	"github.com/xiaoyu98628/callum/internal/inference"
+	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
+	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
+	"github.com/xiaoyu98628/callum/internal/stdio/execution"
+	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
+	"github.com/xiaoyu98628/callum/internal/stdio/transport"
 )
 
 type testClient struct{}
@@ -29,12 +34,16 @@ func (testClient) Stream(_ context.Context, _ model.Request, emit func(model.Eve
 	return emit(model.Event{Type: model.EventCompleted, RequestID: "provider-id"})
 }
 
+type idResult struct {
+	ID string `json:"id"`
+}
+
 type frame struct {
 	ID     json.RawMessage `json:"id"`
 	Method string          `json:"method"`
 	Result json.RawMessage `json:"result"`
 	Params json.RawMessage `json:"params"`
-	Error  *rpcError       `json:"error"`
+	Error  *protocol.Error `json:"error"`
 }
 type peer struct {
 	input      *io.PipeWriter
@@ -45,9 +54,9 @@ type peer struct {
 	cancel     context.CancelFunc
 }
 
-func storeForTest(t *testing.T) *provider.Service {
+func storeForTest(t *testing.T) *providerservice.Service {
 	t.Helper()
-	service, err := provider.NewService(&memoryRepository{providers: make(map[string]provider.ProviderInput), models: make(map[string]provider.Model)})
+	service, err := providerservice.New(&memoryRepository{providers: make(map[string]provider.ProviderInput), models: make(map[string]provider.Model)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,25 +64,23 @@ func storeForTest(t *testing.T) *provider.Service {
 }
 
 type serverFixture struct {
-	providers    *provider.Service
-	resolve      inference.Resolver
-	writeTimeout time.Duration
+	providers *providerservice.Service
+	resolve   inference.Resolver
 }
 
-func serverForTest(t *testing.T, providers *provider.Service) *serverFixture {
+func serverForTest(t *testing.T, providers *providerservice.Service) *serverFixture {
 	t.Helper()
-	return &serverFixture{providers: providers, resolve: func(context.Context, string) (model.Client, string, error) { return testClient{}, "remote", nil }, writeTimeout: defaultWriteTimeout}
+	return &serverFixture{providers: providers, resolve: func(context.Context, string) (model.Client, string, error) { return testClient{}, "remote", nil }}
 }
 
 // 测试装配独立的连接和执行管理器，遵循应用中的关闭顺序。
 func (f *serverFixture) Serve(ctx context.Context, in io.ReadCloser, out io.WriteCloser) (retErr error) {
-	connection, err := NewConnection(ctx, in, out)
+	connection, err := transport.New(ctx, in, out)
 	if err != nil {
 		return err
 	}
-	connection.writeTimeout = f.writeTimeout
 	defer func() { retErr = errors.Join(retErr, connection.Close()) }()
-	runs, err := inference.New(connection.Context(), f.resolve, 2, time.Second, connection.Emit)
+	runs, err := executor.New(connection.Context(), f.resolve, 2, time.Second, func(event inference.Event) error { return execution.Emit(connection.Notify, event) })
 	if err != nil {
 		return err
 	}
@@ -95,7 +102,7 @@ func openPeer(t *testing.T, server *serverFixture) *peer {
 		defer close(p.readerDone)
 		defer close(p.frames)
 		scanner := bufio.NewScanner(outR)
-		scanner.Buffer(make([]byte, 4096), maxResponseBytes+2)
+		scanner.Buffer(make([]byte, 4096), transport.MaxResponseBytes+2)
 		for scanner.Scan() {
 			var f frame
 			if json.Unmarshal(scanner.Bytes(), &f) != nil {
@@ -286,16 +293,6 @@ func TestResponsePrecedesStreamingAndGenerateEvents(t *testing.T) {
 }
 
 func TestBlockedOutputAndInputCancellation(t *testing.T) {
-	t.Run("输出阻塞", func(t *testing.T) {
-		server := serverForTest(t, storeForTest(t))
-		server.writeTimeout = 30 * time.Millisecond
-		outR, outW := io.Pipe()
-		defer outR.Close()
-		err := server.Serve(t.Context(), io.NopCloser(strings.NewReader("")), outW)
-		if !errors.Is(err, errSlowConsumer) {
-			t.Fatalf("未报告阻塞: %v", err)
-		}
-	})
 	t.Run("输入阻塞时取消", func(t *testing.T) {
 		server := serverForTest(t, storeForTest(t))
 		p := openPeer(t, server)
@@ -303,7 +300,7 @@ func TestBlockedOutputAndInputCancellation(t *testing.T) {
 	})
 	t.Run("超长输入", func(t *testing.T) {
 		server := serverForTest(t, storeForTest(t))
-		err := server.Serve(t.Context(), io.NopCloser(strings.NewReader(strings.Repeat("x", maxRequestBytes+10))), discardCloser{})
+		err := server.Serve(t.Context(), io.NopCloser(strings.NewReader(strings.Repeat("x", transport.MaxRequestBytes+10))), discardCloser{})
 		if err == nil {
 			t.Fatal("超长请求未拒绝")
 		}
@@ -342,7 +339,7 @@ func TestCleanupAndBrokenOutputErrorsPreserved(t *testing.T) {
 
 func TestConnectionCloseIsRepeatableAndPreservesCleanupError(t *testing.T) {
 	closeErr := errors.New("关闭输入失败")
-	connection, err := NewConnection(t.Context(), failingClose{Reader: strings.NewReader(""), err: closeErr}, discardCloser{})
+	connection, err := transport.New(t.Context(), failingClose{Reader: strings.NewReader(""), err: closeErr}, discardCloser{})
 	if err != nil {
 		t.Fatal(err)
 	}

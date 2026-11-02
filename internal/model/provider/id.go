@@ -1,8 +1,6 @@
 package provider
 
 import (
-	"fmt"
-
 	"github.com/google/uuid"
 )
 
@@ -10,12 +8,4 @@ import (
 func ValidID(id string) bool {
 	u, err := uuid.Parse(id)
 	return err == nil && u.Version() == 7 && u.Variant() == uuid.RFC4122 && u.String() == id
-}
-
-func newID() (string, error) {
-	id, err := uuid.NewV7()
-	if err != nil {
-		return "", fmt.Errorf("生成模型配置标识失败: %w", err)
-	}
-	return id.String(), nil
 }
