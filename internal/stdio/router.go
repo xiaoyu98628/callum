@@ -30,6 +30,10 @@ func (s *Server) handle(c *transport.Connection, line []byte) (bool, error) {
 	if strings.HasPrefix(req.Method, "conversation.") && s.conversation != nil {
 		return false, s.conversation.Handle(ctx, req, reply)
 	}
+	if strings.HasPrefix(req.Method, "approval.") && s.approvals != nil {
+		value, err := s.approvals.Handle(ctx, req)
+		return false, reply(value, err)
+	}
 	var result any
 	var rpcErr *protocol.Error
 	stop := false

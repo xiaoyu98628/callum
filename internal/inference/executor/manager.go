@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
+	scheduler "github.com/xiaoyu98628/callum/internal/agent/executor"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
-	"github.com/xiaoyu98628/callum/internal/run"
-	scheduler "github.com/xiaoyu98628/callum/internal/run/executor"
 )
 
 // Manager 为兼容的无历史模型调用提供入口，与普通对话共享执行调度器。
@@ -63,9 +63,9 @@ func (m *Manager) Start(ctx context.Context, in inference.Request, accepted func
 	lease, err := m.scheduler.ReserveContext(ctx, id, "")
 	if err != nil {
 		switch {
-		case errors.Is(err, run.ErrBusy):
+		case errors.Is(err, agent.ErrBusy):
 			return inference.ErrBusy
-		case errors.Is(err, run.ErrClosed):
+		case errors.Is(err, agent.ErrClosed):
 			return inference.ErrClosed
 		default:
 			return err

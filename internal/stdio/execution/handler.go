@@ -4,18 +4,18 @@ import (
 	"context"
 	"time"
 
+	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
-	runservice "github.com/xiaoyu98628/callum/internal/run/service"
 	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
 )
 
 // Handler 处理模型调用和独立取消，不负责创建或关闭执行器。
 type Handler struct {
 	runs       *executor.Manager
-	persistent *runservice.Engine
+	persistent *agentservice.Engine
 	accepted   func(string) error
 }
 
@@ -23,7 +23,7 @@ type Handler struct {
 func New(runs *executor.Manager) *Handler { return &Handler{runs: runs} }
 
 // NewPersistent 使用共享调度器入口和持久化运行服务。
-func NewPersistent(runs *executor.Manager, persistent *runservice.Engine, accepted func(string) error) *Handler {
+func NewPersistent(runs *executor.Manager, persistent *agentservice.Engine, accepted func(string) error) *Handler {
 	return &Handler{runs: runs, persistent: persistent, accepted: accepted}
 }
 

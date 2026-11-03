@@ -10,8 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/config"
-	"github.com/xiaoyu98628/callum/internal/run"
 )
 
 func TestManualTitleWinsAndIncompleteAnswerKeepsUsage(t *testing.T) {
@@ -95,7 +95,7 @@ func TestManualTitleWinsAndIncompleteAnswerKeepsUsage(t *testing.T) {
 	rid := resultString(t, failed, "run_id")
 	p.event(t, "run.failed")
 	rows := readMessages(t, p, convID)
-	if len(rows) != 4 || rows[3].Status != run.Failed || rows[3].CompletedAt != nil || rows[3].Content[0].Text != "未完成内容" {
+	if len(rows) != 4 || rows[3].Status != agent.Failed || rows[3].CompletedAt != nil || rows[3].Content[0].Text != "未完成内容" {
 		t.Fatalf("不完整回答被当成成功: %+v", rows)
 	}
 	stepID := resultStringFromSteps(t, p.call(t, "step.list", map[string]any{"run_id": rid}))

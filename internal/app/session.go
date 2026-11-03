@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/xiaoyu98628/callum/internal/run"
-	"github.com/xiaoyu98628/callum/internal/run/executor"
+	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/agent/executor"
 )
 
 // sessionRuns 只登记本连接发起的执行；登记发生在受理响应之前。
@@ -26,7 +26,7 @@ func (s *sessionRuns) Register(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
-		return run.ErrClosed
+		return agent.ErrClosed
 	}
 	if err := s.ctx.Err(); err != nil {
 		return err

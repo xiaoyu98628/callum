@@ -13,6 +13,9 @@ type Config struct {
 	DatabasePath      string
 	MaxConcurrentRuns int
 	CallTimeout       time.Duration
+	// ApprovalMode 是审批策略：auto-read 自动放行工作区只读工具，always 逐次询问。
+	ApprovalMode string
+	ToolTimeout  time.Duration
 }
 
 // Load 优先使用显式目录；未指定时根据构建标签选择默认目录。
@@ -24,5 +27,5 @@ func Load(dataDir string) (Config, error) {
 		return Config{}, err
 	}
 	return Config{DataDir: abs, DatabasePath: filepath.Join(abs, "callum.db"),
-		MaxConcurrentRuns: DefaultMaxConcurrentRuns, CallTimeout: DefaultCallTimeout}, nil
+		MaxConcurrentRuns: DefaultMaxConcurrentRuns, CallTimeout: DefaultCallTimeout, ApprovalMode: "auto-read", ToolTimeout: 30 * time.Second}, nil
 }

@@ -2,6 +2,7 @@ package chatcompletions
 
 import (
 	"encoding/json"
+	"maps"
 	"strings"
 
 	"github.com/xiaoyu98628/callum/internal/model"
@@ -38,6 +39,7 @@ type streamCapture struct {
 	message    map[string]json.RawMessage
 	text       map[string]*strings.Builder
 	usage      json.RawMessage
+	calls      toolCallCapture
 	extensions map[string][]json.RawMessage
 }
 
@@ -112,6 +114,10 @@ func (c *streamCapture) add(raw string) error {
 				c.text[key] = builder
 			}
 			builder.WriteString(text)
+		} else if key == "tool_calls" {
+			if err := c.calls.add(value); err != nil {
+				return err
+			}
 		} else if key == "role" {
 			c.message[key] = value
 		} else {
@@ -137,6 +143,16 @@ func (c *streamCapture) result(requestID string) (model.Response, error) {
 			result.Text = builder.String()
 		}
 	}
+	if calls, err := c.calls.result(); err != nil {
+		return result, err
+	} else if len(calls) > 0 {
+		c.message["tool_calls"] = calls
+	}
+	if raw := c.choice["finish_reason"]; len(raw) > 0 {
+		if err := json.Unmarshal(raw, &result.FinishReason); err != nil {
+			return result, model.ErrInvalidResponse
+		}
+	}
 	message, err := json.Marshal(c.message)
 	if err != nil {
 		return result, err
@@ -158,6 +174,7 @@ func (c *streamCapture) result(requestID string) (model.Response, error) {
 	if err != nil {
 		return result, err
 	}
+	maps.Copy(c.extensions, c.calls.unknown)
 	result.Output, err = capturedOutput("stream_result", response, c.extensions)
 	if result.Text != "" {
 		result.Content = []model.Block{{Type: "text", Text: result.Text}}
@@ -197,4 +214,9 @@ func mergeLogprobs(previous, next json.RawMessage) (json.RawMessage, error) {
 		}
 	}
 	return json.Marshal(fields)
+}
+
+func (c *streamCapture) messageJSON() json.RawMessage {
+	value, _ := json.Marshal(c.message)
+	return value
 }

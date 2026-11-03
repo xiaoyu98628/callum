@@ -21,7 +21,7 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 适配器通过运行时配置接收 API 根地址和凭据，并由调用方传入 HTTP 客户端，
 请求中的模型 ID 使用远端模型 ID。连接池由调用方管理，每次请求的超时与取消通过 `context.Context` 传递。
 适配器不会自行读取 `OPENAI_*` 环境变量，也不会继承其中的组织、项目或自定义请求头。
-普通对话支持文本和本地图片输入；图片输出、工具执行与上下文压缩尚未接入。非流式请求失败时可能返回部分文本，
+普通对话支持文本和本地图片输入；已接通工作区只读工具、模型自主工具调用与审批；图片输出与上下文压缩尚未接入。非流式请求失败时可能返回部分文本，
 流式事件的接收方应以 `Stream` 返回 `nil` 作为整个调用成功的依据。
 非流式响应和流式分片都会校验消息结构及所消费字段的 JSON 类型，合法空文本仍可正常返回。
 非流式响应体关闭失败会作为调用错误返回，并保留同时发生的读取、解析或供应商错误。
@@ -37,7 +37,7 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 3. **Agent 与工具**：实现工具注册、参数与权限校验、工具执行，以及结果回传模型的执行循环。
 4. **上下文压缩与恢复**：管理历史摘要和压缩版本，触发规则另行确定；中断状态已持久化，不自动重试执行。
 
-已确认的表结构、事件和后续功能约定见 [对话设计](docs/design/conversations.md)。当前已完成模型接入和普通对话，工具交互及压缩随对应阶段引入。
+已确认的表结构、事件和后续功能约定见 [对话设计](docs/design/conversations.md)。当前已完成模型接入、普通对话、只读工具循环及审批；补充输入、更多工具和压缩随对应功能引入。
 
 当前模块与后续规划按职责组织如下：
 
@@ -63,12 +63,16 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | `internal/inference/executor` | 兼容无历史调用，复用统一运行调度 | 已实现 |
 | `internal/workspace/service` | 工作区管理、软删除和恢复 | 已实现 |
 | `internal/conversation/service`、`history` | 会话管理、发送与重发、标题和来源指纹 | 已实现 |
-| `internal/run/executor`、`service` | 统一调度、模型调用、并行标题及终态保存 | 已实现 |
-| `internal/run/events` | 有界事件订阅、过滤及慢订阅者隔离 | 已实现 |
-| `internal/storage/sqlite/workspace`、`conversation`、`run` | 普通对话仓储及跨表事务 | 已实现 |
+| `internal/agent/executor`、`service` | 统一调度、模型与工具循环、并行标题及终态保存 | 已实现 |
+| `internal/agent/approval` | 审批快照、决定及等待协调 | 已实现 |
+| `internal/tool/registry`、`executor` | 工具注册、规范化、权限边界及执行 | 已实现 |
+| `internal/tool/builtin/filesystem` | 目录查看、按行读取、字面文本搜索 | 已实现 |
+| `internal/stdio/approval` | 审批查询和决定接口 | 已实现 |
+| `internal/agent/events` | 有界事件订阅、过滤及慢订阅者隔离 | 已实现 |
+| `internal/storage/sqlite/workspace`、`conversation`、`agent` | 普通对话仓储及跨表事务 | 已实现 |
 | `internal/stdio/workspace`、`conversation` | 工作区和对话接口 | 已实现 |
 
-工具、审批、补充输入和上下文压缩模块随对应功能引入。
+补充输入和上下文压缩模块随对应功能引入。工具和审批业务不依赖 stdio，后续入口复用同一 Agent 与审批服务。
 其他协议和供应商兼容差异按实际需求接入。
 
 目录按业务与职责划分；契约保留在模块根包，具体业务、存储和通信实现进入职责明确的子包。
@@ -93,18 +97,18 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 这里的 `catalog` 为 `internal/storage/sqlite/catalog`，`providerservice` 为 `internal/model/provider/service` 的导入别名。
 数据库打开成功后由创建者调用 `db.Close()`；存储实现使用传入的 GORM 实例，
 业务服务使用传入的存储接口，二者均不关闭数据库。数据库 `Close` 可以重复调用。
-`sqlite.Open` 将配置、工作区、会话、消息、运行和步骤的 GORM 表映射传给 `migrations.Run`；
+`sqlite.Open` 将配置、工作区、会话、消息、运行、步骤和审批的 GORM 表映射传给 `migrations.Run`；
 迁移逻辑及其测试集中在独立目录，迁移包不反向导入 SQLite 存储包，也不重复定义表映射。
 `migrations/migrate.go` 负责版本判断、事务和回滚；
 `migrations/000001_create_model_config.go` 负责创建厂商表、模型表及其约束和索引，以及已有库的主键类型检查。
-`000002_create_conversation_core.go` 创建普通对话五张表。新库顺序执行两个迁移后，在同一事务中记录版本 `2`；版本 `1` 的 UUIDv7 配置库通过检查后保留配置并升级。
+`000002_create_conversation_core.go` 创建普通对话五张表。`000003_create_run_approvals.go` 增加审批表及步骤组合唯一索引。新库顺序执行三个迁移后，在同一事务中记录版本 `3`；已有版本 `1`、`2` 的库通过检查后保留配置和对话并升级。
 初始化失败会关闭此前创建的连接池；初始化上下文不绑定到运行时实例，
 每次配置操作都接收自己的 `context.Context`。
 
 `app.New(ctx, cfg, logger)` 创建独立运行时，不需要 stdin/stdout。运行时持有数据库、实例锁、HTTP 连接池、
 共享调度器和事件发布器；初始化上下文仅用于启动，已接受的执行使用应用运行上下文。
 `Providers()`、`Workspaces()`、`Conversations()`、`Runs()` 返回业务服务，`Invoke` 提供无历史调用，
-`Cancel` 请求独立取消。无历史调用和普通对话共享运行及实际模型请求的并发限制。
+`Approvals()` 返回审批查询与决定服务，`Cancel` 请求独立取消。无历史调用和普通对话共享运行及实际模型请求的并发限制。
 调用 `Send` 或 `Invoke` 时，`accepted` 回调获得执行标识；回调成功后才启动执行和发布执行事件。
 回调失败时释放预留容量，已写入的普通对话执行保存为取消状态。
 
@@ -198,11 +202,11 @@ Token 容量未知时保存 SQL `NULL`，填写时必须大于零，不自动推
 ### 迁移与并发
 
 数据库使用 STRICT 表、外键约束、联合唯一索引及字段检查约束。
-结构版本保存在 SQLite `user_version` 中，当前版本为 `2`，与迁移文件编号一致。
-新库在同一写事务中建立配置与普通对话结构并记录版本 `2`，失败时回滚。
+结构版本保存在 SQLite `user_version` 中，当前版本为 `3`，与迁移文件编号一致。
+新库在同一写事务中建立配置、普通对话与审批结构并记录版本 `3`，失败时回滚。
 已有版本 `1` 的数据库会检查两张配置表均使用单列 `TEXT` 类型的 `id` 主键，检查通过后继续使用，
 不会重新分配记录标识，随后增加普通对话表。曾使用相同版本号的整数主键结构会被拒绝，不提供自动升级。
-版本 `2` 还会检查对话表的字段、类型、约束和索引；历史同版本号但缺少相应结构的库会被拒绝。
+版本 `2` 升级时增加审批表及组合唯一索引，版本 `3` 还会检查审批结构、唯一索引列及外键；对话表继续检查字段、类型、约束和索引；历史同版本号但缺少相应结构的库会被拒绝。
 已有配置表但没有结构版本、结构检查失败，
 或版本不受支持时会返回错误并保留原有数据、结构和版本号，不自动删除或重建数据库。
 开发时可通过 `--data-dir` 指向独立的新数据目录。
@@ -213,8 +217,8 @@ Token 容量未知时保存 SQL `NULL`，填写时必须大于零，不自动推
 每次配置操作传递调用方上下文；查询结果读取完成后释放连接，
 `Resolve` 通过一次关联查询读取厂商和模型，不在等待模型响应期间持有连接或事务。
 
-服务启动后持有数据库旁的 `callum.db.lock` 文件锁。同一数据库只允许一个运行中的服务实例，多个客户端窗口共享这个 Go 进程。
-取得实例锁后，将遗留活动执行及步骤标记为 `interrupted`，保留已保存内容；终止确认时间为本次恢复时间，不推测实际崩溃时刻，也不自动重试。
+应用在迁移和恢复之前取得数据库旁的 `callum.db.lock` 文件锁，并持有到资源关闭。同一数据库只允许一个运行中的服务实例，多个客户端窗口共享这个 Go 进程。
+取得实例锁后，将遗留活动执行及步骤标记为 `interrupted`，将待审批记录标记为 `cancelled`，保留已保存内容及已经作出的决定；终止确认时间为本次恢复时间，不推测实际崩溃时刻，也不自动重试。
 关闭时释放锁，锁文件可以保留。初始化失败和重复关闭均释放本进程拥有的资源。
 
 ## 运行
@@ -233,7 +237,9 @@ go run ./cmd/callum
 | --- | --- | --- |
 | `--data-dir` | 按构建标签选择 | 显式数据目录优先，相对路径按工作目录计算 |
 | `--max-concurrent-runs` | `4` | 同时执行的调用上限，范围 `1` 至 `64`，超出时立即返回忙碌错误 |
-| `--call-timeout` | `5m` | 单次模型执行超时，包含配置解析，必须大于零 |
+| `--call-timeout` | `5m` | 普通对话每次模型请求超时；兼容 `model.invoke` 仍按配置解析及调用整体计时，必须大于零 |
+| `--approval-mode` | `auto-read` | 授权工作区只读工具自动放行；`always` 为每次调用审批 |
+| `--tool-timeout` | `30s` | 单次工具执行超时，必须大于零 |
 
 运行数量和实际模型请求数量分别受同一个配置上限约束；标题使用空闲模型请求容量，不排队争用。
 活动任务占满运行容量时立即返回忙碌；已确定终态的任务正在清理时，允许在受理请求的短期超时内等待其释放。
@@ -276,7 +282,8 @@ go run ./cmd/callum --max-concurrent-runs 2 --call-timeout 3m
 
 `messages` 是完整文本消息数组，包含 `role` 和 `content`，支持 `system`、`user`、`assistant`，
 每次最多 256 条。这是兼容的 `model.invoke` 接口约定，不补充历史、不保存执行记录，`model_type` 必须为空。
-普通对话允许启用 `image_input`，要求 capabilities 明确支持；推理参数和工具执行尚未接入，选择这些功能会被拒绝。
+普通对话允许启用 `image_input`、`tools`，要求 capabilities 明确支持。`tools` 是工具能力启用开关，具体是否调用、调用哪个工具和参数由模型决定；推理参数尚未接入。
+只有绑定有效工作区的对话才向模型提供文件工具，未绑定工作区时仍可普通问答。用户提问不需要携带工具名称或调用参数。
 Token 容量字段只是配置元数据，当前不做 Token 估算或设置输出 Token 参数。
 
 每次调用重新查询厂商和模型配置，不在网络等待期间占用数据库连接。
@@ -327,7 +334,7 @@ step.data 默认、最大分段为 64 KiB，最小 4 字节，返回 fragment、
 会话内 sequence 从 1 开始，不使用 parent_message_id。跨表关系使用外键、唯一约束和事务校验。
 
 默认标题为首条问题文字去首尾空白后前 30 个 Unicode 码点，英文按字母、空格、标点计数，仅图片默认“新对话”。
-标题调用与首次回答并行，使用当前模型，最多 10 秒；容量不足时跳过，主回答结束即取消并等待尚未完成的标题任务。
+标题调用与首次回答并行，使用当前模型，最多 10 秒且受模型请求超时约束；容量不足时跳过，主回答结束即取消并等待尚未完成的标题任务。
 标题成功通过 conversation.updated 更新；人工改名和问题内容变化会阻止旧标题覆盖。标题失败不导致回答失败。
 
 正文与消息状态保存在 conversation_messages，模型原始结果和 usage 保存在具体 model_call 步骤。
@@ -360,7 +367,7 @@ content 示例：`[{"type":"text","text":"分析图片"},{"type":"image","path":
 状态落库后通知；若终态持久化失败，run.failed 明确附带 persisted=false，表示数据库终态未确认，不能按成功保存处理。
 原始大结果不随每次步骤通知重复发送。重新打开会话通过消息、运行和步骤查询恢复展示。
 工作区、会话有未结束执行时，禁止归档、删除和移动等影响执行的操作；标题及置顶可在执行中修改。
-等待审批、用户补充输入、工具输出和压缩事件属于后续功能，当前不发送。
+工具与审批使用 `step.created`、`step.updated`、`run.updated`、`approval.requested`、`approval.updated`；补充输入和压缩事件属于后续功能，当前不发送。
 
 联调示例（替换响应中的实际 ID，保持 stdin 打开）：
 
@@ -455,7 +462,60 @@ GORM 零值更新、UUIDv7 主键约束、模型禁用、关联删除限制、�
 可单独执行：
 
 ```sh
-go test -mod=readonly -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/run/...
-go test -mod=readonly -tags release -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/run/...
-CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/run/...
+go test -mod=readonly -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/agent/...
+go test -mod=readonly -tags release -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/agent/...
+CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/agent/...
 ```
+
+
+## Agent 工具与审批
+
+`internal/agent` 接替原 `internal/run` 的执行管理职责，并编排模型与工具循环；数据库表名、`run_id` 和现有事件名称保持兼容。
+模型收到工具定义后自主选择是否调用；流式参数全部组装并校验后，Go 才执行权限判断及操作。
+内置 `list_directory`、`read_file`、`search_text`，同轮工具按模型返回顺序串行执行，工具步骤以该轮 `model_call` 为父步骤。
+模型步骤保存实际请求参数、可用工具定义和上下文指纹，不重复保存整套历史或凭据。流式工具调用的供应商未知扩展字段按属性保留。
+每次回答最多 8 轮模型调用、32 次工具调用，总模型正文仍受 1 MiB 上限约束；辅助标题独立记录，不计入回答轮次。
+每轮模型请求单独取得并释放请求槽位。审批等待不设置过期时间，也不持有事务或模型请求槽位；由用户决定或执行取消结束等待，仍占用全局活动执行容量和会话互斥。
+
+工具路径必须是工作区内的相对路径，通过 `os.Root` 固定根句柄并阻止 `..`、绝对路径及越界符号链接。
+单个文本文件最多读取 1 MiB；`read_file` 默认读取 200 行、单次最多 1000 行；工具结果最多 64 KiB，参数最多 16 KiB。
+`list_directory` 默认返回 100 项、最多 200 项。`search_text` 执行字面匹配，默认最多 50 条、可设至 100 条；
+最多检查 1000 个路径、32 层深度和累计 8 MiB 文件内容，跳过符号链接与 `.git`，通过 `truncated` 表示省略。
+实际读取和搜索仍可能因文件被删除、权限变化或内容不再可读而失败，工具失败以结构化结果回传模型。
+
+工具调用轮中的文本和原始模型结果保存在模型步骤。回答消息在工具调用轮结束后清空占位内容，下一轮继续流式输出，
+客户端应以 `message.updated` 替换当前消息内容；成功结束后消息表保存最终回答。
+模型与工具步骤额外保存统一的 `context_message`，后续对话恢复完整调用和结果配对；摘要标题不进入工具轨迹。
+上下文轨迹读取前检查总大小和数量，不加载全部原始模型响应；编辑重发后旧工具审计保留，但旧分支不再进入上下文。
+每次真实模型请求分别保存原始 usage，不累计估算值。
+
+审批表为 `conversation_run_approvals`：`id`、`run_id`、唯一 `step_id`、JSON `request`、`request_hash`、`status`、
+`decided_by`、`decision_note`、`created_at`、`updated_at`、`decided_at`。
+`request` 是 Go 生成的工具定义、工作区与规范化参数快照，SHA-256 绑定此次操作；客户端只能提交决定及说明。
+`ApprovalMode` 是审批策略，`auto-read` 自动放行工作区内只读操作，步骤记录权限判定，不创建虚假的用户批准记录；`always` 下三个工具也逐次审批。
+模型请求及工具执行仍分别受 `--call-timeout`、`--tool-timeout` 限制；审批等待没有超时配置。
+审批状态为 `pending`、`approved`、`rejected`、`cancelled`。批准后再次校验权限与取消信号，并在事务中认领尚未执行的工具步骤。
+相同决定重复提交保持幂等，冲突决定返回错误；本机用户决定记录为 `local_user`，不是外部身份认证。
+拒绝转为结构化结果交回模型，同一执行内相同规范化操作不会再次请求审批或自动执行。
+取消或关闭会结束等待，保存待审批记录的取消状态；已批准的记录保留，批准不表示操作已完成。
+重启只恢复中断状态，不自动重试工具。
+
+手工验证时使用独立开发数据目录，已有厂商配置后创建支持工具的模型，并绑定工作区：
+
+```sh
+go run ./cmd/callum --data-dir .callum/dev-approval --approval-mode always
+```
+
+```json
+{"jsonrpc":"2.0","id":"1","method":"model.create","params":{"provider_id":"<provider_id>","display_name":"工具模型","remote_model_id":"<remote_model_id>","enabled":true,"capabilities":{"tools":true},"model_type":["tools"]}}
+{"jsonrpc":"2.0","id":"2","method":"workspace.create","params":{"name":"项目","root_path":"/absolute/path/to/project"}}
+{"jsonrpc":"2.0","id":"3","method":"conversation.send","params":{"model_id":"<model_id>","workspace_id":"<workspace_id>","stream":true,"content":[{"type":"text","text":"读取 main.go 并解释它的作用"}]}}
+{"jsonrpc":"2.0","id":"4","method":"approval.list","params":{"run_id":"<run_id>","status":"pending"}}
+{"jsonrpc":"2.0","id":"5","method":"approval.get","params":{"id":"<approval_id>"}}
+{"jsonrpc":"2.0","id":"6","method":"approval.decide","params":{"approval_id":"<approval_id>","decision":"approved","decision_note":"允许本次读取"}}
+```
+
+收到 `approval.requested` 后查看其中 `approval.request`，批准或以 `decision: "rejected"` 拒绝；审批 ID 来自通知或查询，
+每次 `conversation.send` 的受理响应仍先于该执行事件。保持 stdin 打开直到终态，`approval.updated` 表示决定已保存，`run.completed` 才表示整次执行成功。
+`Runtime.Approvals()` 提供相同业务能力，其他通信入口无需复用 JSON-RPC 类型。
+目前工具协议已通过本机模拟验证，真实供应商工具端点尚未验证；文件写入、命令执行、MCP、插件、补充输入及上下文压缩仍属于后续范围。

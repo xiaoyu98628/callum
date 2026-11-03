@@ -6,8 +6,8 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/xiaoyu98628/callum/internal/agent/events"
 	"github.com/xiaoyu98628/callum/internal/config"
-	"github.com/xiaoyu98628/callum/internal/run/events"
 	"github.com/xiaoyu98628/callum/internal/stdio"
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
@@ -51,7 +51,7 @@ func (r *Runtime) ServeStdio(ctx context.Context, in io.ReadCloser, out io.Write
 	defer subscription.Close()
 	owner := newSessionRuns(connection.Context(), r.manager)
 	defer owner.Close()
-	server, err := stdio.NewWithConversations(r.providers, r.calls, r.workspaces, r.conversations, r.engine, owner.Register, r.logger)
+	server, err := stdio.NewWithConversations(r.providers, r.calls, r.workspaces, r.conversations, r.engine, r.approvals, owner.Register, r.logger)
 	if err != nil {
 		return err
 	}

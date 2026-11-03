@@ -3,8 +3,8 @@ package conversation
 import (
 	"errors"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
 	domain "github.com/xiaoyu98628/callum/internal/conversation"
-	"github.com/xiaoyu98628/callum/internal/run"
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
 	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
 )
@@ -14,9 +14,9 @@ func publicError(err error) *protocol.Error {
 		return nil
 	}
 	switch {
-	case errors.Is(err, domain.ErrInvalid), errors.Is(err, run.ErrInvalid):
+	case errors.Is(err, domain.ErrInvalid), errors.Is(err, agent.ErrInvalid):
 		return protocol.InvalidParams()
-	case errors.Is(err, domain.ErrNotFound), errors.Is(err, run.ErrNotFound):
+	case errors.Is(err, domain.ErrNotFound), errors.Is(err, agent.ErrNotFound):
 		return &protocol.Error{Code: 1001, Message: "会话、执行或消息不存在"}
 	case errors.Is(err, domain.ErrBusy):
 		return &protocol.Error{Code: 1006, Message: "该会话正在执行"}

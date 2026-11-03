@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 
+	scheduler "github.com/xiaoyu98628/callum/internal/agent/executor"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
-	scheduler "github.com/xiaoyu98628/callum/internal/run/executor"
 )
 
 func (m *Manager) execute(ctx context.Context, id string, client model.Client, req model.Request, stream bool, lease *scheduler.Lease) {

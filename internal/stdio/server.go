@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/xiaoyu98628/callum/internal/agent/approval"
+	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
 	conversationservice "github.com/xiaoyu98628/callum/internal/conversation/service"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
-	runservice "github.com/xiaoyu98628/callum/internal/run/service"
+	approvalhandler "github.com/xiaoyu98628/callum/internal/stdio/approval"
 	"github.com/xiaoyu98628/callum/internal/stdio/catalog"
 	conversationhandler "github.com/xiaoyu98628/callum/internal/stdio/conversation"
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
@@ -28,17 +30,19 @@ type Server struct {
 	workspace    *workspacehandler.Handler
 	conversation *conversationhandler.Handler
 	logger       *slog.Logger
+	approvals    *approvalhandler.Handler
 }
 
 // NewWithConversations 装配普通对话接口；所有服务和资源仍由 app 持有。
-func NewWithConversations(providers *providerservice.Service, runs *executor.Manager, workspaces *workspaceservice.Service, conversations *conversationservice.Service, persistent *runservice.Engine, accepted func(string) error, logger *slog.Logger) (*Server, error) {
-	if workspaces == nil || conversations == nil || persistent == nil || accepted == nil {
+func NewWithConversations(providers *providerservice.Service, runs *executor.Manager, workspaces *workspaceservice.Service, conversations *conversationservice.Service, persistent *agentservice.Engine, approvals *approval.Service, accepted func(string) error, logger *slog.Logger) (*Server, error) {
+	if workspaces == nil || conversations == nil || persistent == nil || approvals == nil || accepted == nil {
 		return nil, errors.New("对话服务不能为空")
 	}
 	s, err := New(providers, runs, logger)
 	if err != nil {
 		return nil, err
 	}
+	s.approvals = approvalhandler.New(approvals)
 	s.workspace = workspacehandler.New(workspaces)
 	s.conversation = conversationhandler.New(conversations, accepted)
 	s.execution = execution.NewPersistent(runs, persistent, accepted)

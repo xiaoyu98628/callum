@@ -21,6 +21,9 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 		return openai.ChatCompletionNewParams{}, errors.New("消息不能为空")
 	}
 
+	if err := validateToolHistory(req.Messages); err != nil {
+		return openai.ChatCompletionNewParams{}, err
+	}
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.Messages))
 	inputBytes := 0
 
@@ -77,7 +80,19 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 		case model.RoleUser:
 			messages = append(messages, openai.UserMessage(message.Content))
 		case model.RoleAssistant:
-			messages = append(messages, openai.AssistantMessage(message.Content))
+			assistant := openai.ChatCompletionAssistantMessageParam{}
+			if message.Content != "" || len(message.ToolCalls) == 0 {
+				assistant.Content.OfString = openai.String(message.Content)
+			}
+			for _, call := range message.ToolCalls {
+				assistant.ToolCalls = append(assistant.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{ID: call.ID, Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{Name: call.Name, Arguments: string(call.Arguments)}}})
+			}
+			messages = append(messages, openai.ChatCompletionMessageParamUnion{OfAssistant: &assistant})
+		case model.RoleTool:
+			if message.ToolCallID == "" {
+				return openai.ChatCompletionNewParams{}, model.ErrInvalidResponse
+			}
+			messages = append(messages, openai.ToolMessage(message.Content, message.ToolCallID))
 		default:
 			return openai.ChatCompletionNewParams{}, fmt.Errorf("第 %d 条消息的角色暂不支持", i)
 		}
@@ -86,6 +101,9 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 	params := openai.ChatCompletionNewParams{
 		Model:    shared.ChatModel(req.Model),
 		Messages: messages,
+	}
+	if err := addTools(&params, req.Tools); err != nil {
+		return openai.ChatCompletionNewParams{}, err
 	}
 	encoded, err := json.Marshal(params)
 	if err != nil {

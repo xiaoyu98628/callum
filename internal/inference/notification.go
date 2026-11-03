@@ -4,9 +4,9 @@ import (
 	"context"
 	"errors"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
-	"github.com/xiaoyu98628/callum/internal/run"
 )
 
 // Failure 只包含可公开的错误描述，不保留原始错误链或供应商响应正文。
@@ -32,11 +32,11 @@ func DescribeError(err error) Failure {
 		e.Message, e.Kind = "操作超时", "timeout"
 	case errors.Is(err, context.Canceled):
 		e.Message, e.Kind = "操作已取消", "cancelled"
-	case errors.Is(err, provider.ErrInvalidConfig), errors.Is(err, ErrInvalidRequest), errors.Is(err, run.ErrInvalid):
+	case errors.Is(err, provider.ErrInvalidConfig), errors.Is(err, ErrInvalidRequest), errors.Is(err, agent.ErrInvalid):
 		e.Message, e.Kind = "参数无效", "invalid_params"
 	case errors.Is(err, provider.ErrNotFound):
 		e.Message, e.Kind = "配置不存在", "not_found"
-	case errors.Is(err, run.ErrNotFound):
+	case errors.Is(err, agent.ErrNotFound):
 		e.Message, e.Kind = "执行或步骤不存在", "not_found"
 	case errors.Is(err, provider.ErrConflict):
 		e.Message, e.Kind = "同一厂商下的远端模型标识已存在", "conflict"
@@ -69,11 +69,11 @@ func DescribeError(err error) Failure {
 }
 
 // PublicEvent 在发布到共享订阅前移除错误链。
-func PublicEvent(event Event) run.Event {
+func PublicEvent(event Event) agent.Event {
 	data := Notification{Text: event.Text, ProviderRequestID: event.ProviderRequestID}
 	if event.Err != nil {
 		failure := DescribeError(event.Err)
 		data.Failure = &failure
 	}
-	return run.Event{Type: "run." + event.Type, RunID: event.RunID, Data: data}
+	return agent.Event{Type: "run." + event.Type, RunID: event.RunID, Data: data}
 }

@@ -13,13 +13,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/agent/events"
 	"github.com/xiaoyu98628/callum/internal/config"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
-	"github.com/xiaoyu98628/callum/internal/run"
-	"github.com/xiaoyu98628/callum/internal/run/events"
+	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 )
 
 func runtimeFixture(t *testing.T, limit int) (*Runtime, config.Config) {
@@ -54,7 +55,7 @@ func directModel(t *testing.T, runtime *Runtime, url string) string {
 	return id
 }
 
-func nextBusiness(t *testing.T, sub *events.Subscription, kind, id string) run.Event {
+func nextBusiness(t *testing.T, sub *events.Subscription, kind, id string) agent.Event {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
@@ -121,7 +122,7 @@ func TestRuntimeWithoutProtocol(t *testing.T) {
 	}
 	nextBusiness(t, first, "run.completed", accepted.Run.ID)
 	saved, err := runtime.Runs().Get(t.Context(), accepted.Run.ID)
-	if err != nil || saved.Status != run.Completed {
+	if err != nil || saved.Status != agent.Completed {
 		t.Fatalf("直接调用未持久化: %+v %v", saved, err)
 	}
 	step, err := runtime.Runs().GetStep(t.Context(), accepted.Step.ID)
@@ -241,7 +242,7 @@ func TestRuntimeCloseCancelsAndReleasesOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitSignal(t, started)
-	// 第二次初始化应失败，且必须释放它在取得实例锁之前打开的资源。
+	// 第二次初始化必须在取得实例锁时失败，不能触碰活动实例的数据。
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	if duplicate, err := New(t.Context(), cfg, logger); err == nil {
 		duplicate.Close()
@@ -262,7 +263,7 @@ func TestRuntimeCloseCancelsAndReleasesOwnership(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("应用关闭未等待连接退出")
 	}
-	if err := runtime.Invoke(t.Context(), inference.Request{ModelID: id, Messages: []model.Message{{Role: model.RoleUser, Content: "late"}}}, func(string) error { return nil }); !errors.Is(err, run.ErrClosed) {
+	if err := runtime.Invoke(t.Context(), inference.Request{ModelID: id, Messages: []model.Message{{Role: model.RoleUser, Content: "late"}}}, func(string) error { return nil }); !errors.Is(err, agent.ErrClosed) {
 		t.Fatalf("关闭后仍接受执行: %v", err)
 	}
 	recovered, err := New(t.Context(), cfg, logger)
@@ -270,6 +271,76 @@ func TestRuntimeCloseCancelsAndReleasesOwnership(t *testing.T) {
 		t.Fatalf("实例锁未释放: %v", err)
 	}
 	if err := recovered.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCancelAcceptedBeforeModelStarts(t *testing.T) {
+	runtime, _ := runtimeFixture(t, 1)
+	id := directModel(t, runtime, "https://example.test")
+	subscription, err := runtime.Subscribe(events.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer subscription.Close()
+	var runID string
+	err = runtime.Conversations().Send(t.Context(), conversation.Send{ModelID: id, Content: []model.Block{{Type: "text", Text: "立即取消"}}}, func(ex conversation.Execution) error {
+		runID = ex.Run.ID
+		if !runtime.Cancel(runID) {
+			t.Error("受理阶段不能取消执行")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	nextBusiness(t, subscription, "run.cancelled", runID)
+	value, err := runtime.Runs().Get(t.Context(), runID)
+	if err != nil || value.Status != agent.Cancelled {
+		t.Fatalf("受理后的取消被当作存储失败: %+v %v", value, err)
+	}
+}
+
+func TestOwnershipPrecedesMigration(t *testing.T) {
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := sqlite.Open(t.Context(), cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, sql := range []string{"DROP TABLE conversation_run_approvals", "DROP INDEX uq_step_run", "PRAGMA user_version=2"} {
+		if err := db.DB.Exec(sql).Error; err != nil {
+			t.Fatal(err)
+		}
+	}
+	ownership, err := sqlite.AcquireOwnership(cfg.DatabasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ownership.Close()
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	if duplicate, err := New(t.Context(), cfg, logger); err == nil {
+		duplicate.Close()
+		t.Fatal("重复实例取得了锁")
+	}
+	var version int
+	if err := db.DB.Raw("PRAGMA user_version").Scan(&version).Error; err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 || db.DB.Migrator().HasTable("conversation_run_approvals") {
+		t.Fatal("未取得锁就迁移了活动实例的数据")
+	}
+	if err := ownership.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := New(t.Context(), cfg, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -14,9 +14,9 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/config"
 	"github.com/xiaoyu98628/callum/internal/conversation"
-	"github.com/xiaoyu98628/callum/internal/run"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 )
 
@@ -144,7 +144,7 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 	releaseFirst()
 	p.event(t, "run.completed")
 	rows := readMessages(t, p, convID)
-	if len(rows) != 2 || rows[0].ID != userID || rows[0].Sequence != 1 || rows[1].Sequence != 2 || rows[1].Status != run.Completed || rows[1].CompletedAt == nil {
+	if len(rows) != 2 || rows[0].ID != userID || rows[0].Sequence != 1 || rows[1].Sequence != 2 || rows[1].Status != agent.Completed || rows[1].CompletedAt == nil {
 		t.Fatalf("消息未正确保存: %+v", rows)
 	}
 	stepsFrame := p.call(t, "step.list", map[string]any{"run_id": runID})
@@ -162,7 +162,7 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 		t.Fatalf("标题与回答没有分别记录: %s", stepsFrame.Result)
 	}
 	for _, step := range steps {
-		if step.Status != run.Completed || step.UsageBytes == 0 {
+		if step.Status != agent.Completed || step.UsageBytes == 0 {
 			t.Fatalf("调用用量或状态丢失: %+v", step)
 		}
 		usage := p.call(t, "step.data", map[string]any{"step_id": step.ID, "field": "usage"})
@@ -279,7 +279,7 @@ func TestConversationCancelIsolationAndRecovery(t *testing.T) {
 	requireOK(t, p.call(t, "run.cancel", map[string]any{"run_id": rid}))
 	p.event(t, "run.cancelled")
 	rows := readMessages(t, p, id)
-	if len(rows) != 2 || rows[1].Status != run.Cancelled || rows[1].CompletedAt != nil || rows[1].Content[0].Text != "部分结果" {
+	if len(rows) != 2 || rows[1].Status != agent.Cancelled || rows[1].CompletedAt != nil || rows[1].Content[0].Text != "部分结果" {
 		t.Fatalf("取消丢失部分结果: %+v", rows)
 	}
 	requireOK(t, p.call(t, "workspace.delete", map[string]any{"id": wid}))
@@ -310,7 +310,7 @@ func TestConversationCancelIsolationAndRecovery(t *testing.T) {
 		t.Fatalf("未确认中断状态: %s", recovered.Result)
 	}
 	rows = readMessages(t, p2, id)
-	if rows[1].Status != run.Interrupted || rows[1].Content[0].Text != "部分结果" {
+	if rows[1].Status != agent.Interrupted || rows[1].Content[0].Text != "部分结果" {
 		t.Fatalf("恢复覆盖了部分结果: %+v", rows)
 	}
 	p2.stop(t)

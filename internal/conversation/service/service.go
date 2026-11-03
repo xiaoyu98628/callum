@@ -8,23 +8,23 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/agent/executor"
+	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
-	"github.com/xiaoyu98628/callum/internal/run"
-	"github.com/xiaoyu98628/callum/internal/run/executor"
-	runservice "github.com/xiaoyu98628/callum/internal/run/service"
 )
 
 // Service 负责会话业务与发送受理；异步执行由注入的 Engine 完成。
 type Service struct {
 	repository conversation.Repository
-	resolve    run.Resolver
+	resolve    agent.Resolver
 	manager    *executor.Manager
-	engine     *runservice.Engine
+	engine     *agentservice.Engine
 }
 
-func New(repository conversation.Repository, resolve run.Resolver, manager *executor.Manager, engine *runservice.Engine) (*Service, error) {
+func New(repository conversation.Repository, resolve agent.Resolver, manager *executor.Manager, engine *agentservice.Engine) (*Service, error) {
 	if repository == nil || resolve == nil || manager == nil || engine == nil {
 		return nil, conversation.ErrInvalid
 	}
@@ -178,7 +178,7 @@ func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(
 		}
 		ids[i] = id
 	}
-	lease, err := s.manager.ReserveContext(ctx, ids[0], in.ConversationID)
+	lease, err := s.manager.ReserveAgentContext(ctx, ids[0], in.ConversationID)
 	if err != nil {
 		return err
 	}

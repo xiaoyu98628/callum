@@ -9,12 +9,12 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/model"
-	"github.com/xiaoyu98628/callum/internal/run"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
+	agentstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/agent"
 	store "github.com/xiaoyu98628/callum/internal/storage/sqlite/conversation"
-	runstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/run"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
 
@@ -45,7 +45,7 @@ func TestConversationConstraintsAndResendRollback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runs, err := runstore.NewRepository(db.DB)
+	runs, err := agentstore.NewRepository(db.DB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestConversationConstraintsAndResendRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	finishedAt := time.Now().UnixMilli()
-	foreign := schema.Run{ID: id(t), ConversationID: second.Conversation.ID, Model: second.Run.Model, Status: run.Completed, CreatedAt: finishedAt, UpdatedAt: finishedAt, FinishedAt: &finishedAt}
+	foreign := schema.Run{ID: id(t), ConversationID: second.Conversation.ID, Model: second.Run.Model, Status: agent.Completed, CreatedAt: finishedAt, UpdatedAt: finishedAt, FinishedAt: &finishedAt}
 	if err := db.DB.Omit("Conversation", "Replaces").Create(&foreign).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -69,30 +69,30 @@ func TestConversationConstraintsAndResendRollback(t *testing.T) {
 	if err := db.DB.Model(&schema.Message{}).Where("id=?", first.Assistant.ID).Update("sequence", first.User.Sequence).Error; err == nil {
 		t.Fatal("允许同会话消息序号重复")
 	}
-	duplicate := schema.Run{ID: id(t), ConversationID: first.Conversation.ID, Model: first.Run.Model, Status: run.Running, CreatedAt: 1, UpdatedAt: 1}
+	duplicate := schema.Run{ID: id(t), ConversationID: first.Conversation.ID, Model: first.Run.Model, Status: agent.Running, CreatedAt: 1, UpdatedAt: 1}
 	if err := db.DB.Omit("Conversation", "Replaces").Create(&duplicate).Error; err == nil {
 		t.Fatal("允许同会话两个活动执行")
 	}
 	if err := db.DB.Model(&schema.Step{}).Where("id=?", first.Step.ID).Update("usage", `"not-an-object"`).Error; err == nil {
 		t.Fatal("usage 未限制为 JSON 对象")
 	}
-	child := schema.Step{ID: id(t), ConversationID: first.Conversation.ID, RunID: first.Run.ID, ParentStepID: &second.Step.ID, Sequence: 2, Type: "model_call", Name: "错误父级", Status: run.Pending, Input: json.RawMessage(`{}`), CreatedAt: 1, UpdatedAt: 1}
+	child := schema.Step{ID: id(t), ConversationID: first.Conversation.ID, RunID: first.Run.ID, ParentStepID: &second.Step.ID, Sequence: 2, Type: "model_call", Name: "错误父级", Status: agent.Pending, Input: json.RawMessage(`{}`), CreatedAt: 1, UpdatedAt: 1}
 	if err := db.DB.Omit("Run", "Parent").Create(&child).Error; err == nil {
 		t.Fatal("允许父步骤跨执行")
 	}
 	now := time.Now().UnixMilli()
 	step := first.Step
-	step.Status, step.FinishedAt, step.UpdatedAt = run.Completed, &now, now
+	step.Status, step.FinishedAt, step.UpdatedAt = agent.Completed, &now, now
 	step.Output = json.RawMessage(`{"response":{"text":"旧回答"}}`)
 	step.Usage = json.RawMessage(`{"total_tokens":2}`)
 	if err := runs.SaveStep(t.Context(), step); err != nil {
 		t.Fatal(err)
 	}
-	if err := runs.SaveMessage(t.Context(), first.Assistant.ID, []model.Block{{Type: "text", Text: "旧回答"}}, run.Completed); err != nil {
+	if err := runs.SaveMessage(t.Context(), first.Assistant.ID, []model.Block{{Type: "text", Text: "旧回答"}}, agent.Completed); err != nil {
 		t.Fatal(err)
 	}
 	finished := first.Run
-	finished.Status, finished.FinishedAt, finished.UpdatedAt = run.Completed, &now, now
+	finished.Status, finished.FinishedAt, finished.UpdatedAt = agent.Completed, &now, now
 	if err := runs.Finish(t.Context(), finished); err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestConversationConstraintsAndResendRollback(t *testing.T) {
 	if string(kept.Output) != string(step.Output) {
 		t.Fatalf("回滚没有恢复旧模型结果: %s", kept.Output)
 	}
-	if _, err := runs.Get(t.Context(), resend.RunID); !errors.Is(err, run.ErrNotFound) {
+	if _, err := runs.Get(t.Context(), resend.RunID); !errors.Is(err, agent.ErrNotFound) {
 		t.Fatalf("遗留部分新执行: %v", err)
 	}
 }

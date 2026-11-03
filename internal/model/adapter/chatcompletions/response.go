@@ -79,12 +79,10 @@ func (c *Client) Generate(ctx context.Context, req model.Request) (result model.
 	result.Text = choice.Message.Content
 	result.Content = []model.Block{{Type: "text", Text: result.Text}}
 
-	if len(choice.Message.ToolCalls) > 0 {
-		return result, wrapError(
-			"decode response",
-			httpResponse,
-			model.ErrUnsupportedOutput,
-		)
+	result.FinishReason = choice.FinishReason
+	result.ToolCalls, err = responseCalls(choice.Message.RawJSON(), choice.FinishReason, len(req.Tools) > 0)
+	if err != nil {
+		return result, wrapError("decode response", httpResponse, err)
 	}
 
 	if choice.Message.Refusal != "" {
@@ -95,11 +93,11 @@ func (c *Client) Generate(ctx context.Context, req model.Request) (result model.
 		)
 	}
 
-	if err := checkFinishReason(choice.FinishReason); err != nil {
+	if err := checkToolFinishReason(choice.FinishReason, len(req.Tools) > 0); err != nil {
 		// 返回已经收到的文本，同时明确标记调用未成功完成。
 		return result, wrapError("finish response", httpResponse, err)
 	}
-	if !choice.Message.JSON.Content.Valid() {
+	if !choice.Message.JSON.Content.Valid() && len(result.ToolCalls) == 0 {
 		return result, wrapError("decode response", httpResponse, model.ErrInvalidResponse)
 	}
 

@@ -11,7 +11,9 @@ const (
 
 // Message 是统一模型消息；Blocks 非空时使用内容块，Content 保留文本调用兼容性。
 type Message struct {
-	Role    Role
-	Content string
-	Blocks  []Block `json:"-"`
+	Role       Role       `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	Blocks     []Block    `json:"blocks,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
 }

@@ -4,11 +4,11 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/adapter/chatcompletions"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
-	"github.com/xiaoyu98628/callum/internal/run"
 )
 
 // newModelResolver 将配置业务与具体适配器连接，不持有数据库查询或网络调用事务。
@@ -26,26 +26,30 @@ func newModelResolver(providers *providerservice.Service, client *http.Client) i
 	}
 }
 
-func newConversationResolver(providers *providerservice.Service, client *http.Client) run.Resolver {
-	return func(ctx context.Context, id string) (run.Resolved, error) {
+func newConversationResolver(providers *providerservice.Service, client *http.Client) agent.Resolver {
+	return func(ctx context.Context, id string) (agent.Resolved, error) {
 		runtime, err := providers.Resolve(ctx, id)
 		if err != nil {
-			return run.Resolved{}, err
+			return agent.Resolved{}, err
 		}
 		if runtime.Protocol != "chatcompletions" {
-			return run.Resolved{}, inference.ErrUnsupported
+			return agent.Resolved{}, inference.ErrUnsupported
 		}
-		imageInput := false
+		imageInput, tools := false, false
 		for _, feature := range runtime.Model.ModelType {
-			if feature != "image_input" {
-				return run.Resolved{}, inference.ErrUnsupported
+			switch feature {
+			case "image_input":
+				imageInput = true
+			case "tools":
+				tools = true
+			default:
+				return agent.Resolved{}, inference.ErrUnsupported
 			}
-			imageInput = true
 		}
 		adapter, err := chatcompletions.New(chatcompletions.Config{BaseURL: runtime.BaseURL, APIKey: runtime.APIKey}, client)
 		if err != nil {
-			return run.Resolved{}, err
+			return agent.Resolved{}, err
 		}
-		return run.Resolved{Client: adapter, Protocol: runtime.Protocol, ImageInput: imageInput, Snapshot: model.Snapshot{ID: runtime.Model.ID, DisplayName: runtime.Model.DisplayName, RemoteModelID: runtime.Model.RemoteModelID, Provider: model.ProviderSnapshot{ID: runtime.Model.ProviderID, Name: runtime.ProviderName}}}, nil
+		return agent.Resolved{Client: adapter, Protocol: runtime.Protocol, ImageInput: imageInput, Tools: tools, Snapshot: model.Snapshot{ID: runtime.Model.ID, DisplayName: runtime.Model.DisplayName, RemoteModelID: runtime.Model.RemoteModelID, Provider: model.ProviderSnapshot{ID: runtime.Model.ProviderID, Name: runtime.ProviderName}}}, nil
 	}
 }

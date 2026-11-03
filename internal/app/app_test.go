@@ -119,6 +119,17 @@ func (p *appPeer) stop(t *testing.T) {
 	t.Helper()
 	f := p.call(t, "system.shutdown", map[string]any{})
 	requireOK(t, f)
+	// 关闭响应之后仍可能有已提交的业务通知，读取至 EOF 才能完成协议排空。
+	for {
+		var frame wireFrame
+		if err := p.decoder.Decode(&frame); err != nil {
+			if !errors.Is(err, io.EOF) {
+				t.Fatal(err)
+			}
+			break
+		}
+		p.pending = append(p.pending, frame)
+	}
 	select {
 	case err := <-p.done:
 		p.stopped = true

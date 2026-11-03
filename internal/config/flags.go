@@ -9,24 +9,30 @@ import (
 )
 
 const (
-	// DefaultMaxConcurrentRuns 是未指定启动参数时允许的模型调用并发数。
+	// DefaultMaxConcurrentRuns 是活动执行和实际模型请求的共同数量上限。
 	DefaultMaxConcurrentRuns = 4
-	// DefaultCallTimeout 是包含配置解析和生成过程的单次调用超时。
+	// DefaultCallTimeout 是单次模型请求的超时（不含审批等待）。
 	DefaultCallTimeout = 5 * time.Minute
 )
 
-func flags(w io.Writer) (*flag.FlagSet, *string, *int, *time.Duration) {
+type toolFlags struct {
+	mode *string
+	tool *time.Duration
+}
+
+func flags(w io.Writer) (*flag.FlagSet, *string, *int, *time.Duration, toolFlags) {
 	f := flag.NewFlagSet("callum", flag.ContinueOnError)
 	f.SetOutput(w)
 	dir := f.String("data-dir", "", "数据目录；未指定时按开发或发布构建选择")
-	limit := f.Int("max-concurrent-runs", DefaultMaxConcurrentRuns, "同时执行的模型调用上限（1 至 64）")
+	limit := f.Int("max-concurrent-runs", DefaultMaxConcurrentRuns, "同时活动执行及实际模型请求的上限（1 至 64）")
 	timeout := f.Duration("call-timeout", DefaultCallTimeout, "每次模型调用的超时，例如 5m")
-	return f, dir, limit, timeout
+	extra := toolFlags{mode: f.String("approval-mode", "auto-read", "工具审批模式：auto-read（工作区只读自动放行）或 always（每次审批）"), tool: f.Duration("tool-timeout", 30*time.Second, "单次工具执行超时")}
+	return f, dir, limit, timeout, extra
 }
 
 // LoadArgs 解析启动参数，再计算路径；不会创建数据库或修改文件。
 func LoadArgs(args []string) (Config, error) {
-	f, dir, limit, timeout := flags(io.Discard)
+	f, dir, limit, timeout, extra := flags(io.Discard)
 	if err := f.Parse(args); err != nil {
 		return Config{}, err
 	}
@@ -40,13 +46,17 @@ func LoadArgs(args []string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	if (*extra.mode != "auto-read" && *extra.mode != "always") || *extra.tool <= 0 {
+		return Config{}, errors.New("审批模式或工具超时配置无效")
+	}
 	cfg.MaxConcurrentRuns, cfg.CallTimeout = *limit, *timeout
+	cfg.ApprovalMode, cfg.ToolTimeout = *extra.mode, *extra.tool
 	return cfg, nil
 }
 
 // WriteUsage 向指定输出写入帮助，程序入口应传入 stderr。
 func WriteUsage(w io.Writer) {
-	f, _, _, _ := flags(w)
+	f, _, _, _, _ := flags(w)
 	fmt.Fprintln(w, "用法：callum [启动参数]，启动后每行输入一条 JSON 请求。")
 	f.PrintDefaults()
 }

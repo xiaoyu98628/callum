@@ -1,6 +1,6 @@
 # 对话、执行与上下文设计
 
-本文记录已确认的目标设计。实际完成情况以 README 和实现为准。
+本文记录已确认的目标设计。已完成普通对话、工作区只读工具循环与审批；补充输入及压缩仍为规划。实际完成情况以 README 和实现为准。
 
 ## 交付范围
 
@@ -69,9 +69,9 @@ model_call.input 保存参数、上下文来源及内容指纹；output 保存�
 
 ### conversation_run_approvals
 
-随工具交互引入：id TEXT PRIMARY KEY；run_id TEXT；step_id TEXT UNIQUE；request TEXT JSON；request_hash TEXT；status TEXT DEFAULT 'pending'；decided_by TEXT?；decision_note TEXT?；created_at INTEGER；updated_at INTEGER；decided_at INTEGER?；expires_at INTEGER?。
+已随工具交互引入：id TEXT PRIMARY KEY；run_id TEXT；step_id TEXT UNIQUE；request TEXT JSON；request_hash TEXT；status TEXT DEFAULT 'pending'；decided_by TEXT?；decision_note TEXT?；created_at INTEGER；updated_at INTEGER；decided_at INTEGER?。
 
-状态为 pending、approved、rejected、cancelled、expired。审批绑定确定的操作，执行前核对操作摘要及当前权限；参数变化创建新步骤及审批。批准不表示执行成功。普通补充输入使用 user_input，批准、拒绝说明保存到 decision_note。
+状态为 pending、approved、rejected、cancelled。审批绑定确定的操作，执行前核对操作摘要及当前权限；参数变化创建新步骤及审批。批准不表示执行成功。普通补充输入使用 user_input，批准、拒绝说明保存到 decision_note。
 
 ### conversation_context_versions
 
@@ -111,7 +111,26 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 ## 资源、迁移与验证
 
 创建、编辑和状态变更按业务动作定义事务，不在等待模型、工具、用户输入时占用事务。
-关闭时停止接收、取消并等待任务，再关闭通信、HTTP 连接池和数据库。恢复中断执行前确认数据目录实例所有权。
-保留 000001_create_model_config.go，新增 000002_create_conversation_core.go；后续审批、压缩各有具体迁移。
+关闭时停止接收、取消并等待任务、结束待审批记录，再关闭通信、HTTP 连接池和数据库。恢复中断执行前确认数据目录实例所有权。
+迁移为 000001_create_model_config.go、000002_create_conversation_core.go、000003_create_run_approvals.go；当前结构版本 3，版本 1、2 经校验后保留数据升级；压缩随功能增加具体迁移。
 版本判断同时验证实际结构，兼容当前版本 1 的 UUIDv7 配置库；迁移失败回滚，不重建用户数据库。
 验证包括迁移、约束、事务回滚、多会话隔离、取消、重发、标题竞争、流式异常、资源关闭及 usage 保存，并运行项目规定的完整检查。
+
+
+## 工具与审批实现约定
+
+业务编排位于 internal/agent，内置工具位于 internal/tool/builtin/filesystem；数据库表名和通信 run 标识保持兼容。
+模型自主选择可用工具，只有已启用 tools 且绑定工作区才提供文件工具。每轮最多一个回答模型请求，同轮工具串行；
+回答最多 8 轮模型调用、32 次工具调用。具体工具为 list_directory、read_file、search_text，路径通过 os.Root 限定在工作区。
+模型调用与工具执行分别使用 call-timeout、tool-timeout，默认 5 分钟和 30 秒。审批没有过期时间或超时配置，等待用户决定或执行取消。
+审批等待保留有界执行容量和会话互斥，但释放模型请求槽位，不持有数据库事务。
+
+审批模式为 auto-read（默认）及 always。权限判定属于 Go，模型不能声明自己已获授权。
+request 保存服务端生成的工具完整定义、版本、工作区及规范化参数，request_hash 为该快照的 SHA-256。
+approval.get/list 查询记录，approval.decide 只接受 approval_id、decision、decision_note；批准或拒绝身份由服务端填写为 local_user。
+相同决定幂等，冲突决定拒绝。批准与取消竞争时，仍需在执行前检查上下文、工作区及操作指纹，数据库原子认领保证同一步骤不会启动两次。
+拒绝转为结构化工具结果，模型可解释或采用其他允许的操作；同一执行内相同被拒绝的操作不再次请求审批。
+进程关闭或取消结束 pending 审批，已经作出的决定保留；重启保留审计、标记中断，不自动执行已批准但结果未知的操作。
+
+模型与工具结果保留统一 context_message 以重建跨协议上下文，标题不参与工具轨迹；步骤仍保存原始结果和 usage。
+工具调用轮中的暂存正文随 message.updated 清空，最终回答继续流式输出；完整中间文本可查询对应模型步骤。

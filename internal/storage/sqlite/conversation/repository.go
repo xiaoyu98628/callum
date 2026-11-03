@@ -8,8 +8,8 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
 	domain "github.com/xiaoyu98628/callum/internal/conversation"
-	"github.com/xiaoyu98628/callum/internal/run"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
 
@@ -176,7 +176,7 @@ func (r *Repository) Messages(ctx context.Context, id string, before int64, limi
 	for _, row := range sizes {
 		if total+row.Bytes+1024 > 7<<20 {
 			if len(ids) == 0 {
-				return nil, run.ErrOutputLimit
+				return nil, agent.ErrOutputLimit
 			}
 			break
 		}

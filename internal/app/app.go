@@ -5,23 +5,28 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/agent/approval"
+	"github.com/xiaoyu98628/callum/internal/agent/events"
+	agentexecutor "github.com/xiaoyu98628/callum/internal/agent/executor"
+	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
 	"github.com/xiaoyu98628/callum/internal/config"
 	conversationservice "github.com/xiaoyu98628/callum/internal/conversation/service"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
-	"github.com/xiaoyu98628/callum/internal/run"
-	"github.com/xiaoyu98628/callum/internal/run/events"
-	runexecutor "github.com/xiaoyu98628/callum/internal/run/executor"
-	runservice "github.com/xiaoyu98628/callum/internal/run/service"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
+	agentstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/agent"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/catalog"
 	conversationstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/conversation"
-	runstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/run"
 	workspacestore "github.com/xiaoyu98628/callum/internal/storage/sqlite/workspace"
+	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem"
+	toolexecutor "github.com/xiaoyu98628/callum/internal/tool/executor"
+	"github.com/xiaoyu98628/callum/internal/tool/registry"
 	workspaceservice "github.com/xiaoyu98628/callum/internal/workspace/service"
 )
 
@@ -34,12 +39,13 @@ type Runtime struct {
 	db            *sqlite.Database
 	ownership     *sqlite.Ownership
 	httpTransport *http.Transport
-	manager       *runexecutor.Manager
+	manager       *agentexecutor.Manager
 	events        *events.Hub
 	providers     *providerservice.Service
 	workspaces    *workspaceservice.Service
 	conversations *conversationservice.Service
-	engine        *runservice.Engine
+	engine        *agentservice.Engine
+	approvals     *approval.Service
 	calls         *executor.Manager
 	mu            sync.Mutex
 	closed        bool
@@ -51,8 +57,11 @@ type Runtime struct {
 // New 装配与协议无关的运行时；ctx 是应用运行上下文，初始化使用独立短超时。
 // 部分初始化失败时关闭此前取得的资源，且不覆盖原始错误。
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtime, retErr error) {
-	if ctx == nil || logger == nil || cfg.MaxConcurrentRuns < 1 || cfg.MaxConcurrentRuns > 64 || cfg.CallTimeout <= 0 {
+	if ctx == nil || logger == nil || !filepath.IsAbs(cfg.DatabasePath) || cfg.MaxConcurrentRuns < 1 || cfg.MaxConcurrentRuns > 64 || cfg.CallTimeout <= 0 || cfg.ToolTimeout <= 0 || (cfg.ApprovalMode != "auto-read" && cfg.ApprovalMode != "always") {
 		return nil, errors.New("应用运行配置无效")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	runtimeCtx, cancel := context.WithCancel(ctx)
 	r := &Runtime{ctx: runtimeCtx, cancel: cancel, logger: logger}
@@ -64,11 +73,12 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	initCtx, initCancel := context.WithTimeout(runtimeCtx, 10*time.Second)
 	defer initCancel()
 	var err error
-	r.db, err = sqlite.Open(initCtx, cfg.DatabasePath)
+	// 实例锁覆盖迁移与恢复，另一个运行时不能在启动失败前改写活动实例的结构。
+	r.ownership, err = sqlite.AcquireOwnership(cfg.DatabasePath)
 	if err != nil {
 		return nil, err
 	}
-	r.ownership, err = sqlite.AcquireOwnership(cfg.DatabasePath)
+	r.db, err = sqlite.Open(initCtx, cfg.DatabasePath)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +86,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	if err != nil {
 		return nil, err
 	}
-	runRepository, err := runstore.NewRepository(r.db.DB)
+	runRepository, err := agentstore.NewRepository(r.db.DB)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +111,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	}
 	client, httpTransport := newHTTPClient(cfg.MaxConcurrentRuns)
 	r.httpTransport = httpTransport
-	r.manager, err = runexecutor.New(runtimeCtx, cfg.MaxConcurrentRuns, cfg.CallTimeout)
+	r.manager, err = agentexecutor.New(runtimeCtx, cfg.MaxConcurrentRuns, cfg.CallTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +126,21 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	if err != nil {
 		return nil, err
 	}
-	r.engine, err = runservice.New(runRepository, conversationRepository, r.manager, r.events.Publish, logger)
+	r.approvals, err = approval.New(runRepository, runRepository.Get, r.events.Publish)
+	if err != nil {
+		return nil, err
+	}
+	registry := registry.New()
+	for _, instance := range filesystem.Tools() {
+		if err := registry.Register(instance); err != nil {
+			return nil, err
+		}
+	}
+	tools, err := toolexecutor.New(registry, cfg.ToolTimeout)
+	if err != nil {
+		return nil, err
+	}
+	r.engine, err = agentservice.New(runRepository, conversationRepository, r.manager, r.events.Publish, logger, agentservice.Options{Tools: tools, Approvals: r.approvals, Workspace: r.workspaces.Get, CallTimeout: cfg.CallTimeout, ApprovalMode: cfg.ApprovalMode})
 	if err != nil {
 		return nil, err
 	}
@@ -136,8 +160,11 @@ func (r *Runtime) Workspaces() *workspaceservice.Service { return r.workspaces }
 // Conversations 返回运行时持有的会话服务。
 func (r *Runtime) Conversations() *conversationservice.Service { return r.conversations }
 
+// Approvals 返回与通信协议无关的审批服务。
+func (r *Runtime) Approvals() *approval.Service { return r.approvals }
+
 // Runs 返回运行时持有的持久化执行查询服务。
-func (r *Runtime) Runs() *runservice.Engine { return r.engine }
+func (r *Runtime) Runs() *agentservice.Engine { return r.engine }
 
 // Invoke 提供无历史模型调用，与普通对话共享并发和事件发布器。
 func (r *Runtime) Invoke(ctx context.Context, in inference.Request, accepted func(string) error) error {
@@ -188,7 +215,7 @@ func (r *Runtime) beginSession() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed || r.ctx.Err() != nil {
-		return run.ErrClosed
+		return agent.ErrClosed
 	}
 	r.sessions.Add(1)
 	return nil

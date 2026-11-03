@@ -1,8 +1,8 @@
 package conversation
 
 import (
+	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/model"
-	"github.com/xiaoyu98628/callum/internal/run"
 )
 
 // Conversation 是会话展示信息，首次发送时与消息、执行一起创建。
@@ -75,8 +75,8 @@ type Execution struct {
 	Conversation      Conversation
 	User              Message
 	Assistant         Message
-	Run               run.Run
-	Step              run.Step
+	Run               agent.Run
+	Step              agent.Step
 	History           []Message
 }
 

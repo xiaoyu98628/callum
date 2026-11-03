@@ -8,10 +8,10 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
 	domain "github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
-	"github.com/xiaoyu98628/callum/internal/run"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
 
@@ -99,20 +99,20 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			return err
 		}
 		if size+int64(len(encoded)) > history.MaxBytes {
-			return run.ErrOutputLimit
+			return agent.ErrOutputLimit
 		}
 		var rows []schema.Message
 		if err := tx.Where("conversation_id = ? AND sequence < ? AND (role = 'user' OR status = 'completed')", conv.ID, user.Sequence).Order("sequence").Limit(256).Find(&rows).Error; err != nil {
 			return err
 		}
 		if len(rows) > 255 {
-			return run.ErrOutputLimit
+			return agent.ErrOutputLimit
 		}
-		runRow := schema.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, Status: run.Running, CreatedAt: now, UpdatedAt: now}
+		runRow := schema.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
 		if err := tx.Omit("Conversation", "Replaces").Create(&runRow).Error; err != nil {
 			return err
 		}
-		user.RunID, user.Content, user.Status, user.UpdatedAt, user.CompletedAt = in.RunID, in.Content, run.Completed, now, &now
+		user.RunID, user.Content, user.Status, user.UpdatedAt, user.CompletedAt = in.RunID, in.Content, agent.Completed, now, &now
 		if in.ResendMessageID != "" {
 			if err := tx.Omit("Run").Select("RunID", "Content", "Status", "UpdatedAt", "CompletedAt").Updates(&user).Error; err != nil {
 				return err
@@ -120,14 +120,14 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		} else if err := tx.Omit("Run").Create(&user).Error; err != nil {
 			return err
 		}
-		assistant := schema.Message{ID: in.AssistantMessageID, ConversationID: conv.ID, RunID: in.RunID, Sequence: user.Sequence + 1, Role: "assistant", Content: []model.Block{}, Status: run.Running, CreatedAt: now, UpdatedAt: now}
+		assistant := schema.Message{ID: in.AssistantMessageID, ConversationID: conv.ID, RunID: in.RunID, Sequence: user.Sequence + 1, Role: "assistant", Content: []model.Block{}, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
 		if err := tx.Omit("Run").Create(&assistant).Error; err != nil {
 			return err
 		}
 		out.History = make([]domain.Message, 0, len(rows)+1)
 		sources := make([]map[string]any, 0, len(rows)+1)
 		for _, row := range rows {
-			if row.Role == "assistant" && row.Status != run.Completed {
+			if row.Role == "assistant" && row.Status != agent.Completed {
 				continue
 			}
 			out.History = append(out.History, message(row))
@@ -139,7 +139,7 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		if err != nil {
 			return err
 		}
-		step := schema.Step{ID: in.StepID, ConversationID: conv.ID, RunID: in.RunID, Sequence: 1, Type: "model_call", Name: "生成回答", Status: run.Pending, Input: input, Model: &in.Model, CreatedAt: now, UpdatedAt: now}
+		step := schema.Step{ID: in.StepID, ConversationID: conv.ID, RunID: in.RunID, Sequence: 1, Type: "model_call", Name: "生成回答", Status: agent.Pending, Input: input, Model: &in.Model, CreatedAt: now, UpdatedAt: now}
 		if err := tx.Omit("Run", "Parent").Create(&step).Error; err != nil {
 			return err
 		}
@@ -148,8 +148,8 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			return err
 		}
 		out.Conversation, out.User, out.Assistant = convert(conv), message(user), message(assistant)
-		out.Run = run.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, Status: run.Running, CreatedAt: now, UpdatedAt: now}
-		out.Step = run.Step{ID: step.ID, ConversationID: conv.ID, RunID: in.RunID, Sequence: 1, Type: step.Type, Name: step.Name, Status: step.Status, Input: input, Model: &in.Model, CreatedAt: now, UpdatedAt: now}
+		out.Run = agent.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
+		out.Step = agent.Step{ID: step.ID, ConversationID: conv.ID, RunID: in.RunID, Sequence: 1, Type: step.Type, Name: step.Name, Status: step.Status, Input: input, Model: &in.Model, CreatedAt: now, UpdatedAt: now}
 		return nil
 	})
 	return out, err

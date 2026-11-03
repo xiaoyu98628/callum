@@ -24,13 +24,16 @@ func (c *Client) Stream(ctx context.Context, req model.Request, emit func(model.
 	}
 
 	var capture *streamCapture
-	if req.CaptureResult {
+	if req.CaptureResult || len(req.Tools) > 0 {
 		capture = &streamCapture{}
 		params.StreamOptions = openai.ChatCompletionStreamOptionsParam{IncludeUsage: openai.Bool(true)}
 	}
 	httpResponse, err := c.streamText(ctx, params, emit, capture)
 	if capture != nil {
 		result, captureErr := capture.result(requestID(httpResponse))
+		if captureErr == nil && err == nil {
+			result.ToolCalls, captureErr = responseCalls(string(capture.messageJSON()), result.FinishReason, len(req.Tools) > 0)
+		}
 		err = errors.Join(err, captureErr)
 		if callbackErr := emit(model.Event{Type: model.EventResult, RequestID: result.RequestID, Result: &result}); callbackErr != nil {
 			err = errors.Join(err, wrapError("callback", httpResponse, callbackErr))
@@ -128,7 +131,7 @@ func (c *Client) streamText(
 			)
 		}
 
-		if len(choice.Delta.ToolCalls) > 0 {
+		if len(choice.Delta.ToolCalls) > 0 && len(params.Tools) == 0 {
 			return httpResponse, wrapError(
 				"decode stream",
 				httpResponse,
@@ -168,7 +171,7 @@ func (c *Client) streamText(
 	}
 
 	// 读取结束不等于生成成功，必须检查模型的结束原因。
-	if err := checkFinishReason(finishReason); err != nil {
+	if err := checkToolFinishReason(finishReason, len(params.Tools) > 0); err != nil {
 		return httpResponse, wrapError("finish stream", httpResponse, err)
 	}
 
