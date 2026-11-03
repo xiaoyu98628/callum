@@ -10,6 +10,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent/executor"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	toolexecutor "github.com/xiaoyu98628/callum/internal/tool/executor"
+	"github.com/xiaoyu98628/callum/internal/tool/policy"
 	"github.com/xiaoyu98628/callum/internal/workspace"
 )
 
@@ -25,15 +26,16 @@ type Engine struct {
 
 // Options 固定当前运行时的工具与审批策略，不允许模型覆盖。
 type Options struct {
-	Tools        *toolexecutor.Executor
-	Approvals    *approval.Service
-	Workspace    func(context.Context, string) (workspace.Workspace, error)
-	CallTimeout  time.Duration
-	ApprovalMode string
+	Tools             *toolexecutor.Executor
+	Approvals         *approval.Service
+	Workspace         func(context.Context, string) (workspace.Workspace, error)
+	CallTimeout       time.Duration
+	ApprovalPolicy    policy.ApprovalPolicy
+	ApprovalsReviewer policy.Reviewer
 }
 
 func New(repository agent.Repository, conversations conversation.Repository, manager *executor.Manager, emit func(agent.Event) error, logger *slog.Logger, options Options) (*Engine, error) {
-	if repository == nil || conversations == nil || manager == nil || emit == nil || logger == nil || options.CallTimeout <= 0 || options.Tools == nil || options.Approvals == nil || options.Workspace == nil || (options.ApprovalMode != "auto-read" && options.ApprovalMode != "always") {
+	if repository == nil || conversations == nil || manager == nil || emit == nil || logger == nil || options.CallTimeout <= 0 || options.Tools == nil || options.Approvals == nil || options.Workspace == nil || !options.ApprovalPolicy.Valid() || !options.ApprovalsReviewer.Valid() {
 		return nil, agent.ErrInvalid
 	}
 	return &Engine{repository: repository, conversations: conversations, manager: manager, emit: emit, logger: logger, options: options}, nil

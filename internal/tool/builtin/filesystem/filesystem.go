@@ -30,7 +30,7 @@ func Tools() []tool.Tool {
 }
 
 func (t fileTool) Definition() tool.Definition {
-	return tool.Definition{Name: t.name, Description: t.description, Parameters: append(json.RawMessage(nil), t.schema...), Source: "builtin", Version: "1", ReadOnly: true}
+	return tool.Definition{Name: t.name, Description: t.description, Parameters: append(json.RawMessage(nil), t.schema...), Source: "builtin", Version: "1", Effects: []tool.Effect{tool.EffectRead}}
 }
 
 type arguments struct {

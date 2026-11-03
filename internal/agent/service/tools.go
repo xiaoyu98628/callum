@@ -13,6 +13,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/tool"
 	toolexecutor "github.com/xiaoyu98628/callum/internal/tool/executor"
+	"github.com/xiaoyu98628/callum/internal/tool/policy"
 )
 
 func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, denied map[string]bool) (message model.Message, retErr error) {
@@ -41,8 +42,9 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 			retErr = errors.Join(retErr, err)
 		}
 	}()
+	decision := e.toolDecision(prepared, denied)
 	var err error
-	step, err = e.createToolStep(ctx, ex, parent, call, prepared)
+	step, err = e.createToolStep(ctx, ex, parent, call, prepared, decision)
 	if err != nil {
 		return message, err
 	}
@@ -53,7 +55,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	if operationErr != nil {
 		return
 	}
-	approvalID, err := e.authorizeTool(ctx, ex, &step, prepared, denied)
+	approvalID, err := e.authorizeTool(ctx, ex, &step, prepared, decision, denied)
 	if err != nil {
 		operationErr = err
 		if errors.Is(err, tool.ErrDenied) {
@@ -88,15 +90,22 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	return
 }
 
-func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, prepared *toolexecutor.Prepared) (agent.Step, error) {
-	input := map[string]any{"arguments": call.Arguments, "approval_mode": e.options.ApprovalMode}
+func (e *Engine) toolDecision(prepared *toolexecutor.Prepared, denied map[string]bool) policy.Decision {
+	if prepared == nil {
+		return policy.Decision{Action: policy.Deny, Reason: "operation_validation_failed"}
+	}
+	if denied[prepared.Hash()] {
+		return policy.Decision{Action: policy.Deny, Reason: "previously_rejected"}
+	}
+	return policy.Evaluate(e.options.ApprovalPolicy, prepared.Definition().Effects)
+}
+
+func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, prepared *toolexecutor.Prepared, decision policy.Decision) (agent.Step, error) {
+	input := map[string]any{"arguments": call.Arguments, "approval_policy": e.options.ApprovalPolicy,
+		"approvals_reviewer": e.options.ApprovalsReviewer, "authorization": decision}
 	var definition json.RawMessage
 	if prepared != nil {
 		input["request"], input["request_hash"] = prepared.Request(), prepared.Hash()
-		input["authorization"] = "approval_required"
-		if e.options.ApprovalMode == "auto-read" && prepared.ReadOnly() {
-			input["authorization"] = "workspace_read_policy"
-		}
 		var err error
 		definition, err = json.Marshal(prepared.Definition())
 		if err != nil {
@@ -119,12 +128,17 @@ func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, 
 	return step, nil
 }
 
-func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, step *agent.Step, prepared *toolexecutor.Prepared, denied map[string]bool) (string, error) {
-	if denied[prepared.Hash()] {
-		return "", tool.ErrDenied
-	}
-	if e.options.ApprovalMode == "auto-read" && prepared.ReadOnly() {
+func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, step *agent.Step, prepared *toolexecutor.Prepared, decision policy.Decision, denied map[string]bool) (string, error) {
+	switch decision.Action {
+	case policy.Allow:
 		return "", nil
+	case policy.Ask:
+		// 审批策略只决定是否询问；审批人独立校验，不能回退成自动放行。
+		if e.options.ApprovalsReviewer != policy.User {
+			return "", tool.ErrDenied
+		}
+	default:
+		return "", tool.ErrDenied
 	}
 	a, err := e.options.Approvals.Request(ctx, ex.Run.ID, step.ID, prepared.Request(), prepared.Hash())
 	if err != nil {

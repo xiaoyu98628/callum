@@ -238,7 +238,8 @@ go run ./cmd/callum
 | `--data-dir` | 按构建标签选择 | 显式数据目录优先，相对路径按工作目录计算 |
 | `--max-concurrent-runs` | `4` | 同时执行的调用上限，范围 `1` 至 `64`，超出时立即返回忙碌错误 |
 | `--call-timeout` | `5m` | 普通对话每次模型请求超时；兼容 `model.invoke` 仍按配置解析及调用整体计时，必须大于零 |
-| `--approval-mode` | `auto-read` | 授权工作区只读工具自动放行；`always` 为每次调用审批 |
+| `--approval-policy` | `on-request` | 按操作类别决定是否询问；`always` 逐次询问；`never` 拒绝需要审批的操作 |
+| `--approvals-reviewer` | `user` | 独立指定审批人；当前只支持本机用户，不支持 `auto_review` |
 | `--tool-timeout` | `30s` | 单次工具执行超时，必须大于零 |
 
 运行数量和实际模型请求数量分别受同一个配置上限约束；标题使用空闲模型请求容量，不排队争用。
@@ -492,7 +493,21 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 审批表为 `conversation_run_approvals`：`id`、`run_id`、唯一 `step_id`、JSON `request`、`request_hash`、`status`、
 `decided_by`、`decision_note`、`created_at`、`updated_at`、`decided_at`。
 `request` 是 Go 生成的工具定义、工作区与规范化参数快照，SHA-256 绑定此次操作；客户端只能提交决定及说明。
-`ApprovalMode` 是审批策略，`auto-read` 自动放行工作区内只读操作，步骤记录权限判定，不创建虚假的用户批准记录；`always` 下三个工具也逐次审批。
+`ApprovalPolicy` 与 `ApprovalsReviewer` 是独立配置，服务启动时固定，作用于该实例内的所有会话，模型不能覆盖。
+`--approval-policy on-request` 按需询问；`always` 对每次有效工具调用询问；`never` 不询问，但需要审批的操作直接拒绝。
+`--approvals-reviewer user` 指定本机用户审批，当前不接受 `auto_review`，也不会静默改成其他审批人。
+旧 `--approval-mode` 参数已移除，启动命令应更新为上述两个参数。
+
+工具在可信定义中声明 `effects`，支持 `read`、`write`、`destructive`、`external`、`unknown`，可包含多个类别。
+参数及工作区校验通过后，工作区读取和普通修改按规则自动放行；删除、大范围覆盖、外发和影响未知的操作需要审批。
+任何破坏性、外发或未知类别都不能被同时声明的读取类别抵消；未声明类别按未知操作处理，无效类别不允许注册。
+普通修改只适用于经工具实现确认的常规文件修改；影响较大的覆盖必须声明 `destructive`，不能仅声明 `write`。
+这些类别不能由模型参数声明，审批不能放宽未授权路径或绕过参数校验。
+当前只提供三个读取工具，修改、删除和外发类别的判定通过受控工具验证，对应产品工具尚未接入。
+
+每个工具步骤的 `input` 保存 `approval_policy`、`approvals_reviewer`，以及 `authorization.action`（`allow`、`ask`、`deny`）和规则标识 `authorization.reason`。
+判定是执行前的规则结果；`ask` 的实际用户决定通过关联审批记录查询。自动放行及策略拒绝不会伪造用户审批记录。
+工作区路径由工具执行器独立校验；本次未加入 `sandbox_mode`，未实现操作系统沙箱或“完全访问”模式。
 模型请求及工具执行仍分别受 `--call-timeout`、`--tool-timeout` 限制；审批等待没有超时配置。
 审批状态为 `pending`、`approved`、`rejected`、`cancelled`。批准后再次校验权限与取消信号，并在事务中认领尚未执行的工具步骤。
 相同决定重复提交保持幂等，冲突决定返回错误；本机用户决定记录为 `local_user`，不是外部身份认证。
@@ -503,7 +518,7 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 手工验证时使用独立开发数据目录，已有厂商配置后创建支持工具的模型，并绑定工作区：
 
 ```sh
-go run ./cmd/callum --data-dir .callum/dev-approval --approval-mode always
+go run ./cmd/callum --data-dir .callum/dev-approval --approval-policy always --approvals-reviewer user
 ```
 
 ```json

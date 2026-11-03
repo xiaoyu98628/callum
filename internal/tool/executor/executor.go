@@ -35,10 +35,10 @@ type Prepared struct {
 
 func (p *Prepared) Request() json.RawMessage { return slices.Clone(p.request) }
 func (p *Prepared) Hash() string             { return p.hash }
-func (p *Prepared) ReadOnly() bool           { return p.definition.ReadOnly }
 func (p *Prepared) Definition() tool.Definition {
 	d := p.definition
 	d.Parameters = slices.Clone(d.Parameters)
+	d.Effects = slices.Clone(d.Effects)
 	return d
 }
 func (p *Prepared) Close() error { return p.root.Close() }
@@ -81,6 +81,8 @@ func (e *Executor) Prepare(ctx context.Context, scope tool.Scope, name string, a
 		return nil, tool.ErrUnavailable
 	}
 	definition := t.Definition()
+	definition.Parameters = slices.Clone(definition.Parameters)
+	definition.Effects = slices.Clone(definition.Effects)
 	request, err := json.Marshal(Operation{Tool: definition, Workspace: scope, Arguments: normalized, Summary: definition.Description})
 	if err != nil {
 		return nil, errors.Join(err, root.Close())

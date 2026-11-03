@@ -18,8 +18,9 @@ import (
 )
 
 func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
-	for _, mode := range []string{"automatic", "approve", "reject", "cancel"} {
+	for _, mode := range []string{"automatic", "never", "approve", "reject", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
+			automatic := mode == "automatic" || mode == "never"
 			var toolResults atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var input struct {
@@ -46,7 +47,7 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 					if last.ToolCallID != "call-read" || len(input.Messages) < 3 || len(input.Messages[len(input.Messages)-2].Calls) != 1 {
 						t.Error("工具调用与结果未配对")
 					}
-					if mode == "automatic" || mode == "approve" {
+					if automatic || mode == "approve" {
 						if !bytes.Contains([]byte(last.Content), []byte("workspace-content")) {
 							t.Errorf("未读取工作区文件: %s", last.Content)
 						}
@@ -91,8 +92,10 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg.MaxConcurrentRuns = 1
-			if mode != "automatic" {
-				cfg.ApprovalMode = "always"
+			if mode == "never" {
+				cfg.ApprovalPolicy = "never"
+			} else if !automatic {
+				cfg.ApprovalPolicy = "always"
 			}
 			if mode == "approve" || mode == "cancel" {
 				cfg.CallTimeout = 250 * time.Millisecond
@@ -118,7 +121,7 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 			accepted := p.call(t, "conversation.send", map[string]any{"model_id": mid, "workspace_id": wid, "stream": stream, "content": messageBlocks("读取文件")})
 			runID, convID := resultString(t, accepted, "run_id"), resultString(t, accepted, "conversation_id")
 			var approvalID string
-			if mode != "automatic" {
+			if !automatic {
 				notification := p.event(t, "approval.requested")
 				var payload struct {
 					ApprovalID     string         `json:"approval_id"`
@@ -198,7 +201,7 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 			if err := json.Unmarshal(approvals.Result, &records); err != nil {
 				t.Fatal(err)
 			}
-			if mode == "automatic" {
+			if automatic {
 				if len(records) != 0 {
 					t.Fatal("自动放行伪造了用户审批")
 				}

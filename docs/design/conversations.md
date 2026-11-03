@@ -125,7 +125,15 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 模型调用与工具执行分别使用 call-timeout、tool-timeout，默认 5 分钟和 30 秒。审批没有过期时间或超时配置，等待用户决定或执行取消。
 审批等待保留有界执行容量和会话互斥，但释放模型请求槽位，不持有数据库事务。
 
-审批模式为 auto-read（默认）及 always。权限判定属于 Go，模型不能声明自己已获授权。
+审批策略 ApprovalPolicy 与审批人 ApprovalsReviewer 独立配置，由服务启动配置固定，适用于实例内所有会话。
+approval-policy 支持 on-request（默认）、always、never；approvals-reviewer 当前只支持 user，不接受尚未实现的 auto_review。
+on-request 放行工作区读取和普通修改，删除、大范围覆盖、外发或未知影响需要询问；always 逐次询问；never 将需要审批的操作直接拒绝。
+工具 effects 由可信代码声明，可包含 read、write、destructive、external、unknown；缺少类别按未知操作处理，无效类别拒绝注册。
+混合类别采用需要审批的结果，读取声明不能抵消破坏性或外发影响；工具负责将影响较大的覆盖声明为 destructive。
+当前三个工具均为读取，其他操作类别使用受控工具验证，不表示已经接入文件修改或外发工具。
+参数与工作区权限独立校验；审批通过不扩大路径权限，策略拒绝和参数校验失败不生成用户审批记录。
+权限判定属于 Go，模型不能声明自己已获授权。旧 approval-mode 参数移除，未加入操作系统沙箱或完全访问模式。
+工具步骤 input 保存 approval_policy、approvals_reviewer 和 authorization（action、reason），供审计查询；审批表结构和通信接口保持不变。
 request 保存服务端生成的工具完整定义、版本、工作区及规范化参数，request_hash 为该快照的 SHA-256。
 approval.get/list 查询记录，approval.decide 只接受 approval_id、decision、decision_note；批准或拒绝身份由服务端填写为 local_user。
 相同决定幂等，冲突决定拒绝。批准与取消竞争时，仍需在执行前检查上下文、工作区及操作指纹，数据库原子认领保证同一步骤不会启动两次。

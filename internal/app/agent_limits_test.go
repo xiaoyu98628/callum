@@ -48,7 +48,7 @@ func TestAgentRejectsRepeatedOperationAndLimitsLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.MaxConcurrentRuns = 1
-	cfg.ApprovalMode = "always"
+	cfg.ApprovalPolicy = "always"
 	p := startApp(t, cfg, io.Discard)
 	mid := setupToolModel(t, p, upstream.URL)
 	wid := setupToolWorkspace(t, p)
@@ -103,7 +103,7 @@ func TestPausedAgentIsolationAndShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.MaxConcurrentRuns = 2
-	cfg.ApprovalMode = "always"
+	cfg.ApprovalPolicy = "always"
 	p := startApp(t, cfg, io.Discard)
 	mid := setupToolModel(t, p, upstream.URL)
 	wid := setupToolWorkspace(t, p)
@@ -158,7 +158,7 @@ func TestIncompleteToolStreamDoesNotExecute(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.MaxConcurrentRuns = 1
-	cfg.ApprovalMode = "always"
+	cfg.ApprovalPolicy = "always"
 	p := startApp(t, cfg, io.Discard)
 	mid := setupToolModel(t, p, upstream.URL)
 	wid := setupToolWorkspace(t, p)

@@ -27,6 +27,11 @@ func (r *Registry) Register(t tool.Tool) error {
 	if !namePattern.MatchString(d.Name) || d.Description == "" || d.Source == "" || d.Version == "" || !json.Valid(d.Parameters) {
 		return tool.ErrInvalid
 	}
+	for _, effect := range d.Effects {
+		if !effect.Valid() {
+			return tool.ErrInvalid
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.tools[d.Name]; ok {
@@ -53,6 +58,7 @@ func (r *Registry) Definitions() []tool.Definition {
 	for _, t := range r.tools {
 		d := t.Definition()
 		d.Parameters = slices.Clone(d.Parameters)
+		d.Effects = slices.Clone(d.Effects)
 		out = append(out, d)
 	}
 	slices.SortFunc(out, func(a, b tool.Definition) int {

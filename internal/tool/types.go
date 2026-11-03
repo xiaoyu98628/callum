@@ -20,12 +20,34 @@ var (
 	ErrLimit       = errors.New("工具输入或结果超过限制")
 )
 
-// Definition 由可信注册代码提供；ReadOnly 不能由模型或调用参数声明。
+// Effect 描述工具可能产生的操作影响，由可信工具实现声明。
+type Effect string
+
+const (
+	EffectRead        Effect = "read"        // 工作区内读取，不修改文件。
+	EffectWrite       Effect = "write"       // 工作区内新建或普通修改，不包含大范围覆盖。
+	EffectDestructive Effect = "destructive" // 删除、大范围覆盖等破坏性操作。
+	EffectExternal    Effect = "external"    // 向外部发送数据。
+	EffectUnknown     Effect = "unknown"     // 尚不能明确判断操作影响。
+)
+
+// Valid 判断操作类别是否受支持；缺少类别时由审批策略按未知操作处理。
+func (e Effect) Valid() bool {
+	switch e {
+	case EffectRead, EffectWrite, EffectDestructive, EffectExternal, EffectUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+// Definition 由可信注册代码提供；Effects 不能由模型或调用参数声明。
+// 一个工具可包含多个影响，不能用读取类别抵消删除或外发影响。
 type Definition struct {
 	model.ToolDefinition
-	Source   string `json:"source"`
-	Version  string `json:"version"`
-	ReadOnly bool   `json:"read_only"`
+	Source  string   `json:"source"`
+	Version string   `json:"version"`
+	Effects []Effect `json:"effects"`
 }
 
 // Scope 固定本次调用的工作区授权范围。

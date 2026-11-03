@@ -57,7 +57,7 @@ type Runtime struct {
 // New 装配与协议无关的运行时；ctx 是应用运行上下文，初始化使用独立短超时。
 // 部分初始化失败时关闭此前取得的资源，且不覆盖原始错误。
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtime, retErr error) {
-	if ctx == nil || logger == nil || !filepath.IsAbs(cfg.DatabasePath) || cfg.MaxConcurrentRuns < 1 || cfg.MaxConcurrentRuns > 64 || cfg.CallTimeout <= 0 || cfg.ToolTimeout <= 0 || (cfg.ApprovalMode != "auto-read" && cfg.ApprovalMode != "always") {
+	if ctx == nil || logger == nil || !filepath.IsAbs(cfg.DatabasePath) || cfg.MaxConcurrentRuns < 1 || cfg.MaxConcurrentRuns > 64 || cfg.CallTimeout <= 0 || cfg.ToolTimeout <= 0 || !cfg.ApprovalPolicy.Valid() || !cfg.ApprovalsReviewer.Valid() {
 		return nil, errors.New("应用运行配置无效")
 	}
 	if err := ctx.Err(); err != nil {
@@ -140,7 +140,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	if err != nil {
 		return nil, err
 	}
-	r.engine, err = agentservice.New(runRepository, conversationRepository, r.manager, r.events.Publish, logger, agentservice.Options{Tools: tools, Approvals: r.approvals, Workspace: r.workspaces.Get, CallTimeout: cfg.CallTimeout, ApprovalMode: cfg.ApprovalMode})
+	r.engine, err = agentservice.New(runRepository, conversationRepository, r.manager, r.events.Publish, logger, agentservice.Options{Tools: tools, Approvals: r.approvals, Workspace: r.workspaces.Get, CallTimeout: cfg.CallTimeout, ApprovalPolicy: cfg.ApprovalPolicy, ApprovalsReviewer: cfg.ApprovalsReviewer})
 	if err != nil {
 		return nil, err
 	}
