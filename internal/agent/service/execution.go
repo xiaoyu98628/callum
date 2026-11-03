@@ -14,6 +14,9 @@ import (
 // Execute 只在受理响应已排队后运行；标题任务在终态前取消并等待退出。
 func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved) {
 	err := e.initialEvents(ex)
+	if ex.Run.SettingsSnapshot == nil || !ex.Run.SettingsSnapshot.Valid() {
+		err = errors.Join(err, agent.ErrInvalid)
+	}
 	var titleWG sync.WaitGroup
 	titleCtx, titleCancel := context.WithCancel(ctx)
 	if err == nil {

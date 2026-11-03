@@ -11,6 +11,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/settings"
 	"github.com/xiaoyu98628/callum/internal/tool"
 	toolexecutor "github.com/xiaoyu98628/callum/internal/tool/executor"
 	"github.com/xiaoyu98628/callum/internal/tool/policy"
@@ -42,7 +43,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 			retErr = errors.Join(retErr, err)
 		}
 	}()
-	decision := e.toolDecision(prepared, denied)
+	decision := toolDecision(prepared, denied, ex.Run.SettingsSnapshot)
 	var err error
 	step, err = e.createToolStep(ctx, ex, parent, call, prepared, decision)
 	if err != nil {
@@ -90,19 +91,24 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	return
 }
 
-func (e *Engine) toolDecision(prepared *toolexecutor.Prepared, denied map[string]bool) policy.Decision {
+func toolDecision(prepared *toolexecutor.Prepared, denied map[string]bool, snapshot *settings.Snapshot) policy.Decision {
+	if snapshot == nil || !snapshot.Valid() {
+		return policy.Decision{Action: policy.Deny, Reason: "invalid_settings_snapshot"}
+	}
 	if prepared == nil {
 		return policy.Decision{Action: policy.Deny, Reason: "operation_validation_failed"}
 	}
 	if denied[prepared.Hash()] {
 		return policy.Decision{Action: policy.Deny, Reason: "previously_rejected"}
 	}
-	return policy.Evaluate(e.options.ApprovalPolicy, prepared.Definition().Effects)
+	return policy.Evaluate(snapshot.ApprovalPolicy, prepared.Definition().Effects)
 }
 
 func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, prepared *toolexecutor.Prepared, decision policy.Decision) (agent.Step, error) {
-	input := map[string]any{"arguments": call.Arguments, "approval_policy": e.options.ApprovalPolicy,
-		"approvals_reviewer": e.options.ApprovalsReviewer, "authorization": decision}
+	input := map[string]any{"arguments": call.Arguments, "authorization": decision}
+	if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
+		input["approval_policy"], input["approvals_reviewer"], input["settings_revision"] = snapshot.ApprovalPolicy, snapshot.ApprovalsReviewer, snapshot.Revision
+	}
 	var definition json.RawMessage
 	if prepared != nil {
 		input["request"], input["request_hash"] = prepared.Request(), prepared.Hash()
@@ -134,7 +140,7 @@ func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, s
 		return "", nil
 	case policy.Ask:
 		// 审批策略只决定是否询问；审批人独立校验，不能回退成自动放行。
-		if e.options.ApprovalsReviewer != policy.User {
+		if ex.Run.SettingsSnapshot == nil || ex.Run.SettingsSnapshot.ApprovalsReviewer != policy.User {
 			return "", tool.ErrDenied
 		}
 	default:

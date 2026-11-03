@@ -12,15 +12,30 @@ import (
 	domain "github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/settings"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
+	settingsstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/settings"
 )
 
 // Begin 在同一写事务中接受输入并建立执行；事务返回后才可调用模型。
 func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Execution, err error) {
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		// 与设置更新按同一数据库事务顺序确定配置；读失败时不创建会话或回退权限。
+		configuration, err := settingsstore.NewRepository(tx)
+		if err != nil {
+			return err
+		}
+		record, err := configuration.Get(ctx, settings.ExecutionKey)
+		if err != nil {
+			return err
+		}
+		snapshot, err := settings.ExecutionSnapshot(record)
+		if err != nil {
+			return err
+		}
 		now := time.Now().UnixMilli()
 		var conv schema.Conversation
-		err := tx.Where("id = ?", in.ConversationID).Take(&conv).Error
+		err = tx.Where("id = ?", in.ConversationID).Take(&conv).Error
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			if !in.Create || in.ResendMessageID != "" {
 				return domain.ErrNotFound
@@ -108,7 +123,7 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		if len(rows) > 255 {
 			return agent.ErrOutputLimit
 		}
-		runRow := schema.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
+		runRow := schema.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, SettingsSnapshot: &snapshot, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
 		if err := tx.Omit("Conversation", "Replaces").Create(&runRow).Error; err != nil {
 			return err
 		}
@@ -148,7 +163,7 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			return err
 		}
 		out.Conversation, out.User, out.Assistant = convert(conv), message(user), message(assistant)
-		out.Run = agent.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
+		out.Run = agent.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, SettingsSnapshot: &snapshot, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
 		out.Step = agent.Step{ID: step.ID, ConversationID: conv.ID, RunID: in.RunID, Sequence: 1, Type: step.Type, Name: step.Name, Status: step.Status, Input: input, Model: &in.Model, CreatedAt: now, UpdatedAt: now}
 		return nil
 	})

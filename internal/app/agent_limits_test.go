@@ -48,8 +48,8 @@ func TestAgentRejectsRepeatedOperationAndLimitsLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.MaxConcurrentRuns = 1
-	cfg.ApprovalPolicy = "always"
 	p := startApp(t, cfg, io.Discard)
+	setApprovalPolicy(t, p, "always")
 	mid := setupToolModel(t, p, upstream.URL)
 	wid := setupToolWorkspace(t, p)
 	accepted := p.call(t, "conversation.send", map[string]any{"model_id": mid, "workspace_id": wid, "stream": false, "content": messageBlocks("读取")})
@@ -103,8 +103,8 @@ func TestPausedAgentIsolationAndShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.MaxConcurrentRuns = 2
-	cfg.ApprovalPolicy = "always"
 	p := startApp(t, cfg, io.Discard)
+	setApprovalPolicy(t, p, "always")
 	mid := setupToolModel(t, p, upstream.URL)
 	wid := setupToolWorkspace(t, p)
 	first := p.call(t, "conversation.send", map[string]any{"model_id": mid, "workspace_id": wid, "stream": false, "content": messageBlocks("读取")})
@@ -158,8 +158,8 @@ func TestIncompleteToolStreamDoesNotExecute(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.MaxConcurrentRuns = 1
-	cfg.ApprovalPolicy = "always"
 	p := startApp(t, cfg, io.Discard)
+	setApprovalPolicy(t, p, "always")
 	mid := setupToolModel(t, p, upstream.URL)
 	wid := setupToolWorkspace(t, p)
 	accepted := p.call(t, "conversation.send", map[string]any{"model_id": mid, "workspace_id": wid, "stream": true, "content": messageBlocks("读取")})
@@ -178,4 +178,19 @@ func TestIncompleteToolStreamDoesNotExecute(t *testing.T) {
 		t.Fatalf("不完整参数触发工具步骤或丢失 usage: %s", stepsFrame.Result)
 	}
 	p.stop(t)
+}
+
+// setApprovalPolicy 通过公开通信接口修改持久化配置，验证不会依赖启动时注入。
+func setApprovalPolicy(t *testing.T, p *appPeer, choice string) {
+	t.Helper()
+	current := p.call(t, "settings.get", map[string]any{"key": "execution"})
+	requireOK(t, current)
+	var value struct {
+		Revision int64 `json:"revision"`
+	}
+	if err := json.Unmarshal(current.Result, &value); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, p.call(t, "settings.update", map[string]any{"key": "execution", "revision": value.Revision,
+		"value": map[string]any{"approval_policy": choice, "approvals_reviewer": "user"}}))
 }

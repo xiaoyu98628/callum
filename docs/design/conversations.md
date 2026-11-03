@@ -49,11 +49,12 @@ content 为有序内容块数组，例如 [{"type":"text","text":"分析图片"}
 
 ### conversation_runs
 
-id TEXT PRIMARY KEY；conversation_id TEXT；replaces_run_id TEXT?；model TEXT JSON；stream INTEGER；status TEXT DEFAULT 'running'；error_kind TEXT?；error_message TEXT?；created_at INTEGER；updated_at INTEGER；finished_at INTEGER?。
+id TEXT PRIMARY KEY；conversation_id TEXT；replaces_run_id TEXT?；model TEXT JSON；stream INTEGER；settings_snapshot TEXT JSON?；status TEXT DEFAULT 'running'；error_kind TEXT?；error_message TEXT?；created_at INTEGER；updated_at INTEGER；finished_at INTEGER?。
 
 状态为 running、awaiting_approval、awaiting_user_input、completed、failed、cancelled、interrupted。
 同一会话最多一个未结束执行；不同会话受全局并发限制。手动压缩也可以创建执行，不要求有用户消息。
 replaces_run_id 仅关联被替代执行，不保留旧消息分支。所有终态填写 finished_at。
+settings_snapshot 保存受理事务读取的配置版本和实际审批设置；新执行必须保存快照，旧执行缺失时保持空值，不补造历史配置。
 
 ### conversation_run_steps
 
@@ -112,7 +113,7 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 
 创建、编辑和状态变更按业务动作定义事务，不在等待模型、工具、用户输入时占用事务。
 关闭时停止接收、取消并等待任务、结束待审批记录，再关闭通信、HTTP 连接池和数据库。恢复中断执行前确认数据目录实例所有权。
-迁移为 000001_create_model_config.go、000002_create_conversation_core.go、000003_create_run_approvals.go；当前结构版本 3，版本 1、2 经校验后保留数据升级；压缩随功能增加具体迁移。
+迁移为 000001_create_model_config.go、000002_create_conversation_core.go、000003_create_run_approvals.go、000004_create_app_settings.go；当前结构版本 4，版本 1、2、3 经校验后保留数据升级；压缩随功能增加具体迁移。
 版本判断同时验证实际结构，兼容当前版本 1 的 UUIDv7 配置库；迁移失败回滚，不重建用户数据库。
 验证包括迁移、约束、事务回滚、多会话隔离、取消、重发、标题竞争、流式异常、资源关闭及 usage 保存，并运行项目规定的完整检查。
 
@@ -125,15 +126,19 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 模型调用与工具执行分别使用 call-timeout、tool-timeout，默认 5 分钟和 30 秒。审批没有过期时间或超时配置，等待用户决定或执行取消。
 审批等待保留有界执行容量和会话互斥，但释放模型请求槽位，不持有数据库事务。
 
-审批策略 ApprovalPolicy 与审批人 ApprovalsReviewer 独立配置，由服务启动配置固定，适用于实例内所有会话。
-approval-policy 支持 on-request（默认）、always、never；approvals-reviewer 当前只支持 user，不接受尚未实现的 auto_review。
+应用设置保存在 app_settings：id TEXT UUIDv7 PRIMARY KEY；key TEXT UNIQUE；value TEXT JSON 对象；revision INTEGER 默认 1 且大于零；created_at INTEGER；updated_at INTEGER。
+当前配置组 key=execution，value 保存独立的 approval_policy、approvals_reviewer，不为每个设置项增加数据库字段。
+settings.get 读取配置组，settings.update 携带 key、当前 revision 和完整 value 原子替换；冲突返回 1003，非法参数返回 -32602，失败不改变配置。
+受理执行与读取设置在同一事务中完成，保存 settings_snapshot；更新成功后发起的新任务读取新值，已受理任务的审批策略保持不变，无需重启。
+approval_policy 支持 on-request（默认）、always、never；approvals_reviewer 当前只支持 user，不接受尚未实现的 auto_review。
+启动时保留用户选择；读取异常阻止受理，不回退默认权限；旧执行缺失快照不伪造数据。
 on-request 放行工作区读取和普通修改，删除、大范围覆盖、外发或未知影响需要询问；always 逐次询问；never 将需要审批的操作直接拒绝。
 工具 effects 由可信代码声明，可包含 read、write、destructive、external、unknown；缺少类别按未知操作处理，无效类别拒绝注册。
 混合类别采用需要审批的结果，读取声明不能抵消破坏性或外发影响；工具负责将影响较大的覆盖声明为 destructive。
 当前三个工具均为读取，其他操作类别使用受控工具验证，不表示已经接入文件修改或外发工具。
 参数与工作区权限独立校验；审批通过不扩大路径权限，策略拒绝和参数校验失败不生成用户审批记录。
-权限判定属于 Go，模型不能声明自己已获授权。旧 approval-mode 参数移除，未加入操作系统沙箱或完全访问模式。
-工具步骤 input 保存 approval_policy、approvals_reviewer 和 authorization（action、reason），供审计查询；审批表结构和通信接口保持不变。
+权限判定属于 Go，模型不能声明自己已获授权。旧 approval-mode、approval-policy、approvals-reviewer 启动参数移除，未加入操作系统沙箱或完全访问模式。
+工具步骤 input 保存 settings_revision、approval_policy、approvals_reviewer 和 authorization（action、reason），供审计查询；审批表结构和通信接口保持不变。
 request 保存服务端生成的工具完整定义、版本、工作区及规范化参数，request_hash 为该快照的 SHA-256。
 approval.get/list 查询记录，approval.decide 只接受 approval_id、decision、decision_note；批准或拒绝身份由服务端填写为 local_user。
 相同决定幂等，冲突决定拒绝。批准与取消竞争时，仍需在执行前检查上下文、工作区及操作指纹，数据库原子认领保证同一步骤不会启动两次。

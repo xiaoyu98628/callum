@@ -70,6 +70,12 @@ func (h *Hub) Publish(event agent.Event) error {
 	if step, ok := event.Data.(agent.Step); ok {
 		event.Data = agent.SummarizeStep(step)
 	}
+	if run, ok := event.Data.(agent.Run); ok && run.SettingsSnapshot != nil {
+		// 消费者遵守只读约定，发布器同时避免队列引用执行器内部的权限指针。
+		snapshot := *run.SettingsSnapshot
+		run.SettingsSnapshot = &snapshot
+		event.Data = run
+	}
 	event.RemovedMessageIDs = slices.Clone(event.RemovedMessageIDs)
 	h.mu.Lock()
 	defer h.mu.Unlock()

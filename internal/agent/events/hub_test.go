@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/settings"
 )
 
 func TestSubscriptionIsolationAndBounds(t *testing.T) {
@@ -58,6 +59,36 @@ func TestSubscriptionIsolationAndBounds(t *testing.T) {
 	}
 	if _, err := hub.Subscribe(Filter{}); !errors.Is(err, ErrClosed) {
 		t.Fatal(err)
+	}
+}
+
+func TestRunSettingsDoNotShareExecutionPointer(t *testing.T) {
+	hub, err := New(1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.Close()
+	sub, err := hub.Subscribe(Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	snapshot := &settings.Snapshot{Revision: 3, Execution: settings.DefaultExecution()}
+	if err := hub.Publish(agent.Event{Type: "run.started", Data: agent.Run{SettingsSnapshot: snapshot}}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Revision = 4
+	event, err := sub.Next(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	run := event.Data.(agent.Run)
+	if run.SettingsSnapshot.Revision != 3 {
+		t.Fatal("队列借用了执行内部的快照")
+	}
+	run.SettingsSnapshot.ApprovalPolicy = "never"
+	if snapshot.ApprovalPolicy != "on-request" {
+		t.Fatal("事件消费者改变了执行内部权限")
 	}
 }
 

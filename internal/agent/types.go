@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/settings"
 )
 
 const (
@@ -18,17 +19,18 @@ const (
 
 // Run 保存一次持久化执行的状态，资源由执行调度器管理。
 type Run struct {
-	ID             string         `json:"id"`
-	ConversationID string         `json:"conversation_id"`
-	ReplacesRunID  *string        `json:"replaces_run_id"`
-	Model          model.Snapshot `json:"model"`
-	Stream         bool           `json:"stream"`
-	Status         string         `json:"status"`
-	ErrorKind      *string        `json:"error_kind"`
-	ErrorMessage   *string        `json:"error_message"`
-	CreatedAt      int64          `json:"created_at"`
-	UpdatedAt      int64          `json:"updated_at"`
-	FinishedAt     *int64         `json:"finished_at"`
+	ID               string             `json:"id"`
+	ConversationID   string             `json:"conversation_id"`
+	ReplacesRunID    *string            `json:"replaces_run_id"`
+	Model            model.Snapshot     `json:"model"`
+	Stream           bool               `json:"stream"`
+	SettingsSnapshot *settings.Snapshot `json:"settings_snapshot"`
+	Status           string             `json:"status"`
+	ErrorKind        *string            `json:"error_kind"`
+	ErrorMessage     *string            `json:"error_message"`
+	CreatedAt        int64              `json:"created_at"`
+	UpdatedAt        int64              `json:"updated_at"`
+	FinishedAt       *int64             `json:"finished_at"`
 }
 
 // Step 保存一次实际操作；模型响应和 usage 使用 JSON 保留协议字段。

@@ -48,6 +48,9 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | `internal/model/provider` | 厂商与模型配置类型、存储接口、错误与标识校验 | 已实现契约 |
 | `internal/model/provider/service` | 配置业务校验、UUIDv7 分配及启用规则 | 已实现业务服务 |
 | `internal/config` | 应用配置加载及启动参数 | 已实现 |
+| `internal/settings`、`service` | 配置组契约、执行快照、值校验与版本更新 | 已实现 |
+| `internal/storage/sqlite/settings` | 应用设置持久化和版本冲突校验 | 已实现 |
+| `internal/stdio/settings` | 应用设置查询、更新接口 | 已实现 |
 | `internal/config/paths` | 开发与发布构建的数据路径计算 | 已实现 |
 | `internal/storage/sqlite` | SQLite 连接池、私有文件检查、服务实例文件锁 | 已实现 |
 | `internal/storage/sqlite/schema` | 仓储与迁移共用的 GORM 表映射 | 已实现 |
@@ -97,18 +100,18 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 这里的 `catalog` 为 `internal/storage/sqlite/catalog`，`providerservice` 为 `internal/model/provider/service` 的导入别名。
 数据库打开成功后由创建者调用 `db.Close()`；存储实现使用传入的 GORM 实例，
 业务服务使用传入的存储接口，二者均不关闭数据库。数据库 `Close` 可以重复调用。
-`sqlite.Open` 将配置、工作区、会话、消息、运行、步骤和审批的 GORM 表映射传给 `migrations.Run`；
+`sqlite.Open` 将厂商、模型、工作区、会话、消息、运行、步骤、审批和应用设置的 GORM 表映射传给 `migrations.Run`；
 迁移逻辑及其测试集中在独立目录，迁移包不反向导入 SQLite 存储包，也不重复定义表映射。
 `migrations/migrate.go` 负责版本判断、事务和回滚；
 `migrations/000001_create_model_config.go` 负责创建厂商表、模型表及其约束和索引，以及已有库的主键类型检查。
-`000002_create_conversation_core.go` 创建普通对话五张表。`000003_create_run_approvals.go` 增加审批表及步骤组合唯一索引。新库顺序执行三个迁移后，在同一事务中记录版本 `3`；已有版本 `1`、`2` 的库通过检查后保留配置和对话并升级。
+`000002_create_conversation_core.go` 创建普通对话五张表。`000003_create_run_approvals.go` 增加审批表及步骤组合唯一索引。`000004_create_app_settings.go` 增加应用设置表、默认执行设置及运行配置快照。新库顺序执行四个迁移后，在同一事务中记录版本 `4`；已有版本 `1`、`2`、`3` 的库通过检查后保留配置、对话和审批并升级。旧执行快照保持 NULL，不推断其历史权限。
 初始化失败会关闭此前创建的连接池；初始化上下文不绑定到运行时实例，
 每次配置操作都接收自己的 `context.Context`。
 
 `app.New(ctx, cfg, logger)` 创建独立运行时，不需要 stdin/stdout。运行时持有数据库、实例锁、HTTP 连接池、
 共享调度器和事件发布器；初始化上下文仅用于启动，已接受的执行使用应用运行上下文。
 `Providers()`、`Workspaces()`、`Conversations()`、`Runs()` 返回业务服务，`Invoke` 提供无历史调用，
-`Approvals()` 返回审批查询与决定服务，`Cancel` 请求独立取消。无历史调用和普通对话共享运行及实际模型请求的并发限制。
+`Approvals()` 返回审批查询与决定服务，`Settings()` 返回应用设置查询与更新服务，`Cancel` 请求独立取消。无历史调用和普通对话共享运行及实际模型请求的并发限制。
 调用 `Send` 或 `Invoke` 时，`accepted` 回调获得执行标识；回调成功后才启动执行和发布执行事件。
 回调失败时释放预留容量，已写入的普通对话执行保存为取消状态。
 
@@ -202,11 +205,11 @@ Token 容量未知时保存 SQL `NULL`，填写时必须大于零，不自动推
 ### 迁移与并发
 
 数据库使用 STRICT 表、外键约束、联合唯一索引及字段检查约束。
-结构版本保存在 SQLite `user_version` 中，当前版本为 `3`，与迁移文件编号一致。
-新库在同一写事务中建立配置、普通对话与审批结构并记录版本 `3`，失败时回滚。
+结构版本保存在 SQLite `user_version` 中，当前版本为 `4`，与迁移文件编号一致。
+新库在同一写事务中建立配置、普通对话、审批与应用设置结构并记录版本 `4`，失败时回滚。
 已有版本 `1` 的数据库会检查两张配置表均使用单列 `TEXT` 类型的 `id` 主键，检查通过后继续使用，
 不会重新分配记录标识，随后增加普通对话表。曾使用相同版本号的整数主键结构会被拒绝，不提供自动升级。
-版本 `2` 升级时增加审批表及组合唯一索引，版本 `3` 还会检查审批结构、唯一索引列及外键；对话表继续检查字段、类型、约束和索引；历史同版本号但缺少相应结构的库会被拒绝。
+版本 `2` 升级时增加审批表及组合唯一索引；版本 `3` 升级时增加应用设置、初始化默认值并为执行表增加可空快照。版本 `4` 检查设置组唯一索引、快照约束及既有配置、对话和审批结构；历史同版本号但缺少相应结构的库会被拒绝。
 已有配置表但没有结构版本、结构检查失败，
 或版本不受支持时会返回错误并保留原有数据、结构和版本号，不自动删除或重建数据库。
 开发时可通过 `--data-dir` 指向独立的新数据目录。
@@ -238,8 +241,6 @@ go run ./cmd/callum
 | `--data-dir` | 按构建标签选择 | 显式数据目录优先，相对路径按工作目录计算 |
 | `--max-concurrent-runs` | `4` | 同时执行的调用上限，范围 `1` 至 `64`，超出时立即返回忙碌错误 |
 | `--call-timeout` | `5m` | 普通对话每次模型请求超时；兼容 `model.invoke` 仍按配置解析及调用整体计时，必须大于零 |
-| `--approval-policy` | `on-request` | 按操作类别决定是否询问；`always` 逐次询问；`never` 拒绝需要审批的操作 |
-| `--approvals-reviewer` | `user` | 独立指定审批人；当前只支持本机用户，不支持 `auto_review` |
 | `--tool-timeout` | `30s` | 单次工具执行超时，必须大于零 |
 
 运行数量和实际模型请求数量分别受同一个配置上限约束；标题使用空闲模型请求容量，不排队争用。
@@ -493,10 +494,21 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 审批表为 `conversation_run_approvals`：`id`、`run_id`、唯一 `step_id`、JSON `request`、`request_hash`、`status`、
 `decided_by`、`decision_note`、`created_at`、`updated_at`、`decided_at`。
 `request` 是 Go 生成的工具定义、工作区与规范化参数快照，SHA-256 绑定此次操作；客户端只能提交决定及说明。
-`ApprovalPolicy` 与 `ApprovalsReviewer` 是独立配置，服务启动时固定，作用于该实例内的所有会话，模型不能覆盖。
-`--approval-policy on-request` 按需询问；`always` 对每次有效工具调用询问；`never` 不询问，但需要审批的操作直接拒绝。
-`--approvals-reviewer user` 指定本机用户审批，当前不接受 `auto_review`，也不会静默改成其他审批人。
-旧 `--approval-mode` 参数已移除，启动命令应更新为上述两个参数。
+`ApprovalPolicy` 与 `ApprovalsReviewer` 是独立设置，保存在 `app_settings` 的 `execution` 配置组中，客户端通过接口修改，无需重启 Go 服务。
+`approval_policy` 默认 `on-request`，按需询问；`always` 对每次有效工具调用询问；`never` 不询问，但需要审批的操作直接拒绝。
+`approvals_reviewer` 当前只支持 `user`，不接受 `auto_review`。模型不能覆盖这些设置。
+`--approval-mode`、`--approval-policy`、`--approvals-reviewer` 已移除，启动参数不覆盖数据库中的用户选择。
+
+应用设置表 `app_settings` 的字段为 `id`（UUIDv7）、唯一 `key`、JSON 对象 `value`、正整数 `revision`、`created_at`、`updated_at`。
+当前注册的配置组为 `execution`，值包含 `approval_policy`、`approvals_reviewer`；新增配置内容通过业务代码定义类型和校验，不为每个设置项增加数据库列。
+迁移只初始化新设置组，重复启动保留用户配置。值上限 16 KiB；缺少必要字段、未知字段、重复键、错误类型和不支持的值均拒绝。
+`settings.get` 接收 `key` 并返回完整记录。`settings.update` 接收 `key`、读取到的 `revision` 和完整 `value`，成功后返回版本递增的记录。
+过期版本返回错误码 `1003`，客户端重新读取后保存；非法参数返回 `-32602`。写入失败不改变值或版本。
+
+每次受理在同一事务中读取设置并写入 `conversation_runs.settings_snapshot`，快照包含 `revision` 和实际设置值。
+设置更新完成后发起的新执行使用新值；正在执行或等待审批的任务继续使用各自快照，后续轮次也不会切换策略。
+配置读取或校验失败时不创建会话、消息、执行和步骤，也不回退到默认权限。
+快照由服务端生成，受理回调及事件消费者不能通过共享指针修改执行器内的配置。
 
 工具在可信定义中声明 `effects`，支持 `read`、`write`、`destructive`、`external`、`unknown`，可包含多个类别。
 参数及工作区校验通过后，工作区读取和普通修改按规则自动放行；删除、大范围覆盖、外发和影响未知的操作需要审批。
@@ -505,7 +517,7 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 这些类别不能由模型参数声明，审批不能放宽未授权路径或绕过参数校验。
 当前只提供三个读取工具，修改、删除和外发类别的判定通过受控工具验证，对应产品工具尚未接入。
 
-每个工具步骤的 `input` 保存 `approval_policy`、`approvals_reviewer`，以及 `authorization.action`（`allow`、`ask`、`deny`）和规则标识 `authorization.reason`。
+每个工具步骤的 `input` 保存 `settings_revision`、`approval_policy`、`approvals_reviewer`，以及 `authorization.action`（`allow`、`ask`、`deny`）和规则标识 `authorization.reason`。
 判定是执行前的规则结果；`ask` 的实际用户决定通过关联审批记录查询。自动放行及策略拒绝不会伪造用户审批记录。
 工作区路径由工具执行器独立校验；本次未加入 `sandbox_mode`，未实现操作系统沙箱或“完全访问”模式。
 模型请求及工具执行仍分别受 `--call-timeout`、`--tool-timeout` 限制；审批等待没有超时配置。
@@ -518,7 +530,14 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 手工验证时使用独立开发数据目录，已有厂商配置后创建支持工具的模型，并绑定工作区：
 
 ```sh
-go run ./cmd/callum --data-dir .callum/dev-approval --approval-policy always --approvals-reviewer user
+go run ./cmd/callum --data-dir .callum/dev-approval
+```
+
+读取设置后，用实际返回的 `revision` 保存整组设置；下面以新数据目录的版本 `1` 为例，切换为每次审批：
+
+```json
+{"jsonrpc":"2.0","id":"settings-read","method":"settings.get","params":{"key":"execution"}}
+{"jsonrpc":"2.0","id":"settings-save","method":"settings.update","params":{"key":"execution","revision":1,"value":{"approval_policy":"always","approvals_reviewer":"user"}}}
 ```
 
 ```json

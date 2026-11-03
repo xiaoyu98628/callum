@@ -13,10 +13,12 @@ import (
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
+	settingsservice "github.com/xiaoyu98628/callum/internal/settings/service"
 	approvalhandler "github.com/xiaoyu98628/callum/internal/stdio/approval"
 	"github.com/xiaoyu98628/callum/internal/stdio/catalog"
 	conversationhandler "github.com/xiaoyu98628/callum/internal/stdio/conversation"
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
+	settingshandler "github.com/xiaoyu98628/callum/internal/stdio/settings"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
 	workspacehandler "github.com/xiaoyu98628/callum/internal/stdio/workspace"
 	workspaceservice "github.com/xiaoyu98628/callum/internal/workspace/service"
@@ -31,11 +33,12 @@ type Server struct {
 	conversation *conversationhandler.Handler
 	logger       *slog.Logger
 	approvals    *approvalhandler.Handler
+	settings     *settingshandler.Handler
 }
 
 // NewWithConversations 装配普通对话接口；所有服务和资源仍由 app 持有。
-func NewWithConversations(providers *providerservice.Service, runs *executor.Manager, workspaces *workspaceservice.Service, conversations *conversationservice.Service, persistent *agentservice.Engine, approvals *approval.Service, accepted func(string) error, logger *slog.Logger) (*Server, error) {
-	if workspaces == nil || conversations == nil || persistent == nil || approvals == nil || accepted == nil {
+func NewWithConversations(providers *providerservice.Service, runs *executor.Manager, workspaces *workspaceservice.Service, conversations *conversationservice.Service, persistent *agentservice.Engine, approvals *approval.Service, settings *settingsservice.Service, accepted func(string) error, logger *slog.Logger) (*Server, error) {
+	if workspaces == nil || conversations == nil || persistent == nil || approvals == nil || settings == nil || accepted == nil {
 		return nil, errors.New("对话服务不能为空")
 	}
 	s, err := New(providers, runs, logger)
@@ -43,6 +46,7 @@ func NewWithConversations(providers *providerservice.Service, runs *executor.Man
 		return nil, err
 	}
 	s.approvals = approvalhandler.New(approvals)
+	s.settings = settingshandler.New(settings)
 	s.workspace = workspacehandler.New(workspaces)
 	s.conversation = conversationhandler.New(conversations, accepted)
 	s.execution = execution.NewPersistent(runs, persistent, accepted)

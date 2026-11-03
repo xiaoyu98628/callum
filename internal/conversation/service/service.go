@@ -209,7 +209,13 @@ func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(
 	if err != nil {
 		return err
 	}
-	if err := accepted(ex); err != nil {
+	acceptedValue := ex
+	if ex.Run.SettingsSnapshot != nil {
+		// 受理回调借用独立快照，不能通过指针修改即将执行的权限设置。
+		snapshot := *ex.Run.SettingsSnapshot
+		acceptedValue.Run.SettingsSnapshot = &snapshot
+	}
+	if err := accepted(acceptedValue); err != nil {
 		s.engine.Abandon(lease.Context(), ex, context.Canceled)
 		return err
 	}

@@ -3,6 +3,7 @@ package migrations
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"gorm.io/gorm"
@@ -29,14 +30,14 @@ func validateConversationCore(tx *gorm.DB, models []any) error {
 		if !tx.Migrator().HasTable(table) {
 			return errors.New("会话结构版本 2 缺少必要表")
 		}
-		if err := validateCoreTable(tx, table); err != nil {
+		if err := validateCoreTable(tx, table, "settings_snapshot"); err != nil {
 			return fmt.Errorf("会话结构版本 2 不匹配: %w", err)
 		}
 	}
 	return nil
 }
 
-func validateCoreTable(tx *gorm.DB, table any) error {
+func validateCoreTable(tx *gorm.DB, table any, skipColumns ...string) error {
 	statement := &gorm.Statement{DB: tx}
 	if err := statement.Parse(table); err != nil {
 		return err
@@ -65,6 +66,10 @@ func validateCoreTable(tx *gorm.DB, table any) error {
 	}
 	for _, field := range statement.Schema.Fields {
 		if field.DBName == "" {
+			continue
+		}
+		// 后续版本新增的列由对应迁移校验，不能阻止旧版本进入升级事务。
+		if slices.Contains(skipColumns, field.DBName) {
 			continue
 		}
 		column, exists := actual[field.DBName]

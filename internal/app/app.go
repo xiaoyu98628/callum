@@ -19,10 +19,13 @@ import (
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
+	"github.com/xiaoyu98628/callum/internal/settings"
+	settingsservice "github.com/xiaoyu98628/callum/internal/settings/service"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 	agentstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/agent"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/catalog"
 	conversationstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/conversation"
+	settingsstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/settings"
 	workspacestore "github.com/xiaoyu98628/callum/internal/storage/sqlite/workspace"
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem"
 	toolexecutor "github.com/xiaoyu98628/callum/internal/tool/executor"
@@ -46,6 +49,7 @@ type Runtime struct {
 	conversations *conversationservice.Service
 	engine        *agentservice.Engine
 	approvals     *approval.Service
+	settings      *settingsservice.Service
 	calls         *executor.Manager
 	mu            sync.Mutex
 	closed        bool
@@ -57,7 +61,7 @@ type Runtime struct {
 // New 装配与协议无关的运行时；ctx 是应用运行上下文，初始化使用独立短超时。
 // 部分初始化失败时关闭此前取得的资源，且不覆盖原始错误。
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtime, retErr error) {
-	if ctx == nil || logger == nil || !filepath.IsAbs(cfg.DatabasePath) || cfg.MaxConcurrentRuns < 1 || cfg.MaxConcurrentRuns > 64 || cfg.CallTimeout <= 0 || cfg.ToolTimeout <= 0 || !cfg.ApprovalPolicy.Valid() || !cfg.ApprovalsReviewer.Valid() {
+	if ctx == nil || logger == nil || !filepath.IsAbs(cfg.DatabasePath) || cfg.MaxConcurrentRuns < 1 || cfg.MaxConcurrentRuns > 64 || cfg.CallTimeout <= 0 || cfg.ToolTimeout <= 0 {
 		return nil, errors.New("应用运行配置无效")
 	}
 	if err := ctx.Err(); err != nil {
@@ -80,6 +84,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	}
 	r.db, err = sqlite.Open(initCtx, cfg.DatabasePath)
 	if err != nil {
+		return nil, err
+	}
+	settingsRepository, err := settingsstore.NewRepository(r.db.DB)
+	if err != nil {
+		return nil, err
+	}
+	r.settings, err = settingsservice.New(settingsRepository)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := r.settings.Get(initCtx, settings.ExecutionKey); err != nil {
 		return nil, err
 	}
 	conversationRepository, err := conversationstore.NewRepository(r.db.DB)
@@ -140,7 +155,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	if err != nil {
 		return nil, err
 	}
-	r.engine, err = agentservice.New(runRepository, conversationRepository, r.manager, r.events.Publish, logger, agentservice.Options{Tools: tools, Approvals: r.approvals, Workspace: r.workspaces.Get, CallTimeout: cfg.CallTimeout, ApprovalPolicy: cfg.ApprovalPolicy, ApprovalsReviewer: cfg.ApprovalsReviewer})
+	r.engine, err = agentservice.New(runRepository, conversationRepository, r.manager, r.events.Publish, logger, agentservice.Options{Tools: tools, Approvals: r.approvals, Workspace: r.workspaces.Get, CallTimeout: cfg.CallTimeout})
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +177,9 @@ func (r *Runtime) Conversations() *conversationservice.Service { return r.conver
 
 // Approvals 返回与通信协议无关的审批服务。
 func (r *Runtime) Approvals() *approval.Service { return r.approvals }
+
+// Settings 返回数据库应用设置服务；更新成功后由后续受理执行读取新配置。
+func (r *Runtime) Settings() *settingsservice.Service { return r.settings }
 
 // Runs 返回运行时持有的持久化执行查询服务。
 func (r *Runtime) Runs() *agentservice.Engine { return r.engine }

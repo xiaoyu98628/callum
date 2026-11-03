@@ -92,15 +92,15 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg.MaxConcurrentRuns = 1
-			if mode == "never" {
-				cfg.ApprovalPolicy = "never"
-			} else if !automatic {
-				cfg.ApprovalPolicy = "always"
-			}
 			if mode == "approve" || mode == "cancel" {
 				cfg.CallTimeout = 250 * time.Millisecond
 			}
 			p := startApp(t, cfg, io.Discard)
+			if mode == "never" {
+				setApprovalPolicy(t, p, "never")
+			} else if !automatic {
+				setApprovalPolicy(t, p, "always")
+			}
 			mid := setupConversationModel(t, p, upstream.URL)
 			frame := p.call(t, "model.get", map[string]any{"id": mid})
 			requireOK(t, frame)

@@ -20,7 +20,7 @@ func createRunApprovals(tx *gorm.DB, step, approval any) error {
 			return err
 		}
 	}
-	if err := approvalIndex(tx, "conversation_run_steps", "uq_step_run", []string{"id", "run_id"}); err != nil {
+	if err := validateUniqueIndex(tx, "conversation_run_steps", "uq_step_run", []string{"id", "run_id"}); err != nil {
 		return err
 	}
 	return tx.Set("gorm:table_options", "STRICT").Migrator().CreateTable(approval)
@@ -56,14 +56,14 @@ func validateRunApprovals(tx *gorm.DB, step, approval any) error {
 			return errors.New("审批表缺少必要索引")
 		}
 	}
-	if err := approvalIndex(tx, "conversation_run_steps", "uq_step_run", []string{"id", "run_id"}); err != nil {
+	if err := validateUniqueIndex(tx, "conversation_run_steps", "uq_step_run", []string{"id", "run_id"}); err != nil {
 		return err
 	}
-	return approvalIndex(tx, "conversation_run_approvals", "uq_approval_step", []string{"step_id"})
+	return validateUniqueIndex(tx, "conversation_run_approvals", "uq_approval_step", []string{"step_id"})
 }
 
 // 使用有界元数据查询校验真实唯一索引，避免仅凭索引名称接受损坏的同版本结构。
-func approvalIndex(tx *gorm.DB, table, name string, want []string) error {
+func validateUniqueIndex(tx *gorm.DB, table, name string, want []string) error {
 	var info struct {
 		Name    string
 		Unique  int
@@ -77,7 +77,7 @@ func approvalIndex(tx *gorm.DB, table, name string, want []string) error {
 		return err
 	}
 	if info.Name != name || info.Unique != 1 || info.Partial != 0 || !slices.Equal(columns, want) {
-		return errors.New("审批唯一索引结构不匹配")
+		return errors.New("唯一索引结构不匹配")
 	}
 	return nil
 }

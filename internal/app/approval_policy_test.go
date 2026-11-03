@@ -5,10 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
-	"log/slog"
 	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,10 +15,10 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/agent/events"
 	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
-	"github.com/xiaoyu98628/callum/internal/config"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	conversationservice "github.com/xiaoyu98628/callum/internal/conversation/service"
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/settings"
 	agentstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/agent"
 	conversationstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/conversation"
 	"github.com/xiaoyu98628/callum/internal/tool"
@@ -99,6 +96,7 @@ func TestToolApprovalPoliciesBeforeExecution(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			runtime, cfg := runtimeFixture(t, 1)
+			setRuntimePolicy(t, runtime, test.policy)
 			instance := &policyTestTool{effects: test.effects}
 			tools := registry.New()
 			if err := tools.Register(instance); err != nil {
@@ -118,7 +116,7 @@ func TestToolApprovalPoliciesBeforeExecution(t *testing.T) {
 			}
 			engine, err := agentservice.New(runs, conversations, runtime.manager, runtime.events.Publish, runtime.logger,
 				agentservice.Options{Tools: executor, Approvals: runtime.Approvals(), Workspace: runtime.Workspaces().Get,
-					CallTimeout: cfg.CallTimeout, ApprovalPolicy: test.policy, ApprovalsReviewer: policy.User})
+					CallTimeout: cfg.CallTimeout})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -141,6 +139,11 @@ func TestToolApprovalPoliciesBeforeExecution(t *testing.T) {
 			var accepted conversation.Execution
 			err = service.Send(t.Context(), conversation.Send{ModelID: snapshot.ID, WorkspaceID: &workspace.ID, Stream: new(false), Content: []model.Block{{Type: "text", Text: "执行操作"}}}, func(ex conversation.Execution) error {
 				accepted = ex
+				if test.name == "always_read" {
+					// 调用方修改回调中的快照，不能改变服务内部已经受理的权限。
+					ex.Run.SettingsSnapshot.Revision = 0
+					ex.Run.SettingsSnapshot.ApprovalPolicy = policy.Never
+				}
 				return nil
 			})
 			if err != nil {
@@ -224,30 +227,40 @@ func policyTestID(t *testing.T) string {
 	return id.String()
 }
 
-func TestInvalidApprovalConfigDoesNotCreateData(t *testing.T) {
-	for _, field := range []string{"policy", "reviewer"} {
-		for _, value := range []string{"", "invalid", "auto_review"} {
-			t.Run(field+"/"+value, func(t *testing.T) {
-				cfg, err := config.Load(filepath.Join(t.TempDir(), "not-created"))
-				if err != nil {
-					t.Fatal(err)
-				}
-				if field == "policy" {
-					cfg.ApprovalPolicy = policy.ApprovalPolicy(value)
-				} else {
-					cfg.ApprovalsReviewer = policy.Reviewer(value)
-				}
-				runtime, err := New(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
-				if err == nil {
-					if closeErr := runtime.Close(); closeErr != nil {
-						t.Error(closeErr)
-					}
-					t.Fatal("接受了未支持的审批配置")
-				}
-				if _, err := os.Stat(cfg.DataDir); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("无效审批配置仍访问了数据目录: %v", err)
-				}
-			})
+func setRuntimePolicy(t *testing.T, runtime *Runtime, choice policy.ApprovalPolicy) settings.Record {
+	t.Helper()
+	current, err := runtime.Settings().Get(t.Context(), settings.ExecutionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(settings.Execution{ApprovalPolicy: choice, ApprovalsReviewer: policy.User})
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := runtime.Settings().Update(t.Context(), settings.ExecutionKey, current.Revision, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return saved
+}
+
+func TestInvalidApprovalSettingsKeepRevision(t *testing.T) {
+	runtime, _ := runtimeFixture(t, 1)
+	current, err := runtime.Settings().Get(t.Context(), settings.ExecutionKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		`{}`, `{"approval_policy":"never"}`, `{"approval_policy":"invalid","approvals_reviewer":"user"}`,
+		`{"approval_policy":"on-request","approvals_reviewer":"auto_review"}`,
+		`{"approval_policy":"on-request","approvals_reviewer":"user","api_key":"forbidden-test-value"}`,
+	} {
+		if _, err := runtime.Settings().Update(t.Context(), settings.ExecutionKey, current.Revision, json.RawMessage(raw)); !errors.Is(err, settings.ErrInvalid) {
+			t.Fatalf("未拒绝非法设置: %v", err)
 		}
+	}
+	saved, err := runtime.Settings().Get(t.Context(), settings.ExecutionKey)
+	if err != nil || saved.Revision != current.Revision || !bytes.Equal(saved.Value, current.Value) {
+		t.Fatalf("非法请求修改了持久化设置: %+v %v", saved, err)
 	}
 }

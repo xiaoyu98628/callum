@@ -311,7 +311,7 @@ func TestOwnershipPrecedesMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, sql := range []string{"DROP TABLE conversation_run_approvals", "DROP INDEX uq_step_run", "PRAGMA user_version=2"} {
+	for _, sql := range []string{"DROP TABLE app_settings", "DROP TABLE conversation_run_approvals", "DROP INDEX uq_step_run", "PRAGMA user_version=2"} {
 		if err := db.DB.Exec(sql).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -330,7 +330,7 @@ func TestOwnershipPrecedesMigration(t *testing.T) {
 	if err := db.DB.Raw("PRAGMA user_version").Scan(&version).Error; err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 || db.DB.Migrator().HasTable("conversation_run_approvals") {
+	if version != 2 || db.DB.Migrator().HasTable("conversation_run_approvals") || db.DB.Migrator().HasTable("app_settings") {
 		t.Fatal("未取得锁就迁移了活动实例的数据")
 	}
 	if err := ownership.Close(); err != nil {
