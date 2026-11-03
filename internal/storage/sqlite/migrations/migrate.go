@@ -9,15 +9,15 @@ import (
 	"gorm.io/gorm"
 )
 
-// Run 在事务中初始化当前 UUIDv7 结构，并检查已有数据库的结构版本。
-// models 必须包含当前完整的 GORM 表映射，由存储包传入，本包不依赖存储实现。
+// Run 在事务中顺序迁移到当前结构，并验证已有数据库的版本和必要约束。
+// models 顺序为厂商、模型、工作区、会话、执行、消息、步骤，由存储包传入。
 // 调用方持有连接，初始化上下文只用于本次操作，不绑定后续配置查询。
 func Run(ctx context.Context, db *gorm.DB, models ...any) (err error) {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if db == nil || len(models) == 0 {
-		return errors.New("迁移数据库和表映射不能为空")
+	if db == nil || len(models) != 7 {
+		return errors.New("迁移需要数据库及完整的七张表映射")
 	}
 	tx := db.WithContext(ctx).Begin()
 	if tx.Error != nil {
@@ -35,15 +35,26 @@ func Run(ctx context.Context, db *gorm.DB, models ...any) (err error) {
 	}
 	switch version {
 	case 0:
-		if err := createModelConfig(tx, models); err != nil {
+		if err := createModelConfig(tx, models[:2]); err != nil {
 			return err
 		}
-		// 具体迁移成功后，在同一事务内记录版本，失败时与表结构一起回滚。
-		if err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", modelConfigVersion)).Error; err != nil {
-			return err
-		}
+		fallthrough
 	case modelConfigVersion:
-		if err := validateModelConfig(tx, models); err != nil {
+		if err := validateModelConfig(tx, models[:2]); err != nil {
+			return err
+		}
+		if err := createConversationCore(tx, models[2:]); err != nil {
+			return err
+		}
+		if err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", conversationVersion)).Error; err != nil {
+			return err
+		}
+		fallthrough
+	case conversationVersion:
+		if err := validateModelConfig(tx, models[:2]); err != nil {
+			return err
+		}
+		if err := validateConversationCore(tx, models[2:]); err != nil {
 			return err
 		}
 	default:

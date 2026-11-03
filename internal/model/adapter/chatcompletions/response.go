@@ -15,7 +15,7 @@ import (
 
 // Generate 返回文本响应；错误时结果可能包含尚未完整生成的文本。
 func (c *Client) Generate(ctx context.Context, req model.Request) (result model.Response, retErr error) {
-	params, err := buildRequest(req)
+	params, err := buildRequest(ctx, req)
 	if err != nil {
 		return model.Response{}, err
 	}
@@ -48,9 +48,20 @@ func (c *Client) Generate(ctx context.Context, req model.Request) (result model.
 	if err != nil {
 		return model.Response{}, wrapError("generate", httpResponse, err)
 	}
+	if completion != nil {
+		result.RequestID = requestID(httpResponse)
+		result.Output, err = capturedOutput("json_response", json.RawMessage(completion.RawJSON()))
+		if err != nil {
+			return result, wrapError("decode response", httpResponse, err)
+		}
+		result.Usage, err = captureUsage(json.RawMessage(completion.JSON.Usage.Raw()))
+		if err != nil {
+			return result, wrapError("decode usage", httpResponse, err)
+		}
+	}
 
 	if completion == nil || len(completion.Choices) != 1 {
-		return model.Response{}, wrapError(
+		return result, wrapError(
 			"decode response",
 			httpResponse,
 			model.ErrInvalidResponse,
@@ -59,16 +70,14 @@ func (c *Client) Generate(ctx context.Context, req model.Request) (result model.
 
 	choice := completion.Choices[0]
 	if err := validateChoice(choice.RawJSON()); err != nil {
-		return model.Response{}, wrapError("decode response", httpResponse, err)
+		return result, wrapError("decode response", httpResponse, err)
 	}
 	if err := validateTextOutput(choice.Message.RawJSON()); err != nil {
-		return model.Response{}, wrapError("decode response", httpResponse, err)
+		return result, wrapError("decode response", httpResponse, err)
 	}
 
-	result = model.Response{
-		Text:      choice.Message.Content,
-		RequestID: requestID(httpResponse),
-	}
+	result.Text = choice.Message.Content
+	result.Content = []model.Block{{Type: "text", Text: result.Text}}
 
 	if len(choice.Message.ToolCalls) > 0 {
 		return result, wrapError(

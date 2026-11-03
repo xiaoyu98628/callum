@@ -10,6 +10,9 @@ var (
 	ErrIncomplete        = errors.New("模型生成未完整完成")
 	ErrRefused           = errors.New("模型拒绝生成内容")
 	ErrUnsupportedOutput = errors.New("暂不支持此类模型输出")
+	ErrImageRead         = errors.New("图片文件不可读取")
+	ErrImageFormat       = errors.New("图片格式不支持")
+	ErrInputLimit        = errors.New("模型输入超过字节上限")
 )
 
 // CallError 保留调用阶段、HTTP 状态和供应商请求标识。

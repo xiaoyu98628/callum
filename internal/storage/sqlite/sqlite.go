@@ -8,12 +8,13 @@ import (
 	"net/url"
 	"path/filepath"
 
-	"github.com/xiaoyu98628/callum/internal/storage/sqlite/migrations"
-	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 	gormsqlite "gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 	_ "modernc.org/sqlite"
+
+	"github.com/xiaoyu98628/callum/internal/storage/sqlite/migrations"
+	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
 
 // Database 持有 GORM 实例及其底层连接池；创建者负责调用 Close。
@@ -61,7 +62,7 @@ func Open(ctx context.Context, path string) (*Database, error) {
 	if err != nil {
 		return nil, errors.Join(err, pool.Close())
 	}
-	if err := migrations.Run(ctx, db, &schema.Provider{}, &schema.Model{}); err != nil {
+	if err := migrations.Run(ctx, db, &schema.Provider{}, &schema.Model{}, &schema.Workspace{}, &schema.Conversation{}, &schema.Run{}, &schema.Message{}, &schema.Step{}); err != nil {
 		return nil, errors.Join(err, pool.Close())
 	}
 	// 不将初始化上下文绑定在返回的 GORM 实例上。

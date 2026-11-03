@@ -7,20 +7,43 @@ import (
 	"fmt"
 	"log/slog"
 
+	conversationservice "github.com/xiaoyu98628/callum/internal/conversation/service"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
+	"github.com/xiaoyu98628/callum/internal/run"
+	runservice "github.com/xiaoyu98628/callum/internal/run/service"
 	"github.com/xiaoyu98628/callum/internal/stdio/catalog"
+	conversationhandler "github.com/xiaoyu98628/callum/internal/stdio/conversation"
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
+	workspacehandler "github.com/xiaoyu98628/callum/internal/stdio/workspace"
+	workspaceservice "github.com/xiaoyu98628/callum/internal/workspace/service"
 )
 
 // Server 只负责协议处理，配置业务服务与执行管理器均由装配层注入。
 // 连接、任务、数据库及 HTTP 资源的创建与关闭顺序由调用方管理。
 type Server struct {
-	catalog   *catalog.Handler
-	execution *execution.Handler
-	logger    *slog.Logger
+	catalog      *catalog.Handler
+	execution    *execution.Handler
+	workspace    *workspacehandler.Handler
+	conversation *conversationhandler.Handler
+	logger       *slog.Logger
+}
+
+// NewWithConversations 装配普通对话接口；所有服务和资源仍由 app 持有。
+func NewWithConversations(providers *providerservice.Service, runs *executor.Manager, workspaces *workspaceservice.Service, conversations *conversationservice.Service, persistent *runservice.Engine, emit func(run.Event) error, logger *slog.Logger) (*Server, error) {
+	if workspaces == nil || conversations == nil || persistent == nil || emit == nil {
+		return nil, errors.New("对话服务不能为空")
+	}
+	s, err := New(providers, runs, logger)
+	if err != nil {
+		return nil, err
+	}
+	s.workspace = workspacehandler.New(workspaces)
+	s.conversation = conversationhandler.New(conversations, emit)
+	s.execution = execution.NewPersistent(runs, persistent)
+	return s, nil
 }
 
 // New 创建协议处理对象，不创建或关闭外部资源。

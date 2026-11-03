@@ -6,44 +6,45 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
+	scheduler "github.com/xiaoyu98628/callum/internal/run/executor"
 )
 
-func (m *Manager) execute(ctx context.Context, id string, client model.Client, req model.Request, stream bool) {
+func (m *Manager) execute(ctx context.Context, id string, client model.Client, req model.Request, stream bool, lease *scheduler.Lease) {
 	event := inference.Event{Type: "completed", RunID: id}
-	var err error
-	if stream {
-		bytes := 0
-		err = client.Stream(ctx, req, func(delta model.Event) error {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			event.ProviderRequestID = delta.RequestID
-			if delta.Type != model.EventTextDelta {
-				return nil
-			}
-			bytes += len(delta.Text)
-			if bytes > inference.MaxTextBytes {
-				return inference.ErrOutputLimit
-			}
-			return m.emit(inference.Event{Type: "text_delta", RunID: id, Text: new(delta.Text), ProviderRequestID: delta.RequestID})
-		})
-	} else {
-		var response model.Response
-		response, err = client.Generate(ctx, req)
-		event.ProviderRequestID = response.RequestID
-		if len(response.Text) > inference.MaxTextBytes {
-			err = errors.Join(err, inference.ErrOutputLimit)
+	err := m.scheduler.Call(ctx, func() error {
+		var err error
+		if stream {
+			bytes := 0
+			err = client.Stream(ctx, req, func(delta model.Event) error {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				event.ProviderRequestID = delta.RequestID
+				if delta.Type != model.EventTextDelta {
+					return nil
+				}
+				bytes += len(delta.Text)
+				if bytes > inference.MaxTextBytes {
+					return inference.ErrOutputLimit
+				}
+				return m.emit(inference.Event{Type: "text_delta", RunID: id, Text: new(delta.Text), ProviderRequestID: delta.RequestID})
+			})
 		} else {
-			event.Text = new(response.Text)
+			var response model.Response
+			response, err = client.Generate(ctx, req)
+			event.ProviderRequestID = response.RequestID
+			if len(response.Text) > inference.MaxTextBytes {
+				err = errors.Join(err, inference.ErrOutputLimit)
+			} else {
+				event.Text = new(response.Text)
+			}
 		}
-	}
-	m.mu.Lock()
+		return err
+	})
 	// 与取消操作串行确定终态，已进入终态的执行不能再被标记为取消。
-	if ctx.Err() != nil {
-		err = ctx.Err()
+	if cancelErr := lease.Finishing(); cancelErr != nil {
+		err = errors.Join(cancelErr, err)
 	}
-	m.runs[id].finishing = true
-	m.mu.Unlock()
 	if err != nil {
 		event.Type, event.Err = "failed", err
 		if errors.Is(err, context.Canceled) {

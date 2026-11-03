@@ -111,7 +111,7 @@ func TestGenerateConvertsMessagesAndReleasesResponse(t *testing.T) {
 		if err := json.NewDecoder(req.Body).Decode(&wire); err != nil {
 			return nil, err
 		}
-		if wire.Model != input.Model || !slices.Equal(wire.Messages, input.Messages) || wire.Stream {
+		if wire.Model != input.Model || !slices.EqualFunc(wire.Messages, input.Messages, func(a, b model.Message) bool { return a.Role == b.Role && a.Content == b.Content }) || wire.Stream {
 			t.Errorf("请求转换错误：%+v", wire)
 		}
 		return testResponse(req, "application/json", body), nil

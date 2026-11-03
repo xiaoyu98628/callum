@@ -11,3 +11,6 @@ type Error struct {
 func InvalidParams() *Error {
 	return &Error{Code: -32602, Message: "参数无效，请检查字段、类型和必填值"}
 }
+
+// MethodNotFound 表示当前服务没有注册该接口。
+func MethodNotFound() *Error { return &Error{Code: -32601, Message: "接口不存在"} }

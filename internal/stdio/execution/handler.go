@@ -8,14 +8,23 @@ import (
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
+	runservice "github.com/xiaoyu98628/callum/internal/run/service"
 	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
 )
 
 // Handler 处理模型调用和独立取消，不负责创建或关闭执行器。
-type Handler struct{ runs *executor.Manager }
+type Handler struct {
+	runs       *executor.Manager
+	persistent *runservice.Engine
+}
 
 // New 使用已初始化的非 nil 执行器创建接口处理器，执行器由调用方持有。
 func New(runs *executor.Manager) *Handler { return &Handler{runs: runs} }
+
+// NewPersistent 使用共享调度器入口和持久化运行服务。
+func NewPersistent(runs *executor.Manager, persistent *runservice.Engine) *Handler {
+	return &Handler{runs: runs, persistent: persistent}
+}
 
 // Limits 返回执行器的并发上限与单次调用超时。
 func (s *Handler) Limits() (int, time.Duration) { return s.runs.Limits() }

@@ -3,6 +3,7 @@ package stdio
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
@@ -17,8 +18,17 @@ func (s *Server) handle(c *transport.Connection, line []byte) (bool, error) {
 	// 配置操作有独立短期超时；不能将它作为异步模型执行的父上下文。
 	ctx, cancel := context.WithTimeout(c.Context(), 5*time.Second)
 	defer cancel()
+	reply := func(result any, rpcErr *protocol.Error) error {
+		if rpcErr != nil && rpcErr.Code == -32603 {
+			s.logger.Error("请求处理失败", "module", "stdio", "method", req.Method, "request_id", string(req.ID))
+		}
+		return c.Reply(req, result, rpcErr)
+	}
 	if req.Method == "model.invoke" {
-		return false, s.execution.Invoke(ctx, req, func(result any, rpcErr *protocol.Error) error { return c.Reply(req, result, rpcErr) })
+		return false, s.execution.Invoke(ctx, req, reply)
+	}
+	if strings.HasPrefix(req.Method, "conversation.") && s.conversation != nil {
+		return false, s.conversation.Handle(ctx, req, reply)
 	}
 	var result any
 	var rpcErr *protocol.Error
@@ -32,11 +42,14 @@ func (s *Server) handle(c *transport.Connection, line []byte) (bool, error) {
 		}
 	case "run.cancel":
 		result, rpcErr = s.execution.Cancel(req)
+	case "run.get", "run.list", "step.get", "step.list", "step.data":
+		result, rpcErr = s.execution.Query(ctx, req)
 	default:
-		result, rpcErr = s.catalog.Handle(ctx, req)
+		if strings.HasPrefix(req.Method, "workspace.") && s.workspace != nil {
+			result, rpcErr = s.workspace.Handle(ctx, req)
+		} else {
+			result, rpcErr = s.catalog.Handle(ctx, req)
+		}
 	}
-	if rpcErr != nil && rpcErr.Code == -32603 {
-		s.logger.Error("配置请求处理失败", "module", "stdio", "method", req.Method, "request_id", string(req.ID))
-	}
-	return stop, c.Reply(req, result, rpcErr)
+	return stop, reply(result, rpcErr)
 }

@@ -8,14 +8,22 @@ import (
 	"time"
 
 	"github.com/xiaoyu98628/callum/internal/config"
+	conversationservice "github.com/xiaoyu98628/callum/internal/conversation/service"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
+	"github.com/xiaoyu98628/callum/internal/run"
+	runexecutor "github.com/xiaoyu98628/callum/internal/run/executor"
+	runservice "github.com/xiaoyu98628/callum/internal/run/service"
 	"github.com/xiaoyu98628/callum/internal/stdio"
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/catalog"
+	conversationstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/conversation"
+	runstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/run"
+	workspacestore "github.com/xiaoyu98628/callum/internal/storage/sqlite/workspace"
+	workspaceservice "github.com/xiaoyu98628/callum/internal/workspace/service"
 )
 
 // Run 持有数据库、HTTP 连接池和输入输出，初始化失败或运行结束时均负责清理。
@@ -40,6 +48,33 @@ func Run(ctx context.Context, cfg config.Config, in io.ReadCloser, out io.WriteC
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, db.Close()) }()
+	ownership, err := sqlite.AcquireOwnership(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer func() { retErr = errors.Join(retErr, ownership.Close()) }()
+	conversationRepository, err := conversationstore.NewRepository(db.DB)
+	if err != nil {
+		return err
+	}
+	runRepository, err := runstore.NewRepository(db.DB)
+	if err != nil {
+		return err
+	}
+	recoverCtx, recoverCancel := context.WithTimeout(ctx, 5*time.Second)
+	err = runRepository.Recover(recoverCtx)
+	recoverCancel()
+	if err != nil {
+		return err
+	}
+	workspaceRepository, err := workspacestore.NewRepository(db.DB)
+	if err != nil {
+		return err
+	}
+	workspaces, err := workspaceservice.New(workspaceRepository)
+	if err != nil {
+		return err
+	}
 	repository, err := catalog.NewRepository(db.DB)
 	if err != nil {
 		return err
@@ -57,13 +92,26 @@ func Run(ctx context.Context, cfg config.Config, in io.ReadCloser, out io.WriteC
 	}
 	owned = false
 	defer func() { retErr = errors.Join(retErr, connection.Close()) }()
-	runs, err := executor.New(connection.Context(), resolve, cfg.MaxConcurrentRuns, cfg.CallTimeout, func(event inference.Event) error { return execution.Emit(connection.Notify, event) })
+	manager, err := runexecutor.New(connection.Context(), cfg.MaxConcurrentRuns, cfg.CallTimeout)
+	if err != nil {
+		return err
+	}
+	defer manager.Close()
+	runs, err := executor.NewWithScheduler(manager, resolve, func(event inference.Event) error { return execution.Emit(connection.Notify, event) })
 	if err != nil {
 		return err
 	}
 	// 依次停止任务、排空协议输出，再关闭 HTTP 连接池与数据库。
-	defer runs.Close()
-	server, err := stdio.New(providers, runs, logger)
+	emit := func(event run.Event) error { return execution.EmitPersistent(connection.Notify, event) }
+	engine, err := runservice.New(runRepository, conversationRepository, manager, emit, logger)
+	if err != nil {
+		return err
+	}
+	conversations, err := conversationservice.New(conversationRepository, newConversationResolver(providers, client), manager, engine)
+	if err != nil {
+		return err
+	}
+	server, err := stdio.NewWithConversations(providers, runs, workspaces, conversations, engine, emit, logger)
 	if err != nil {
 		return err
 	}

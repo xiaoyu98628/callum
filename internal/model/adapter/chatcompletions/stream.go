@@ -18,12 +18,24 @@ func (c *Client) Stream(ctx context.Context, req model.Request, emit func(model.
 		return errors.New("流式事件回调不能为空")
 	}
 
-	params, err := buildRequest(req)
+	params, err := buildRequest(ctx, req)
 	if err != nil {
 		return err
 	}
 
-	httpResponse, err := c.streamText(ctx, params, emit)
+	var capture *streamCapture
+	if req.CaptureResult {
+		capture = &streamCapture{}
+		params.StreamOptions = openai.ChatCompletionStreamOptionsParam{IncludeUsage: openai.Bool(true)}
+	}
+	httpResponse, err := c.streamText(ctx, params, emit, capture)
+	if capture != nil {
+		result, captureErr := capture.result(requestID(httpResponse))
+		err = errors.Join(err, captureErr)
+		if callbackErr := emit(model.Event{Type: model.EventResult, RequestID: result.RequestID, Result: &result}); callbackErr != nil {
+			err = errors.Join(err, wrapError("callback", httpResponse, callbackErr))
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -47,6 +59,7 @@ func (c *Client) streamText(
 	ctx context.Context,
 	params openai.ChatCompletionNewParams,
 	emit func(model.Event) error,
+	capture *streamCapture,
 ) (httpResponse *http.Response, retErr error) {
 	stream := c.sdk.NewStreaming(
 		ctx,
@@ -71,6 +84,11 @@ func (c *Client) streamText(
 		}
 
 		chunk := stream.Current()
+		if capture != nil {
+			if err := capture.add(chunk.RawJSON()); err != nil {
+				return httpResponse, wrapError("decode stream result", httpResponse, err)
+			}
+		}
 		var choices []json.RawMessage
 		if err := json.Unmarshal([]byte(chunk.JSON.Choices.Raw()), &choices); err != nil || choices == nil {
 			return httpResponse, wrapError("decode stream", httpResponse, model.ErrInvalidResponse)

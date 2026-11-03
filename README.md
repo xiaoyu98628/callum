@@ -5,8 +5,7 @@ Callum 面向通用任务 Agent 开发，目标是通过模型推理与工具调
 
 ## 当前状态
 
-项目处于重新构建阶段，当前聚焦模型接入。
-已有统一模型接口，以及基于 OpenAI Go SDK v3 的 Chat Completions 文本适配器，
+已有统一模型接口，以及基于 OpenAI Go SDK v3 的 Chat Completions 文本和图片输入适配器，
 支持非流式请求、流式事件、上下文取消和错误处理，SDK 版本以 `go.mod` 为准。
 入口 `cmd/callum/main.go` 已装配数据库、模型适配器与标准输入输出通信服务。
 Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
@@ -15,12 +14,14 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 模型启用控制和内部运行配置解析。启动程序后可以逐行输入 JSON 请求，管理配置、
 根据本地模型 ID 调用模型、接收生成事件并取消独立执行。支持并发调用，超出上限时拒绝新调用。
 客户端与 Go 之间采用 stdio，Go 调用模型厂商使用 HTTP；本仓库尚未包含 Electron 客户端。
-调用请求必须携带完整文本消息列表，当前不保存会话历史，不自动管理多轮上下文或 Token 预算。
+普通对话通过 `conversation.send` 发送当前输入，服务保存历史并组装上下文，支持工作区、并行标题、编辑重发、步骤查询和原始 usage。
+兼容的 `model.invoke` 继续接收完整文本消息列表，不保存历史。
+按已确认策略，不做本地 Token 预算检查，由远端校验容量；字节限制继续生效。
 
 适配器通过运行时配置接收 API 根地址和凭据，并由调用方传入 HTTP 客户端，
 请求中的模型 ID 使用远端模型 ID。连接池由调用方管理，每次请求的超时与取消通过 `context.Context` 传递。
 适配器不会自行读取 `OPENAI_*` 环境变量，也不会继承其中的组织、项目或自定义请求头。
-目前支持文本消息；工具调用与多模态尚未接入。非流式请求失败时可能返回部分文本，
+普通对话支持文本和本地图片输入；图片输出、工具执行与上下文压缩尚未接入。非流式请求失败时可能返回部分文本，
 流式事件的接收方应以 `Stream` 返回 `nil` 作为整个调用成功的依据。
 非流式响应和流式分片都会校验消息结构及所消费字段的 JSON 类型，合法空文本仍可正常返回。
 非流式响应体关闭失败会作为调用错误返回，并保留同时发生的读取、解析或供应商错误。
@@ -34,19 +35,21 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 1. **模型接入**：接入一个模型供应商，支持文本请求、流式输出、上下文取消和错误处理。
 2. **普通对话**：管理多轮消息历史、组装模型上下文，支持多个对话异步执行和独立取消。
 3. **Agent 与工具**：实现工具注册、参数与权限校验、工具执行，以及结果回传模型的执行循环。
-4. **上下文压缩与恢复**：管理 Token 预算、历史摘要和压缩版本，逐步完善执行状态持久化与中断恢复。
+4. **上下文压缩与恢复**：管理历史摘要和压缩版本，触发规则另行确定；中断状态已持久化，不自动重试执行。
+
+已确认的表结构、事件和后续功能约定见 [对话设计](docs/design/conversations.md)。当前已完成模型接入和普通对话，工具交互及压缩随对应阶段引入。
 
 当前模块与后续规划按职责组织如下：
 
 | 目录 | 职责 | 状态 |
 | --- | --- | --- |
-| `internal/model` | 业务使用的模型接口、请求、响应、流式事件和错误类型 | 已实现文本接口 |
+| `internal/model` | 模型接口、内容块、响应、usage 和流式结果契约 | 已实现 |
 | `internal/model/adapter/chatcompletions` | Chat Completions 请求、认证、响应转换和流式解析 | 已实现，含模拟测试 |
 | `internal/model/provider` | 厂商与模型配置类型、存储接口、错误与标识校验 | 已实现契约 |
 | `internal/model/provider/service` | 配置业务校验、UUIDv7 分配及启用规则 | 已实现业务服务 |
 | `internal/config` | 应用配置加载及启动参数 | 已实现 |
 | `internal/config/paths` | 开发与发布构建的数据路径计算 | 已实现 |
-| `internal/storage/sqlite` | SQLite 连接池与私有文件检查 | 已实现 |
+| `internal/storage/sqlite` | SQLite 连接池、私有文件检查、服务实例文件锁 | 已实现 |
 | `internal/storage/sqlite/schema` | 仓储与迁移共用的 GORM 表映射 | 已实现 |
 | `internal/storage/sqlite/catalog` | 厂商与模型配置仓储、映射转换及存储错误处理 | 已实现 |
 | `internal/storage/sqlite/migrations` | 事务建表、结构版本检查及迁移测试 | 已实现 |
@@ -57,9 +60,14 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | `internal/stdio/catalog` | 厂商与模型配置接口、参数和业务错误转换 | 已实现 |
 | `internal/stdio/execution` | 模型调用、取消接口及执行事件转换 | 已实现 |
 | `internal/inference` | 模型调用请求、执行事件及错误契约 | 已实现 |
-| `internal/inference/executor` | 模型调用并发限制、执行标识、超时与独立取消 | 已实现 |
+| `internal/inference/executor` | 兼容无历史调用，复用统一运行调度 | 已实现 |
+| `internal/workspace/service` | 工作区管理、软删除和恢复 | 已实现 |
+| `internal/conversation/service`、`history` | 会话管理、发送与重发、标题和来源指纹 | 已实现 |
+| `internal/run/executor`、`service` | 统一调度、模型调用、并行标题及终态保存 | 已实现 |
+| `internal/storage/sqlite/workspace`、`conversation`、`run` | 普通对话仓储及跨表事务 | 已实现 |
+| `internal/stdio/workspace`、`conversation` | 工作区和对话接口 | 已实现 |
 
-普通对话、Agent 调度、工具和上下文管理模块随对应功能引入。
+工具、审批、补充输入和上下文压缩模块随对应功能引入。
 其他协议和供应商兼容差异按实际需求接入。
 
 目录按业务与职责划分；契约保留在模块根包，具体业务、存储和通信实现进入职责明确的子包。
@@ -84,16 +92,16 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 这里的 `catalog` 为 `internal/storage/sqlite/catalog`，`providerservice` 为 `internal/model/provider/service` 的导入别名。
 数据库打开成功后由创建者调用 `db.Close()`；存储实现使用传入的 GORM 实例，
 业务服务使用传入的存储接口，二者均不关闭数据库。数据库 `Close` 可以重复调用。
-`sqlite.Open` 将 `schema.Provider`、`schema.Model` 的 GORM 表映射传给 `migrations.Run`；
+`sqlite.Open` 将配置、工作区、会话、消息、运行和步骤的 GORM 表映射传给 `migrations.Run`；
 迁移逻辑及其测试集中在独立目录，迁移包不反向导入 SQLite 存储包，也不重复定义表映射。
 `migrations/migrate.go` 负责版本判断、事务和回滚；
 `migrations/000001_create_model_config.go` 负责创建厂商表、模型表及其约束和索引，以及已有库的主键类型检查。
-新库执行该具体迁移后，在同一事务中记录结构版本 `1`；已有版本 `1` 的数据库通过主键检查后跳过建表步骤。
+`000002_create_conversation_core.go` 创建普通对话五张表。新库顺序执行两个迁移后，在同一事务中记录版本 `2`；版本 `1` 的 UUIDv7 配置库通过检查后保留配置并升级。
 初始化失败会关闭此前创建的连接池；初始化上下文不绑定到运行时实例，
 每次配置操作都接收自己的 `context.Context`。
 
-通信装配由 app 通过 `transport.New` 创建连接，再使用连接的运行上下文创建 `executor.Manager`；
-执行事件通过 `execution.Emit` 转换，调用连接的 `Notify` 排队输出，传输包不识别业务事件。
+通信装配由 app 通过 `transport.New` 创建连接，再用运行上下文创建共享的 `run/executor.Manager`；
+无历史调用和普通对话共享运行及实际模型请求的并发限制。事件通过 `execution.Emit`、`EmitPersistent` 转换，调用连接的 `Notify` 排队输出，传输包不识别业务事件。
 最后将配置服务和执行管理器注入 `stdio.Server`。`Server.Serve` 返回后，
 app 依次关闭执行管理器、协议连接、HTTP 空闲连接及数据库；关闭连接前执行管理器会取消并等待全部任务，
 连接随后排空可发送的终态事件。外部取消或通信失败时，连接会关闭标准流以解除阻塞。
@@ -173,11 +181,12 @@ Token 容量未知时保存 SQL `NULL`，填写时必须大于零，不自动推
 ### 迁移与并发
 
 数据库使用 STRICT 表、外键约束、联合唯一索引及字段检查约束。
-结构版本保存在 SQLite `user_version` 中，当前版本为 `1`，与迁移文件编号一致。
-新库直接创建 UUIDv7 表结构，并在同一写事务中将结构版本设置为 `1`，失败时回滚。
+结构版本保存在 SQLite `user_version` 中，当前版本为 `2`，与迁移文件编号一致。
+新库在同一写事务中建立配置与普通对话结构并记录版本 `2`，失败时回滚。
 已有版本 `1` 的数据库会检查两张配置表均使用单列 `TEXT` 类型的 `id` 主键，检查通过后继续使用，
-不会重新分配记录标识。曾使用相同版本号的整数主键结构会被拒绝，不提供自动升级。
-已有版本 `2` 的数据库不再受支持；已有配置表但没有结构版本、主键检查失败，
+不会重新分配记录标识，随后增加普通对话表。曾使用相同版本号的整数主键结构会被拒绝，不提供自动升级。
+版本 `2` 还会检查对话表的字段、类型、约束和索引；历史同版本号但缺少相应结构的库会被拒绝。
+已有配置表但没有结构版本、结构检查失败，
 或版本不受支持时会返回错误并保留原有数据、结构和版本号，不自动删除或重建数据库。
 开发时可通过 `--data-dir` 指向独立的新数据目录。
 启动不使用 `AutoMigrate` 自动改写已有业务表；后续结构变化需要增加版本迁移与兼容测试。
@@ -186,6 +195,10 @@ Token 容量未知时保存 SQL `NULL`，填写时必须大于零，不自动推
 事务使用 `BEGIN IMMEDIATE`，保证并发初始化时串行检查和更新结构版本。
 每次配置操作传递调用方上下文；查询结果读取完成后释放连接，
 `Resolve` 通过一次关联查询读取厂商和模型，不在等待模型响应期间持有连接或事务。
+
+服务启动后持有数据库旁的 `callum.db.lock` 文件锁。同一数据库只允许一个运行中的服务实例，多个客户端窗口共享这个 Go 进程。
+取得实例锁后，将遗留活动执行及步骤标记为 `interrupted`，保留已保存内容；终止确认时间为本次恢复时间，不推测实际崩溃时刻，也不自动重试。
+关闭时释放锁，锁文件可以保留。初始化失败和重复关闭均释放本进程拥有的资源。
 
 ## 运行
 
@@ -204,6 +217,9 @@ go run ./cmd/callum
 | `--data-dir` | 按构建标签选择 | 显式数据目录优先，相对路径按工作目录计算 |
 | `--max-concurrent-runs` | `4` | 同时执行的调用上限，范围 `1` 至 `64`，超出时立即返回忙碌错误 |
 | `--call-timeout` | `5m` | 单次模型执行超时，包含配置解析，必须大于零 |
+
+运行数量和实际模型请求数量分别受同一个配置上限约束；标题使用空闲模型请求容量，不排队争用。
+活动任务占满运行容量时立即返回忙碌；已确定终态的任务正在清理时，允许在受理请求的短期超时内等待其释放。
 
 例如：
 
@@ -242,9 +258,8 @@ go run ./cmd/callum --max-concurrent-runs 2 --call-timeout 3m
 修改和删除接口成功返回记录 ID，不会将不存在的记录自动创建出来。
 
 `messages` 是完整文本消息数组，包含 `role` 和 `content`，支持 `system`、`user`、`assistant`，
-每次最多 256 条。服务不会在调用之间补充历史，不保存对话或执行记录。
-当前适配器只提供文本调用，`model_type` 必须为空；保存了推理、图片、工具等能力元数据，
-不代表适配器已支持这些功能，选中这些功能后发起调用会返回不支持错误。
+每次最多 256 条。这是兼容的 `model.invoke` 接口约定，不补充历史、不保存执行记录，`model_type` 必须为空。
+普通对话允许启用 `image_input`，要求 capabilities 明确支持；推理参数和工具执行尚未接入，选择这些功能会被拒绝。
 Token 容量字段只是配置元数据，当前不做 Token 估算或设置输出 Token 参数。
 
 每次调用重新查询厂商和模型配置，不在网络等待期间占用数据库连接。
@@ -261,8 +276,85 @@ Token 容量字段只是配置元数据，当前不做 Token 估算或设置输�
 
 生成事件可以包含 `provider_request_id`，它与接口请求 ID、执行 ID 分开管理。
 以 `run.completed` 作为成功依据，收到部分文本不能视为成功；每次被接受的执行只确定一次终态。
-通信断开时无法保证终态事件送达，也没有断线重放或执行恢复机制。
-执行标识仅在当前进程内有效，不作为数据库主键。
+通信断开时无法保证终态事件送达，不提供逐事件重放。
+`model.invoke` 的执行标识仅在当前进程内有效；普通对话的 UUIDv7 执行标识和历史状态保存到数据库。
+
+### 普通对话接口
+
+首次发送不提供 `conversation_id`，必须提供 `model_id`；接受后原子创建会话、用户消息、回答消息、执行及初始步骤。
+已有会话可以省略 `model_id`，服务从会话选定模型重新解析当前有效配置。不存在的会话 ID 不会被当作新会话创建。
+客户端“新会话”按钮只建立输入界面，不提供 `conversation.create` 接口。
+
+| 接口 | 参数与行为 |
+| --- | --- |
+| `workspace.create` | `name`、绝对 `root_path`，返回工作区；相同路径已软删除则恢复原记录 |
+| `workspace.get` / `delete` / `restore` | `id`，删除和恢复保留关联会话的独立状态 |
+| `workspace.list` | 可选 `archived`、`deleted`、`limit`、`offset` |
+| `workspace.update` | `id` 及可选 `name`、`pinned`、`archived` |
+| `conversation.send` | `content` 内容块数组，可选 `conversation_id`、`model_id`、`stream`；新会话还可提供 `workspace_id` |
+| `conversation.resend` | `conversation_id`、最后一条用户 `message_id`、新 `content`，可选 `model_id`、`stream` |
+| `conversation.get` / `delete` / `restore` | `id`，软删除保留历史 |
+| `conversation.list` | 可选 `workspace_id` 或 `unbound`，以及 `archived`、`deleted`、`limit`、`offset` |
+| `conversation.update` | `id` 及可选 `title`、`model_id`、`workspace_id`、`detach_workspace`、`pinned`、`archived`；设置标题后来源为 manual |
+| `conversation.messages` | `conversation_id`，可选 `before_sequence`、`limit`，返回按序排列的一页消息 |
+| `run.get` / `run.list` | 持久化运行的 `id`；或 `conversation_id`、可选 `limit`、`offset` |
+| `step.get` / `step.list` | 步骤 `id`；或 `run_id`、可选 `after_sequence`、`limit`，返回元数据和数据大小 |
+| `step.data` | `step_id`、`field`（output、usage、input、definition），可选字节 `offset`、`limit`；返回 JSON 原文片段 |
+
+列表 limit 默认 100，最大 200，offset 从 0 开始。消息查询还有 7 MiB 的页大小保护；可用返回页最小 sequence 作为下一次 before_sequence，直到空数组。
+step.data 默认、最大分段为 64 KiB，最小 4 字节，返回 fragment、next_offset、total_bytes、done、present。按 next_offset 继续读取，拼接 fragment 后解析 JSON；不会在 UTF-8 字符中间截断。
+
+首次受理响应包含 conversation_id、run_id、user_message_id、回答 message_id 和 removed_message_ids。
+重发保留用户消息 ID 及 sequence，删除旧回答并返回其 ID；run.started 通知同样携带 removed_message_ids，供其他窗口清理旧回答。
+原执行必须结束才能重发；只允许编辑最后一条用户消息。不保留旧回答的模型结果副本，但保留执行身份及 usage 等审计信息。
+会话内 sequence 从 1 开始，不使用 parent_message_id。跨表关系使用外键、唯一约束和事务校验。
+
+默认标题为首条问题文字去首尾空白后前 30 个 Unicode 码点，英文按字母、空格、标点计数，仅图片默认“新对话”。
+标题调用与首次回答并行，使用当前模型，最多 10 秒；容量不足时跳过，主回答结束即取消并等待尚未完成的标题任务。
+标题成功通过 conversation.updated 更新；人工改名和问题内容变化会阻止旧标题覆盖。标题失败不导致回答失败。
+
+正文与消息状态保存在 conversation_messages，模型原始结果和 usage 保存在具体 model_call 步骤。
+非流式 output 包含协议标识、json_response 格式和原响应对象；流式为 stream_result，标准字段组装，未知 delta 扩展按字段保留片段。
+未取得可用模型响应时，以 request_error 保存受控 HTTP 状态、调用阶段和供应商请求标识，不保存可能回显凭据的错误体。
+usage 原样保留供应商字段，缺失为 NULL；不把零值或估算值当作已返回的用量。标题单独计入其模型步骤，不在父执行重复累计。
+流式正文分批保存，终态前保存最终或部分结果；异常进程退出可能丢失尚未落库的最后增量。
+
+content 示例：`[{"type":"text","text":"分析图片"},{"type":"image","path":"/absolute/path/image.png"}]`。
+图片要求使用规范绝对路径、普通对话启用 image_input，并由具体端点支持；服务读取 PNG、JPEG、GIF、WebP 为内联数据发送，不把本地路径直接交给远端。
+单图最多 4 MiB，实际请求 JSON 上限 12 MiB；图片读取失败、格式不支持、超限均明确失败，不静默丢弃内容块。
+当前适配器不生成图片，附件管理未接入，编辑或删除消息不删除图片源文件。
+组装模型历史最多 256 条，历史 JSON 内容不超过 8 MiB，超限明确拒绝，不静默截断历史；这些均为字节、数量边界，不做 Token 预算估算。
+未成功完成的历史回答不作为完整回答传入后续上下文。图片原文件不复制、不版本化，历史再次调用仍依赖该路径指向的可读文件。
+
+### Go 向客户端推送的对话事件
+
+通知没有顶层 id，method 为事件类型；params 按需携带 conversation_id、run_id、step_id、message_id。
+同一发送请求的受理响应先于其所有事件。普通对话的事件与旧 model.invoke 共用一条输出连接，以 conversation_id 区分对话事件。
+
+| 事件 | 内容 |
+| --- | --- |
+| `conversation.created` / `conversation.updated` | conversation 快照，包括默认、生成或人工标题 |
+| `run.started` | run 快照，重发时包含 removed_message_ids |
+| `message.created` / `message.updated` | message 快照；非流式回答通过最终消息快照返回 |
+| `message.delta` | block_index 和 delta，例如 `{"type":"text","text":"你好"}`，只追加到对应消息 |
+| `step.created` / `step.updated` | step 元数据，output、usage、definition 通过 step.data 获取 |
+| `run.completed` / `run.failed` / `run.cancelled` | run 终态快照；失败提供受控 error.kind、error.message |
+
+状态落库后通知；若终态持久化失败，run.failed 明确附带 persisted=false，表示数据库终态未确认，不能按成功保存处理。
+原始大结果不随每次步骤通知重复发送。重新打开会话通过消息、运行和步骤查询恢复展示。
+工作区、会话有未结束执行时，禁止归档、删除和移动等影响执行的操作；标题及置顶可在执行中修改。
+等待审批、用户补充输入、工具输出和压缩事件属于后续功能，当前不发送。
+
+联调示例（替换响应中的实际 ID，保持 stdin 打开）：
+
+```json
+{"jsonrpc":"2.0","id":"c1","method":"conversation.send","params":{"model_id":"<model_id>","content":[{"type":"text","text":"你好，请介绍一下你自己"}]}}
+{"jsonrpc":"2.0","id":"c2","method":"conversation.messages","params":{"conversation_id":"<conversation_id>"}}
+{"jsonrpc":"2.0","id":"c3","method":"conversation.send","params":{"conversation_id":"<conversation_id>","content":[{"type":"text","text":"继续解释"}],"stream":false}}
+{"jsonrpc":"2.0","id":"c4","method":"step.list","params":{"run_id":"<run_id>"}}
+{"jsonrpc":"2.0","id":"c5","method":"step.data","params":{"step_id":"<step_id>","field":"usage"}}
+{"jsonrpc":"2.0","id":"c6","method":"conversation.resend","params":{"conversation_id":"<conversation_id>","message_id":"<user_message_id>","content":[{"type":"text","text":"修改后的问题"}]}}
+```
 
 ### 手动联调
 
@@ -345,7 +437,7 @@ GORM 零值更新、UUIDv7 主键约束、模型禁用、关联删除限制、�
 可单独执行：
 
 ```sh
-go test -mod=readonly -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/...
-go test -mod=readonly -tags release -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/...
-CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/...
+go test -mod=readonly -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/run/...
+go test -mod=readonly -tags release -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/run/...
+CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/run/...
 ```

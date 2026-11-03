@@ -50,8 +50,9 @@ type Model struct {
 
 // RuntimeConfig 仅用于内部模型调用装配，包含凭据，不得整体写入日志。
 type RuntimeConfig struct {
-	Model    Model
-	Protocol string
-	BaseURL  string
-	APIKey   string `json:"-"`
+	Model        Model
+	ProviderName string
+	Protocol     string
+	BaseURL      string
+	APIKey       string `json:"-"`
 }

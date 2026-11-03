@@ -7,8 +7,17 @@ import (
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
+	"github.com/xiaoyu98628/callum/internal/run"
 	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
 )
+
+// Error 为对话通信边界复用模型调用的受控错误转换，不暴露底层错误链。
+func Error(err error) *protocol.Error {
+	if err == nil {
+		return nil
+	}
+	return publicError(err)
+}
 
 // publicError 只输出受控描述，禁止将存储、网络和供应商错误链直接发给客户端。
 func publicError(err error) *protocol.Error {
@@ -19,10 +28,12 @@ func publicError(err error) *protocol.Error {
 		e.Code, e.Message, kind = 1008, "操作超时", "timeout"
 	case errors.Is(err, context.Canceled):
 		e.Code, e.Message, kind = 1007, "操作已取消", "cancelled"
-	case errors.Is(err, provider.ErrInvalidConfig), errors.Is(err, inference.ErrInvalidRequest):
+	case errors.Is(err, provider.ErrInvalidConfig), errors.Is(err, inference.ErrInvalidRequest), errors.Is(err, run.ErrInvalid):
 		return protocol.InvalidParams()
 	case errors.Is(err, provider.ErrNotFound):
 		e.Code, e.Message, kind = 1001, "配置不存在", "not_found"
+	case errors.Is(err, run.ErrNotFound):
+		e.Code, e.Message, kind = 1001, "执行或步骤不存在", "not_found"
 	case errors.Is(err, provider.ErrConflict):
 		e.Code, e.Message, kind = 1002, "同一厂商下的远端模型标识已存在", "conflict"
 	case errors.Is(err, provider.ErrReferenced):

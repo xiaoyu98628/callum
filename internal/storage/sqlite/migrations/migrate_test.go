@@ -86,7 +86,7 @@ func TestMigrationRollback(t *testing.T) {
 	if err := pool.QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_schema WHERE name IN ('model_providers', 'models')").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 || tables != 2 {
+	if version != 2 || tables != 2 {
 		t.Fatalf("具体迁移未完整提交: version=%d tables=%d", version, tables)
 	}
 }
@@ -106,10 +106,10 @@ func TestFutureVersionPreserved(t *testing.T) {
 	if err := db.DB.Raw("PRAGMA user_version").Scan(&initializedVersion).Error; err != nil {
 		t.Fatal(err)
 	}
-	if initializedVersion != 1 {
+	if initializedVersion != 2 {
 		t.Fatalf("新库结构版本错误: %d", initializedVersion)
 	}
-	if err := db.DB.WithContext(t.Context()).Exec("PRAGMA user_version = 2").Error; err != nil {
+	if err := db.DB.WithContext(t.Context()).Exec("PRAGMA user_version = 99").Error; err != nil {
 		t.Fatal(err)
 	}
 	if err := db.Close(); err != nil {
@@ -121,8 +121,8 @@ func TestFutureVersionPreserved(t *testing.T) {
 			t.Error(err)
 		}
 	}
-	if openErr == nil || !strings.Contains(openErr.Error(), "不支持数据库结构版本 2") {
-		t.Fatalf("未明确拒绝版本 2: %v", openErr)
+	if openErr == nil || !strings.Contains(openErr.Error(), "不支持数据库结构版本 99") {
+		t.Fatalf("未明确拒绝未来版本: %v", openErr)
 	}
 	pool, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -137,7 +137,7 @@ func TestFutureVersionPreserved(t *testing.T) {
 	if err := pool.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
+	if version != 99 {
 		t.Fatal("更高版本被修改")
 	}
 }
