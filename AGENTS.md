@@ -63,10 +63,10 @@
 - internal/storage/sqlite：数据库连接、文件权限及服务实例锁；schema 保存表映射，catalog、workspace、conversation、run 实现对应仓储，migrations 管理具体迁移、事务与版本检查。
 - internal/workspace：工作区契约；service 负责路径、状态和标识校验。
 - internal/conversation：会话、消息契约；service 负责受理、会话管理和重发，history 负责标题截取及内容指纹。
-- internal/run：持久化运行、步骤、事件与存储契约；executor 统一管理并发、超时、取消和关闭，service 编排回答、辅助标题及状态保存。
+- internal/run：持久化运行、步骤、事件与存储契约；executor 统一管理并发、超时、取消和关闭，service 编排回答、辅助标题及状态保存，events 提供与协议无关的有界订阅。
 - internal/inference：兼容的无历史模型调用契约；executor 借用统一运行调度器执行 model.invoke。
 - internal/stdio：服务入口与路由；protocol 定义和解析协议，transport 管理标准流，catalog、workspace、conversation、execution 分别转换对应接口和事件。
-- internal/app：创建并装配上述依赖，管理数据库、HTTP 连接池、通信连接及执行器的生命周期。
+- internal/app：New 创建不依赖通信连接的 Runtime，持有数据库、实例锁、HTTP 连接池、调度器及事件发布器；ServeStdio 接入并清理单个连接，Run 负责独立 stdio 进程的完整生命周期。
 - 工具、审批、补充输入及上下文压缩模块在对应阶段引入，不能把已定义的步骤枚举视为已实现功能。
 
 业务逻辑通过所需的模型接口调用能力，供应商 SDK 类型和协议细节限定在适配层。
@@ -76,6 +76,8 @@ internal/model 根包只定义统一契约，不导入 provider、adapter 等子
 目录按业务和职责划分，具体实现进入相应子包，公共契约保留在模块根包。
 子包不得为了访问父包实现而形成循环依赖；SQLite 仓储接收装配层传入的 GORM 实例，表映射只在存储层使用。
 stdio 的 protocol、transport 不依赖业务模块；业务错误和执行事件由对应接口子包转换。
+业务事件由业务服务发布，不在通信处理器中补发。订阅队列和数量必须有界；订阅失败只影响对应消费者，不直接取消共享运行时。
+连接退出由接入层取消并等待其发起的执行，不影响其他调用方；应用退出才统一关闭所有任务及资源。后续通信入口复用同一 Runtime，不为每个连接创建数据库和全局调度器。
 测试跟随对应实现，跨模块验证通过公开入口组装；职责集中的小包保持自然布局，不为每个文件创建目录。
 
 变更前应识别受影响的入口、调用链、配置、资源、文档和测试；完成后沿受影响调用链复查。

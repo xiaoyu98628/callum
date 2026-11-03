@@ -56,7 +56,7 @@ type Step struct {
 	FinishedAt        *int64          `json:"finished_at"`
 }
 
-// Event 是服务端业务通知，由 stdio 边界转换为 JSON-RPC。
+// Event 是与通信协议无关的业务通知，Data 及其引用内容在发布后只读。
 type Event struct {
 	Type              string
 	ConversationID    string

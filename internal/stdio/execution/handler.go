@@ -16,14 +16,15 @@ import (
 type Handler struct {
 	runs       *executor.Manager
 	persistent *runservice.Engine
+	accepted   func(string) error
 }
 
 // New 使用已初始化的非 nil 执行器创建接口处理器，执行器由调用方持有。
 func New(runs *executor.Manager) *Handler { return &Handler{runs: runs} }
 
 // NewPersistent 使用共享调度器入口和持久化运行服务。
-func NewPersistent(runs *executor.Manager, persistent *runservice.Engine) *Handler {
-	return &Handler{runs: runs, persistent: persistent}
+func NewPersistent(runs *executor.Manager, persistent *runservice.Engine, accepted func(string) error) *Handler {
+	return &Handler{runs: runs, persistent: persistent, accepted: accepted}
 }
 
 // Limits 返回执行器的并发上限与单次调用超时。
@@ -48,7 +49,14 @@ func (s *Handler) Invoke(ctx context.Context, req protocol.Request, reply func(a
 		}
 		in.Messages = append(in.Messages, model.Message{Role: message.Role, Content: *message.Content})
 	}
-	err := s.runs.Start(ctx, in, func(id string) error { return reply(map[string]any{"run_id": id}, nil) })
+	err := s.runs.Start(ctx, in, func(id string) error {
+		if s.accepted != nil {
+			if err := s.accepted(id); err != nil {
+				return err
+			}
+		}
+		return reply(map[string]any{"run_id": id}, nil)
+	})
 	if err != nil {
 		return reply(nil, publicError(err))
 	}

@@ -50,3 +50,10 @@ func (e *Engine) Abandon(ctx context.Context, ex conversation.Execution, cause e
 		e.logger.Error("保存未启动执行的终态失败", "module", "run", "run_id", ex.Run.ID)
 	}
 }
+
+// ConversationUpdated 在会话变更提交后发布通知，订阅故障不能回滚已提交的修改。
+func (e *Engine) ConversationUpdated(value conversation.Conversation) {
+	if err := e.emit(run.Event{Type: "conversation.updated", ConversationID: value.ID, Data: value}); err != nil {
+		e.logger.Warn("发布会话变更事件失败", "module", "conversation", "conversation_id", value.ID)
+	}
+}

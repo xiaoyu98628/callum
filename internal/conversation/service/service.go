@@ -92,7 +92,11 @@ func (s *Service) Update(ctx context.Context, id string, change conversation.Cha
 		}
 		change.Model = &resolved.Snapshot
 	}
-	return s.repository.Update(ctx, id, change)
+	value, err := s.repository.Update(ctx, id, change)
+	if err == nil {
+		s.engine.ConversationUpdated(value)
+	}
+	return value, err
 }
 
 func validate(in conversation.Send) error {
@@ -136,7 +140,7 @@ func validate(in conversation.Send) error {
 	return nil
 }
 
-// Send 在事务接受成功后回复，回复成功排队后启动异步调用。
+// Send 在事务提交后调用 accepted；回调成功后才启动异步调用和发布执行事件。
 // ctx 只用于受理；执行使用独立运行上下文，输入内容在受理前复制。
 func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(conversation.Execution) error) error {
 	if err := ctx.Err(); err != nil {

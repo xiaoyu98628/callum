@@ -55,7 +55,7 @@ func (m *Manager) execute(ctx context.Context, id string, client model.Client, r
 		}
 	}
 	// 只有客户端方法返回成功才发出 completed；适配器内部的完成回调不直接成为执行终态。
-	// 输出失败意味着通信已中断，由传入的 emit 关闭连接，不能再次向同一连接报告错误。
+	// 事件接收方拒绝发布后不递归报告错误，接收方负责处理自身的生命周期。
 	if emitErr := m.emit(event); emitErr != nil {
 		return
 	}

@@ -1,13 +1,7 @@
 package execution
 
 import (
-	"context"
-	"errors"
-
 	"github.com/xiaoyu98628/callum/internal/inference"
-	"github.com/xiaoyu98628/callum/internal/model"
-	"github.com/xiaoyu98628/callum/internal/model/provider"
-	"github.com/xiaoyu98628/callum/internal/run"
 	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
 )
 
@@ -19,53 +13,44 @@ func Error(err error) *protocol.Error {
 	return publicError(err)
 }
 
-// publicError 只输出受控描述，禁止将存储、网络和供应商错误链直接发给客户端。
-func publicError(err error) *protocol.Error {
-	e := &protocol.Error{Code: -32603, Message: "内部处理失败"}
-	kind := "internal"
-	switch {
-	case errors.Is(err, context.DeadlineExceeded):
-		e.Code, e.Message, kind = 1008, "操作超时", "timeout"
-	case errors.Is(err, context.Canceled):
-		e.Code, e.Message, kind = 1007, "操作已取消", "cancelled"
-	case errors.Is(err, provider.ErrInvalidConfig), errors.Is(err, inference.ErrInvalidRequest), errors.Is(err, run.ErrInvalid):
+func publicError(err error) *protocol.Error { return protocolError(inference.DescribeError(err)) }
+
+// protocolError 仅在协议边界分配 JSON-RPC 错误码。
+func protocolError(f inference.Failure) *protocol.Error {
+	if f.Kind == "invalid_params" {
 		return protocol.InvalidParams()
-	case errors.Is(err, provider.ErrNotFound):
-		e.Code, e.Message, kind = 1001, "配置不存在", "not_found"
-	case errors.Is(err, run.ErrNotFound):
-		e.Code, e.Message, kind = 1001, "执行或步骤不存在", "not_found"
-	case errors.Is(err, provider.ErrConflict):
-		e.Code, e.Message, kind = 1002, "同一厂商下的远端模型标识已存在", "conflict"
-	case errors.Is(err, provider.ErrReferenced):
-		e.Code, e.Message, kind = 1003, "关联配置不存在或仍被引用", "referenced"
-	case errors.Is(err, provider.ErrDisabled):
-		e.Code, e.Message, kind = 1004, "模型已禁用", "disabled"
-	case errors.Is(err, inference.ErrUnsupported), errors.Is(err, model.ErrUnsupportedOutput):
-		e.Code, e.Message, kind = 1005, "当前适配器不支持该模型功能或输出", "unsupported"
-	case errors.Is(err, inference.ErrBusy):
-		e.Code, e.Message, kind = 1006, "模型调用已达到并发上限", "busy"
-	case errors.Is(err, inference.ErrClosed):
-		e.Code, e.Message, kind = 1011, "服务正在关闭", "closing"
-	case errors.Is(err, inference.ErrOutputLimit):
-		e.Code, e.Message, kind = 1010, "模型文本超过大小限制", "output_limit"
-	case errors.Is(err, model.ErrIncomplete):
-		e.Code, e.Message, kind = 1009, "模型输出未完整完成", "incomplete"
-	case errors.Is(err, model.ErrRefused):
-		e.Code, e.Message, kind = 1009, "模型拒绝生成内容", "refused"
-	case errors.Is(err, model.ErrInvalidResponse):
-		e.Code, e.Message, kind = 1009, "模型响应格式无效", "invalid_response"
-	default:
-		e.Code, e.Message, kind = 1009, "模型调用失败", "model_failed"
 	}
-	data := map[string]any{"kind": kind}
-	if call, ok := errors.AsType[*model.CallError](err); ok {
-		if call.RequestID != "" {
-			data["provider_request_id"] = call.RequestID
-		}
-		if call.StatusCode != 0 {
-			data["http_status"] = call.StatusCode
-		}
+	code := 1009
+	switch f.Kind {
+	case "internal":
+		code = -32603
+	case "not_found":
+		code = 1001
+	case "conflict":
+		code = 1002
+	case "referenced":
+		code = 1003
+	case "disabled":
+		code = 1004
+	case "unsupported":
+		code = 1005
+	case "busy":
+		code = 1006
+	case "cancelled":
+		code = 1007
+	case "timeout":
+		code = 1008
+	case "output_limit":
+		code = 1010
+	case "closing":
+		code = 1011
 	}
-	e.Data = data
-	return e
+	data := map[string]any{"kind": f.Kind}
+	if f.ProviderRequestID != "" {
+		data["provider_request_id"] = f.ProviderRequestID
+	}
+	if f.HTTPStatus != 0 {
+		data["http_status"] = f.HTTPStatus
+	}
+	return &protocol.Error{Code: code, Message: f.Message, Data: data}
 }

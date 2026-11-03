@@ -91,7 +91,8 @@ context_compression 编排下建立 model_call 子步骤保存生成摘要的模
 
 ## 通信
 
-JSON-RPC 2.0，stdin/stdout 每行一个 JSON。请求仅返回一次受理响应，返回 conversation_id、run_id 等 ID 后，再推送无顶层 id 的服务端通知。
+业务服务和事件契约不依赖通信协议。`app.New` 创建共享运行时，无需输入输出；业务调用方直接调用服务并订阅事件。
+当前接入为 JSON-RPC 2.0，stdin/stdout 每行一个 JSON。请求仅返回一次受理响应，返回 conversation_id、run_id 等 ID 后，再推送无顶层 id 的服务端通知。
 事件名位于 method，params 按事件携带 conversation_id、run_id、step_id、message_id、approval_id。
 message.delta 使用 block_index 和带 type 的 delta，标题、工具、摘要输出不混入回答正文。
 
@@ -100,6 +101,12 @@ message.delta 使用 block_index 和带 type 的 delta，标题、工具、摘�
 压缩使用 type=context_compression 的步骤事件。步骤父子关系支持折叠、展开，折叠偏好由客户端保存。
 状态落库后通知；内容增量有界传输，终态前保存最终或部分结果。重新打开查询数据库状态，不承诺逐事件重放。
 旧 model.invoke 保留 run.text_delta、run.completed、run.failed、run.cancelled 的兼容格式。
+
+`run/events` 提供按会话、执行和类型过滤的有界订阅，运行时最多 32 个订阅，各排队 64 个事件。
+慢订阅者溢出即断开，其他订阅和业务执行继续。事件只读；大型步骤原始输出不进入订阅队列，公共事件不保存原始错误链。
+会话更新由业务服务在提交后发布，直接调用和 stdio 调用具有相同通知行为。
+连接退出时只取消并等待该连接发起的任务，其他调用方不受影响；独立 stdio 进程入口仍在连接退出后关闭整个运行时。
+HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及事件，并在各自边界转换协议。
 
 ## 资源、迁移与验证
 

@@ -64,7 +64,7 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 			e.logger.Error("读取最终消息状态失败", "module", "run", "run_id", ex.Run.ID)
 		}
 	}
-	// 终态已持久化。发送失败由通信层取消连接，不能再向同一连接递归报告错误。
+	// 终态已持久化；发布器关闭后不递归发布错误，查询仍可获取已保存状态。
 	_ = e.event(ex, "run."+ex.Run.Status, "", "", ex.Run)
 }
 

@@ -53,7 +53,7 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | `internal/storage/sqlite/schema` | 仓储与迁移共用的 GORM 表映射 | 已实现 |
 | `internal/storage/sqlite/catalog` | 厂商与模型配置仓储、映射转换及存储错误处理 | 已实现 |
 | `internal/storage/sqlite/migrations` | 事务建表、结构版本检查及迁移测试 | 已实现 |
-| `internal/app` | 启动装配、运行配置解析与适配器创建、资源清理 | 已实现 |
+| `internal/app` | 独立运行时装配、业务入口、stdio 连接接入及资源清理 | 已实现 |
 | `internal/stdio` | 通信服务入口、就绪信息及请求路由 | 已实现 |
 | `internal/stdio/protocol` | JSON-RPC 消息结构及请求、参数解析 | 已实现 |
 | `internal/stdio/transport` | 标准流适配、连接、输出队列及通信关闭 | 已实现 |
@@ -64,6 +64,7 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | `internal/workspace/service` | 工作区管理、软删除和恢复 | 已实现 |
 | `internal/conversation/service`、`history` | 会话管理、发送与重发、标题和来源指纹 | 已实现 |
 | `internal/run/executor`、`service` | 统一调度、模型调用、并行标题及终态保存 | 已实现 |
+| `internal/run/events` | 有界事件订阅、过滤及慢订阅者隔离 | 已实现 |
 | `internal/storage/sqlite/workspace`、`conversation`、`run` | 普通对话仓储及跨表事务 | 已实现 |
 | `internal/stdio/workspace`、`conversation` | 工作区和对话接口 | 已实现 |
 
@@ -100,11 +101,27 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 初始化失败会关闭此前创建的连接池；初始化上下文不绑定到运行时实例，
 每次配置操作都接收自己的 `context.Context`。
 
-通信装配由 app 通过 `transport.New` 创建连接，再用运行上下文创建共享的 `run/executor.Manager`；
-无历史调用和普通对话共享运行及实际模型请求的并发限制。事件通过 `execution.Emit`、`EmitPersistent` 转换，调用连接的 `Notify` 排队输出，传输包不识别业务事件。
-最后将配置服务和执行管理器注入 `stdio.Server`。`Server.Serve` 返回后，
-app 依次关闭执行管理器、协议连接、HTTP 空闲连接及数据库；关闭连接前执行管理器会取消并等待全部任务，
-连接随后排空可发送的终态事件。外部取消或通信失败时，连接会关闭标准流以解除阻塞。
+`app.New(ctx, cfg, logger)` 创建独立运行时，不需要 stdin/stdout。运行时持有数据库、实例锁、HTTP 连接池、
+共享调度器和事件发布器；初始化上下文仅用于启动，已接受的执行使用应用运行上下文。
+`Providers()`、`Workspaces()`、`Conversations()`、`Runs()` 返回业务服务，`Invoke` 提供无历史调用，
+`Cancel` 请求独立取消。无历史调用和普通对话共享运行及实际模型请求的并发限制。
+调用 `Send` 或 `Invoke` 时，`accepted` 回调获得执行标识；回调成功后才启动执行和发布执行事件。
+回调失败时释放预留容量，已写入的普通对话执行保存为取消状态。
+
+业务事件通过 `Runtime.Subscribe(events.Filter{...})` 订阅，可同时按会话、执行标识和事件类型过滤；
+空过滤器接收全部事件。每个运行时最多 32 个订阅，每个订阅最多排队 64 个事件，调用者负责关闭订阅，事件内容只读。
+订阅读取使用 `Next(ctx)`，正常关闭后排空队列并返回 `io.EOF`；读取上下文取消后仍需关闭订阅。
+队列溢出立即断开该订阅并返回 `events.ErrSlowConsumer`，其他订阅和业务执行继续运行，不提供逐事件重放。
+步骤通知在进入队列前投影为元数据，完整输出、usage 和定义仍通过步骤查询读取；无历史调用事件不保留原始错误链。
+
+`Runtime.ServeStdio(ctx, in, out)` 接管一个 stdio 连接，通过订阅将业务事件转成 JSON-RPC，
+先发送 `system.ready`，再转发事件并处理请求。EOF 或 `system.shutdown` 只结束该连接，
+取消并等待该连接发起的执行，随后排空订阅与协议输出；其他调用方的执行和共享运行时继续运行。
+外部取消或通信失败会关闭该连接的标准流以解除阻塞。关闭订阅本身不会取消任务；连接所属任务由接入层单独登记和清理。
+
+现有 `app.Run` 仍是独立 stdio 进程入口：创建运行时、接入连接，并在连接退出后调用 `Runtime.Close()`。
+`Close` 停止入口、取消并等待所有任务及连接，关闭发布器、HTTP 空闲连接和数据库，最后释放实例锁，可以重复调用。
+HTTP、WebSocket 和 CLI 入口尚未实现；接入时复用同一运行时和业务事件，各自转换请求、错误、响应和推送格式。
 macOS/Linux 标准流副本与非阻塞标志的恢复封装在 `stdio/transport`，入口不直接操作文件描述符。
 
 ### 数据路径与访问权限
@@ -381,7 +398,8 @@ API 地址、远端模型标识及密钥应使用同一个厂商提供的配置�
 
 请求每行最多 1 MiB（不含换行），响应最多 8 MiB，单次累计模型文本最多 1 MiB，
 单次上游原始 HTTP 响应最多 16 MiB（包含流式协议开销），这些字节限制不等同于 Token 限制。
-输出队列最多 64 条，单次写入或等待队列空间超过 5 秒会中断通信并清理执行。
+stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒会中断该连接并清理它发起的执行。
+事件订阅还有独立的 64 条队列；订阅溢出会立即断开对应连接，避免慢消费者占用共享执行资源。
 输入超长、输出写入失败均会退出，不会无限缓存消息。
 
 ### 错误约定

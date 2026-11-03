@@ -4,25 +4,30 @@ import (
 	"maps"
 
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/run"
+	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
 )
 
-// StepSummary 用于通知和列表，完整 JSON 通过有界分段查询读取，避免大型原始结果阻塞 stdout。
-type StepSummary struct {
-	run.Step
-	OutputBytes     int `json:"output_bytes"`
-	UsageBytes      int `json:"usage_bytes"`
-	DefinitionBytes int `json:"definition_bytes"`
-}
+// StepSummary 保持步骤查询与通知使用相同的元数据结构。
+type StepSummary = run.StepSummary
 
-func summary(step run.Step) StepSummary {
-	out := StepSummary{Step: step, OutputBytes: len(step.Output), UsageBytes: len(step.Usage), DefinitionBytes: len(step.Definition)}
-	out.Output, out.Usage, out.Definition = nil, nil, nil
-	return out
-}
+func summary(step run.Step) StepSummary { return run.SummarizeStep(step) }
 
-// EmitPersistent 转换 Go 主动推送的对话通知，发送失败由 notify 取消通信上下文。
+// EmitPersistent 在 stdio 边界将业务事件编码为兼容的 JSON-RPC 通知。
 func EmitPersistent(notify func(string, any) error, event run.Event) error {
+	if data, ok := event.Data.(inference.Notification); ok {
+		params := struct {
+			RunID             string          `json:"run_id"`
+			Text              *string         `json:"text,omitempty"`
+			ProviderRequestID string          `json:"provider_request_id,omitempty"`
+			Error             *protocol.Error `json:"error,omitempty"`
+		}{RunID: event.RunID, Text: data.Text, ProviderRequestID: data.ProviderRequestID}
+		if data.Failure != nil {
+			params.Error = protocolError(*data.Failure)
+		}
+		return notify(event.Type, params)
+	}
 	params := map[string]any{}
 	if event.StatePersisted != nil {
 		params["persisted"] = *event.StatePersisted
@@ -49,6 +54,8 @@ func EmitPersistent(notify func(string, any) error, event run.Event) error {
 		params["message"] = value
 	case run.Step:
 		params["step"] = summary(value)
+	case run.StepSummary:
+		params["step"] = value
 	case run.Run:
 		params["run"] = value
 		if value.ErrorKind != nil && value.ErrorMessage != nil {

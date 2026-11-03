@@ -58,8 +58,11 @@ func New(ctx context.Context, in io.ReadCloser, out io.WriteCloser) (*Connection
 	return c, nil
 }
 
-// Context 在父上下文取消或通信失败时结束，可作为执行管理器的运行上下文。
+// Context 控制本连接的读取、受理和事件转发，不控制共享运行时。
 func (c *Connection) Context() context.Context { return c.ctx }
+
+// Fail 以指定原因中断本连接，并关闭标准流解除读写阻塞。
+func (c *Connection) Fail(err error) { c.cancel(err) }
 
 // Close 在连接正常时排空输出，关闭管道并保留通信与清理错误，可重复调用。
 // 调用前必须停止 Serve 与所有事件生产者，防止关闭队列后继续发送事件。

@@ -33,6 +33,7 @@ type Lease struct {
 	started, finishing bool
 	aborted            bool
 	finalErr           error
+	done               chan struct{}
 	once               sync.Once
 }
 
@@ -108,7 +109,7 @@ func (m *Manager) Reserve(id, key string) (*Lease, error) {
 		return nil, run.ErrBusy
 	}
 	ctx, cancel := context.WithTimeout(m.ctx, m.timeout)
-	lease := &Lease{manager: m, id: id, key: key, ctx: ctx, cancel: cancel}
+	lease := &Lease{manager: m, id: id, key: key, ctx: ctx, cancel: cancel, done: make(chan struct{})}
 	m.runs[id] = lease
 	if key != "" {
 		m.keys[key] = id
@@ -153,6 +154,7 @@ func (l *Lease) release() {
 		}
 		close(m.changed)
 		m.changed = make(chan struct{})
+		close(l.done)
 		m.mu.Unlock()
 		m.wg.Done()
 	})
@@ -178,6 +180,23 @@ func (m *Manager) Cancel(id string) bool {
 	}
 	lease.cancel()
 	return true
+}
+
+// Active 用于连接清理已完成的执行标识，不代表之后仍然处于活动状态。
+func (m *Manager) Active(id string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.runs[id] != nil
+}
+
+// Wait 等待指定执行退出；调用者应先 Cancel，且不得在该执行自身调用。
+func (m *Manager) Wait(id string) {
+	m.mu.Lock()
+	lease := m.runs[id]
+	m.mu.Unlock()
+	if lease != nil {
+		<-lease.done
+	}
 }
 
 // Call 限制实际模型请求数；标题请求也使用同一容量，不能绕过限制。

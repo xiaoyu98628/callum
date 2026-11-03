@@ -5,18 +5,17 @@ import (
 
 	domain "github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/service"
-	"github.com/xiaoyu98628/callum/internal/run"
 	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
 )
 
-// Handler 负责对话接口和同步变更通知，emit 的发送失败必须取消通信上下文。
+// Handler 转换对话接口；accepted 登记本连接发起的执行。
 type Handler struct {
-	service *service.Service
-	emit    func(run.Event) error
+	service  *service.Service
+	accepted func(string) error
 }
 
-func New(s *service.Service, emit func(run.Event) error) *Handler {
-	return &Handler{service: s, emit: emit}
+func New(s *service.Service, accepted func(string) error) *Handler {
+	return &Handler{service: s, accepted: accepted}
 }
 
 func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(any, *protocol.Error) error) error {
@@ -25,7 +24,6 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 	}
 	var value any
 	var err error
-	changed := false
 	switch req.Method {
 	case "conversation.list":
 		var p domain.Filter
@@ -43,7 +41,6 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 		if req.Method == "conversation.get" {
 			value, err = h.service.Get(ctx, p.ID)
 		} else {
-			changed = true
 			value, err = h.service.Update(ctx, p.ID, domain.Change{Deleted: new(req.Method == "conversation.delete")}, "")
 		}
 	case "conversation.update":
@@ -55,7 +52,6 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
 			return reply(nil, rpcErr)
 		}
-		changed = true
 		value, err = h.service.Update(ctx, p.ID, p.Change, p.ModelID)
 	case "conversation.messages":
 		var p struct {
@@ -70,14 +66,7 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 	default:
 		return reply(nil, protocol.MethodNotFound())
 	}
-	if err := reply(value, publicError(err)); err != nil {
-		return err
-	}
-	if changed && err == nil {
-		conv := value.(domain.Conversation)
-		return h.emit(run.Event{Type: "conversation.updated", ConversationID: conv.ID, Data: conv})
-	}
-	return nil
+	return reply(value, publicError(err))
 }
 
 func (h *Handler) send(ctx context.Context, req protocol.Request, reply func(any, *protocol.Error) error) error {
@@ -90,6 +79,11 @@ func (h *Handler) send(ctx context.Context, req protocol.Request, reply func(any
 	}
 	replied := false
 	err := h.service.Send(ctx, p, func(ex domain.Execution) error {
+		if h.accepted != nil {
+			if err := h.accepted(ex.Run.ID); err != nil {
+				return err
+			}
+		}
 		replied = true
 		return reply(map[string]any{"conversation_id": ex.Conversation.ID, "run_id": ex.Run.ID, "user_message_id": ex.User.ID, "message_id": ex.Assistant.ID, "removed_message_ids": ex.RemovedMessageIDs}, nil)
 	})
