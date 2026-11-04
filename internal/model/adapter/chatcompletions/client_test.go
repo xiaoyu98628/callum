@@ -202,6 +202,40 @@ func TestGenerateRejectsToolCalls(t *testing.T) {
 	}
 }
 
+func TestGenerateClassifiesAudioAndExtensions(t *testing.T) {
+	for _, test := range []struct {
+		name, message string
+		wantErr       error
+	}{
+		{"audio_only", `{"role":"assistant","content":"","audio":{"id":"audio-1","data":"ZmFrZQ=="}}`, model.ErrUnsupportedOutput},
+		{"audio_with_text", `{"role":"assistant","content":"正文","audio":{"id":"audio-1"}}`, model.ErrUnsupportedOutput},
+		{"empty_audio_object", `{"content":"","audio":{}}`, model.ErrUnsupportedOutput},
+		{"null_audio", `{"content":"正文","audio":null}`, nil},
+		{"provider_metadata", `{"content":"正文","vendor_meta":{"trace":"kept"}}`, nil},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload := `{"choices":[{"index":0,"message":` + test.message + `,"finish_reason":"stop"}],"usage":{"total_tokens":7,"vendor":"kept"}}`
+			body := &trackedBody{Reader: strings.NewReader(payload)}
+			client := newTestClient(t, func(req *http.Request) (*http.Response, error) {
+				return testResponse(req, "application/json", body), nil
+			})
+			result, err := client.Generate(t.Context(), testRequest())
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("输出分类错误: %v，期望 %v", err, test.wantErr)
+			}
+			if test.wantErr != nil {
+				assertCallError(t, err, http.StatusOK, testRequestID)
+			}
+			if !strings.Contains(string(result.Output), test.message) || !strings.Contains(string(result.Usage), `"vendor":"kept"`) || result.RequestID != testRequestID {
+				t.Fatalf("原始输出或实际 usage 丢失: %+v", result)
+			}
+			if body.closes != 1 {
+				t.Fatalf("响应关闭次数为 %d，期望 1", body.closes)
+			}
+		})
+	}
+}
+
 func TestGeneratePropagatesCallerContext(t *testing.T) {
 	type contextKey struct{}
 	ctx, cancel := context.WithCancel(context.WithValue(t.Context(), contextKey{}, "caller"))

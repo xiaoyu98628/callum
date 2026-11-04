@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +54,10 @@ func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base
 			}
 			entries, readErr := f.ReadDir(1001)
 			closeErr := f.Close()
+			// 空目录返回 EOF，属于正常遍历结果；关闭错误仍需保留。
+			if errors.Is(readErr, io.EOF) {
+				readErr = nil
+			}
 			if err := errors.Join(readErr, closeErr); err != nil {
 				return err
 			}

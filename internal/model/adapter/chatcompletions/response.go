@@ -136,9 +136,14 @@ func validateTextOutput(raw string) error {
 		Content   *string           `json:"content"`
 		Refusal   *string           `json:"refusal"`
 		ToolCalls []json.RawMessage `json:"tool_calls"`
+		Audio     *json.RawMessage  `json:"audio"`
 	}
 	if err := json.Unmarshal([]byte(raw), &output); err != nil || output == nil {
 		return model.ErrInvalidResponse
+	}
+	// 已知但尚未支持的生成内容必须明确拒绝；未知厂商元数据继续保留在原始结果中。
+	if output.Audio != nil {
+		return model.ErrUnsupportedOutput
 	}
 	return nil
 }

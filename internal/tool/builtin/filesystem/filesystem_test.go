@@ -68,6 +68,66 @@ func TestWorkspaceToolsAndPermissionBoundary(t *testing.T) {
 	}
 }
 
+func TestSearchHandlesEmptyDirectories(t *testing.T) {
+	for _, nested := range []bool{false, true} {
+		t.Run(map[bool]string{false: "empty_root", true: "empty_child"}[nested], func(t *testing.T) {
+			dir := t.TempDir()
+			if nested {
+				if err := os.Mkdir(filepath.Join(dir, "empty"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r := registry.New()
+			for _, instance := range filesystem.Tools() {
+				if err := r.Register(instance); err != nil {
+					t.Fatal(err)
+				}
+			}
+			e, err := executor.New(r, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := e.Prepare(t.Context(), tool.Scope{ID: "workspace", RootPath: dir}, "search_text", json.RawMessage(`{"path":".","query":"needle"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := prepared.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			output, err := e.Execute(t.Context(), prepared, prepared.Hash())
+			if err != nil {
+				t.Fatalf("搜索空目录失败: %v", err)
+			}
+			var result struct {
+				Matches   []struct{ Path, Text string } `json:"matches"`
+				Truncated bool                          `json:"truncated"`
+			}
+			if err := json.Unmarshal(output, &result); err != nil {
+				t.Fatal(err)
+			}
+			want := 0
+			if nested {
+				want = 1
+			}
+			if len(result.Matches) != want || result.Truncated {
+				t.Fatalf("空目录影响搜索结果: %s", output)
+			}
+			resolved, err := filepath.EvalSymlinks(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if nested && (result.Matches[0].Path != filepath.Join(resolved, "a.txt") || result.Matches[0].Text != "needle") {
+				t.Fatalf("其他文件的匹配结果丢失: %s", output)
+			}
+		})
+	}
+}
+
 func TestFileTargetsWithAndWithoutWorkspace(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
 	insideFile, outsideFile := filepath.Join(root, "a.txt"), filepath.Join(outside, "b.txt")

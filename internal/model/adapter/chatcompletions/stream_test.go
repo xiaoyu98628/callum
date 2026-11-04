@@ -174,7 +174,8 @@ func TestStreamRejectsInterruptedOrInvalidResponses(t *testing.T) {
 		{name: "结束后用量携带文本", payload: sse(stopChunk, `{"choices":[{"index":0,"delta":{"content":"继续生成"}}],"usage":{"total_tokens":405}}`, "[DONE]"), wantErr: model.ErrInvalidResponse},
 		{name: "结束后用量携带拒绝内容", payload: sse(stopChunk, `{"choices":[{"index":0,"delta":{"refusal":"拒绝"}}],"usage":{"total_tokens":405}}`, "[DONE]"), wantErr: model.ErrInvalidResponse},
 		{name: "结束后用量携带工具调用", payload: sse(stopChunk, `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call-test","type":"function","function":{"name":"lookup","arguments":"{}"}}]}}],"usage":{"total_tokens":405}}`, "[DONE]"), wantErr: model.ErrInvalidResponse},
-		{name: "结束后用量携带未知增量字段", payload: sse(stopChunk, `{"choices":[{"index":0,"delta":{"audio":{}}}],"usage":{"total_tokens":405}}`, "[DONE]"), wantErr: model.ErrInvalidResponse},
+		{name: "结束后用量携带音频输出", payload: sse(stopChunk, `{"choices":[{"index":0,"delta":{"audio":{}}}],"usage":{"total_tokens":405}}`, "[DONE]"), wantErr: model.ErrUnsupportedOutput},
+		{name: "结束后用量携带未知增量字段", payload: sse(stopChunk, `{"choices":[{"index":0,"delta":{"vendor_delta":{}}}],"usage":{"total_tokens":405}}`, "[DONE]"), wantErr: model.ErrInvalidResponse},
 		{name: "结束后用量修改结束原因", payload: sse(stopChunk, `{"choices":[{"index":0,"delta":{},"finish_reason":"length"}],"usage":{"total_tokens":405}}`, "[DONE]"), wantErr: model.ErrInvalidResponse},
 		{name: "结束后用量重复结束原因", payload: sse(stopChunk, `{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"total_tokens":405}}`, "[DONE]"), wantErr: model.ErrInvalidResponse},
 	}
@@ -204,7 +205,7 @@ func TestStreamRejectsInterruptedOrInvalidResponses(t *testing.T) {
 func TestStreamAllowsEmptyAndNullableTextFields(t *testing.T) {
 	body := &trackedBody{Reader: strings.NewReader(sse(
 		`{"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
-		`{"choices":[{"index":0,"delta":{"content":null,"refusal":null,"tool_calls":null},"finish_reason":null}]}`,
+		`{"choices":[{"index":0,"delta":{"content":null,"refusal":null,"tool_calls":null,"audio":null},"finish_reason":null}]}`,
 		`{"choices":[{"index":0,"delta":{"content":""},"finish_reason":null}]}`,
 		textChunk, stopChunk, "[DONE]",
 	))}
@@ -226,6 +227,43 @@ func TestStreamAllowsEmptyAndNullableTextFields(t *testing.T) {
 	}
 	if body.closes != 1 {
 		t.Errorf("响应关闭次数为 %d，期望 1", body.closes)
+	}
+}
+
+func TestStreamRejectsAudioOutput(t *testing.T) {
+	for _, capture := range []bool{false, true} {
+		for _, content := range []string{"", "正文"} {
+			t.Run(map[bool]string{false: "without_capture", true: "with_capture"}[capture]+"/"+content, func(t *testing.T) {
+				delta, err := json.Marshal(map[string]any{"content": content, "audio": map[string]string{"id": "audio-1", "data": "ZmFrZQ=="}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				body := &trackedBody{Reader: strings.NewReader(sse(`{"choices":[{"index":0,"delta":`+string(delta)+`,"finish_reason":"stop"}],"usage":{"total_tokens":7,"vendor":"kept"}}`, "[DONE]"))}
+				client := newStreamClient(t, body)
+				req := testRequest()
+				req.CaptureResult = capture
+				var result *model.Response
+				err = client.Stream(t.Context(), req, func(event model.Event) error {
+					if event.Type == model.EventCompleted || event.Type == model.EventTextDelta {
+						t.Errorf("不支持的音频分片仍产生正文或完成事件: %s", event.Type)
+					}
+					if event.Result != nil {
+						result = event.Result
+					}
+					return nil
+				})
+				if !errors.Is(err, model.ErrUnsupportedOutput) {
+					t.Fatalf("音频输出未明确拒绝: %v", err)
+				}
+				assertCallError(t, err, http.StatusOK, testRequestID)
+				if capture && (result == nil || !strings.Contains(string(result.Output), `"audio"`) || !strings.Contains(string(result.Usage), `"vendor":"kept"`)) {
+					t.Fatalf("失败输出或实际 usage 丢失: %+v", result)
+				}
+				if body.closes != 1 {
+					t.Fatalf("响应关闭次数为 %d，期望 1", body.closes)
+				}
+			})
+		}
 	}
 }
 

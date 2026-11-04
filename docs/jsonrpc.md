@@ -55,6 +55,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 ```
 
 所有输入输出都是逐行 JSON，不带 SSE 的 `data:` 前缀。单条请求最多 1 MiB，单条响应最多 8 MiB；文本累计限制为 1 MiB，与 Token 容量无关。
+普通对话的文本限制累计覆盖同一执行的所有回答轮次。流式超限后以 `run.failed` 结束，消息及 `message.updated` 只保留通过检查的部分正文；步骤仍保存原始响应和实际返回的 usage。
 
 ## 2. 接口总览
 
@@ -230,6 +231,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 普通对话与 Agent 默认向所有模型提供工具，无需填写 `capabilities.tools`，也不在 `model_type` 中选择工具。`capabilities:null`、`model_type:[]` 的配置同样可以调用工具。
 `reasoning` 和推理等级仅作元数据，不自动传入推理参数，也不阻止文本请求。图片输入需 `capabilities.image_input:true`；标注 `model_type:["image"]` 不自动声明图片输入或输出。图片输出及音视频输入输出尚未接入，类型字段只保存元数据。
+模型响应或流式分片含非 NULL 的 `audio` 字段时，执行明确失败，错误类型为 `unsupported`；`audio:null` 和未知厂商元数据可以保留。合法空文本响应仍可成功，音频内容不会被当作空文本成功处理。
 
 上下文窗口、最大输出 Token 和推理等级属于配置元数据，不会自动变成每次请求的 `max_tokens` 或推理参数，也不用于本地 Token 预算检查。
 
@@ -456,6 +458,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 三个工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
 无工作区或访问工作区外目标时，`on-request` 请求用户审批，`always` 请求审批，`never` 拒绝操作。批准只授权该次固定目标，不授权父目录或其他文件。
 目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。当前没有文件写入、删除、Shell、MCP 或插件工具。
+`search_text` 搜索空目录返回空匹配，遇到空子目录继续搜索；空目录不作为工具错误。
 
 ### 11.2 approval.get / approval.list
 
@@ -526,6 +529,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 ```
 
 图片由适配器读取并转换，客户端不传 Base64 或远端协议格式。文本块使用 `text`，图片块使用 `path`；图片输出尚未启用。
+读取只接受核对身份后的普通文件，使用已打开的固定句柄。Unix 使用非阻塞打开；路径在检查后被替换为命名管道时明确失败，不等待管道写端。
 
 ## 13. 执行查询和取消
 

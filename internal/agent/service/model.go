@@ -29,8 +29,11 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 	}
 	var text strings.Builder
 	defer func() {
-		if result.Text == "" {
+		if ex.Run.Stream {
+			// 捕获结果可能包含导致回调拒绝的分片；消息正文只采用通过累计限额的增量。
+			// 原始 Output、usage 和工具调用仍保留在结果中，供步骤审计及成功后的循环使用。
 			result.Text = text.String()
+			result.Content = nil
 		}
 		if len(result.Text) > inference.MaxTextBytes {
 			result.Text = text.String()
