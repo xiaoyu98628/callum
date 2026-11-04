@@ -613,7 +613,21 @@ usage 片段响应示例：
 - 模型调用步骤的 `usage` 原样保存厂商返回的用量；主回答、每轮继续调用及辅助标题分别记录，不能只看第一条步骤。
 - 工具步骤的 `input` 保存规范化请求、哈希、审批策略、审批人、`settings_revision` 和权限判定。
 - `authorization.action` 为 `allow`、`ask`、`deny`；它是规则判定，实际批准或拒绝通过审批记录查询。
-- 工具步骤的 `output` 保存工具结果或结构化错误，以及上下文恢复所需的统一消息。
+- 新工具步骤的 `input.operation_version` 为 `1`。`output` 保存 `result`、`operation`、可选的独立受控 `error`，以及上下文恢复所需的统一消息。错误时仍保留已获得的有效实际输出；没有有效输出的失败保持 `result.error` 结构。
+
+工具结果中的 `operation` 由服务端保存，例如：
+
+```json
+{"result":{"written":true},"operation":{"version":1,"outcome":"applied","request_hash":"<fixed_operation_hash>"},"error":{"kind":"cancelled","message":"操作已取消"}}
+```
+
+此例说明“操作已生效、调用随后取消”的记录格式；当前内置工具仍为读取工具，并未开放文件修改接口。
+`outcome` 为 `none`（无副作用）、`not_applied`（确认未生效）、`applied`（已生效）、`partially_applied`（部分生效）或 `unknown`（无法确认）；不能仅用步骤或运行的失败／取消状态判断是否生效。
+恢复未完成的新步骤时附加 `recovered:true`，已保存的明确事实及实际输出保留，未启动的调用为 `not_applied`，已启动但缺少结果的只读调用为 `none`，其他调用为 `unknown`。旧记录不补造这些字段，数据库结构版本不变。
+
+后续对话会恢复当前分支中失败、取消或中断执行留下的已生效、部分生效或未知操作，保持工具调用及结果配对，不恢复失败回答正文。同轮未执行的调用补齐为未执行；编辑重发前的旧分支仍只作审计。
+同一固定操作留下未知、部分生效或已生效但报错的结果后，再次调用会要求用户确认，`authorization.reason` 为 `previous_result_requires_confirmation`；`never` 直接拒绝。批准仍需通过执行前校验，明确成功才解除待核实状态；不会自动重试未知操作。
+本节字段通过现有 `step.data` 读取，通知结构和 JSON-RPC 方法不变。工具原始输出仍限 64 KiB，外层事实及上下文封装不计入该工具输出上限。
 
 ## 15. 无历史模型调用 model.invoke
 
@@ -685,7 +699,7 @@ usage 片段响应示例：
 
 `model.invoke` 使用 `run.text_delta`、`run.completed`、`run.failed`、`run.cancelled`，其 `params` 不包含持久化 `run` 对象或 `conversation_id`。
 
-当前不发送 `step.output_delta`、`user_input.requested`、`user_input.updated`、`run.interrupted` 或上下文压缩专用通知。重启只恢复中断状态，客户端查询执行记录获取结果，不承诺重放旧事件。
+当前不发送 `step.output_delta`、`user_input.requested`、`user_input.updated`、`run.interrupted` 或上下文压缩专用通知。重启恢复中断状态及新工具步骤的保守操作事实，客户端查询执行记录获取结果，不承诺重放旧事件。
 
 ## 17. 错误码与负向测试
 

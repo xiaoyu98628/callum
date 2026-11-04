@@ -46,12 +46,16 @@ func (f *policyTestTool) Prepare(context.Context, tool.Scope, json.RawMessage) (
 }
 func (f *policyTestTool) Target() *tool.Target { return nil }
 func (f *policyTestTool) Close() error         { return nil }
-func (f *policyTestTool) Execute(ctx context.Context) (json.RawMessage, error) {
+func (f *policyTestTool) Execute(ctx context.Context) (tool.Result, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return tool.Result{Outcome: tool.OutcomeNotApplied}, err
 	}
 	f.calls.Add(1)
-	return json.RawMessage(`{"executed":true}`), nil
+	outcome := tool.OutcomeApplied
+	if tool.UnconfirmedOutcome(f.effects) == tool.OutcomeNone {
+		outcome = tool.OutcomeNone
+	}
+	return tool.Result{Output: json.RawMessage(`{"executed":true}`), Outcome: outcome}, nil
 }
 
 type policyTestModel struct {

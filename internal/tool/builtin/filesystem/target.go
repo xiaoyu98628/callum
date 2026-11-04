@@ -147,7 +147,12 @@ func (p *invocation) check(ctx context.Context) error {
 	return nil
 }
 
-func (p *invocation) Execute(ctx context.Context) (json.RawMessage, error) {
+func (p *invocation) Execute(ctx context.Context) (tool.Result, error) {
+	output, err := p.execute(ctx)
+	return tool.Result{Output: output, Outcome: tool.OutcomeNone}, err
+}
+
+func (p *invocation) execute(ctx context.Context) (json.RawMessage, error) {
 	if err := p.check(ctx); err != nil {
 		return nil, err
 	}

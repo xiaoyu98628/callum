@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,9 @@ type mutableTool struct {
 	prepareErr error
 	closeErr   error
 	closes     int
+	result     *tool.Result
+	executeErr error
+	onExecute  func()
 }
 
 func (t *mutableTool) Definition() tool.Definition { return t.definition }
@@ -31,9 +35,67 @@ func (t *mutableTool) Prepare(context.Context, tool.Scope, json.RawMessage) (too
 }
 func (t *mutableTool) Target() *tool.Target { return t.target }
 func (t *mutableTool) Close() error         { t.closes++; return t.closeErr }
-func (t *mutableTool) Execute(context.Context) (json.RawMessage, error) {
+func (t *mutableTool) Execute(context.Context) (tool.Result, error) {
 	t.executed = true
-	return json.RawMessage(`{}`), nil
+	if t.onExecute != nil {
+		t.onExecute()
+	}
+	if t.result != nil {
+		return *t.result, t.executeErr
+	}
+	return tool.Result{Output: json.RawMessage(`{}`), Outcome: tool.OutcomeNone}, nil
+}
+
+func TestExecutionPreservesEffectsAndOutputOnFailure(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		result       tool.Result
+		err, wantErr error
+		cancel       bool
+		wantOutcome  tool.Outcome
+		wantOutput   bool
+	}{
+		{"cancel_after_apply", tool.Result{Output: json.RawMessage(`{"written":true}`), Outcome: tool.OutcomeApplied}, nil, context.Canceled, true, tool.OutcomeApplied, true},
+		{"error_after_apply", tool.Result{Output: json.RawMessage(`{"written":true}`), Outcome: tool.OutcomeApplied}, tool.ErrUnavailable, tool.ErrUnavailable, false, tool.OutcomeApplied, true},
+		{"partial", tool.Result{Output: json.RawMessage(`{"written":1}`), Outcome: tool.OutcomePartial}, nil, tool.ErrPartialOutcome, false, tool.OutcomePartial, true},
+		{"unknown", tool.Result{Outcome: tool.OutcomeUnknown}, nil, tool.ErrUnknownOutcome, false, tool.OutcomeUnknown, false},
+		{"missing_outcome", tool.Result{Output: json.RawMessage(`{}`)}, nil, tool.ErrInvalid, false, tool.OutcomeUnknown, true},
+		{"oversized_output", tool.Result{Output: json.RawMessage(`"` + strings.Repeat("x", tool.MaxResultBytes) + `"`), Outcome: tool.OutcomeApplied}, nil, tool.ErrLimit, false, tool.OutcomeApplied, false},
+		{"invalid_output", tool.Result{Output: json.RawMessage(`invalid`), Outcome: tool.OutcomeApplied}, nil, tool.ErrInvalid, false, tool.OutcomeApplied, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			instance := &mutableTool{definition: tool.Definition{ToolDefinition: model.ToolDefinition{Name: "operation", Description: "操作结果验证", Parameters: json.RawMessage(`{}`)}, Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectWrite}}, result: &test.result, executeErr: test.err}
+			if test.cancel {
+				instance.onExecute = cancel
+			}
+			r := registry.New()
+			if err := r.Register(instance); err != nil {
+				t.Fatal(err)
+			}
+			e, err := executor.New(r, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := e.Prepare(ctx, tool.Scope{}, "operation", json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := p.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			result, err := e.Execute(ctx, p, p.Hash())
+			if !instance.executed || !errors.Is(err, test.wantErr) || result.Outcome != test.wantOutcome || (result.Output != nil) != test.wantOutput {
+				t.Fatalf("操作事实或错误丢失: outcome=%s output=%s err=%v", result.Outcome, result.Output, err)
+			}
+			if test.wantOutput && string(result.Output) != string(test.result.Output) {
+				t.Fatal("实际输出被覆盖")
+			}
+		})
+	}
 }
 
 func TestOperationEffectsAreFrozenBeforeApproval(t *testing.T) {

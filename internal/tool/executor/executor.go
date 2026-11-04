@@ -113,40 +113,50 @@ func (e *Executor) Prepare(ctx context.Context, scope tool.Scope, name string, a
 }
 
 // Execute 的 approvedHash 来自权限判定或已批准记录，工具结果必须是有界有效 JSON。
-func (e *Executor) Execute(ctx context.Context, p *Prepared, approvedHash string) (json.RawMessage, error) {
+func (e *Executor) Execute(ctx context.Context, p *Prepared, approvedHash string) (tool.Result, error) {
+	notApplied := tool.Result{Outcome: tool.OutcomeNotApplied}
 	if p == nil || p.hash != approvedHash {
-		return nil, tool.ErrDenied
+		return notApplied, tool.ErrDenied
 	}
 	target := p.invocation.Target()
 	if (target == nil) != (p.target == nil) || (target != nil && *target != *p.target) {
-		return nil, tool.ErrDenied
+		return notApplied, tool.ErrDenied
 	}
 	definition := p.instance.Definition()
 	latest, err := json.Marshal(definition)
 	if err != nil {
-		return nil, err
+		return notApplied, err
 	}
 	original, err := json.Marshal(p.definition)
 	if err != nil {
-		return nil, err
+		return notApplied, err
 	}
 	if string(latest) != string(original) {
-		return nil, tool.ErrDenied
+		return notApplied, tool.ErrDenied
 	}
 	call, cancel := context.WithTimeout(ctx, e.timeout)
 	defer cancel()
 	if err := call.Err(); err != nil {
-		return nil, err
+		return notApplied, err
 	}
 	result, err := p.invocation.Execute(call)
-	if err == nil {
-		err = call.Err()
+	if !result.Outcome.Valid() {
+		result.Outcome = tool.UnconfirmedOutcome(p.definition.Effects)
+		err = errors.Join(err, tool.ErrInvalid)
 	}
-	if len(result) > tool.MaxResultBytes {
-		return nil, tool.ErrLimit
+	err = errors.Join(err, call.Err())
+	if err == nil && result.Outcome == tool.OutcomeUnknown {
+		err = tool.ErrUnknownOutcome
+	} else if err == nil && result.Outcome == tool.OutcomePartial {
+		err = tool.ErrPartialOutcome
 	}
-	if err == nil && !json.Valid(result) {
-		return nil, tool.ErrInvalid
+	// 输出不可保存时仍保留独立事实，不能把已发生的操作改成未执行。
+	if len(result.Output) > tool.MaxResultBytes {
+		result.Output = nil
+		err = errors.Join(err, tool.ErrLimit)
+	} else if (result.Output != nil || err == nil) && !json.Valid(result.Output) {
+		result.Output = nil
+		err = errors.Join(err, tool.ErrInvalid)
 	}
 	return result, err
 }

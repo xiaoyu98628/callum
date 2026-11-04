@@ -35,6 +35,10 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		definitions = append(definitions, d.ToolDefinition)
 	}
 	denied := map[string]bool{}
+	uncertain, err := uncertainOperations(messages)
+	if err != nil {
+		return err
+	}
 	count, totalText := 0, 0
 	step := ex.Step
 	for round := range MaxModelRounds {
@@ -86,7 +90,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		}
 		messages = append(messages, model.Message{Role: model.RoleAssistant, Content: result.Text, ToolCalls: result.ToolCalls})
 		for _, call := range result.ToolCalls {
-			value, err := e.callTool(ctx, ex, step, call, denied)
+			value, err := e.callTool(ctx, ex, step, call, denied, uncertain)
 			if err != nil {
 				return err
 			}
@@ -117,6 +121,10 @@ func (e *Engine) saveAnswer(ctx context.Context, ex conversation.Execution, bloc
 func toolFailure(err error) json.RawMessage {
 	kind, message := "tool_failed", "工具执行失败"
 	switch {
+	case errors.Is(err, tool.ErrUnknownOutcome):
+		kind, message = "outcome_unknown", tool.ErrUnknownOutcome.Error()
+	case errors.Is(err, tool.ErrPartialOutcome):
+		kind, message = "partially_applied", tool.ErrPartialOutcome.Error()
 	case errors.Is(err, tool.ErrPathBase):
 		kind, message = "path_base_required", tool.ErrPathBase.Error()
 	case errors.Is(err, tool.ErrDenied):
@@ -134,6 +142,37 @@ func toolFailure(err error) json.RawMessage {
 	}
 	value, _ := json.Marshal(map[string]any{"error": map[string]string{"kind": kind, "message": message}})
 	return value
+}
+
+// uncertainOperations 只读取服务端保存的工具事实，未知、部分生效和已生效但报错的
+// 固定操作再次出现时必须重新确认；新结果明确成功后可以解除该固定操作的待核实状态。
+func uncertainOperations(messages []model.Message) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, message := range messages {
+		if message.Role != model.RoleTool {
+			continue
+		}
+		var value struct {
+			Operation *tool.OutcomeRecord `json:"operation"`
+			Error     json.RawMessage     `json:"error"`
+		}
+		if json.Unmarshal([]byte(message.Content), &value) != nil || value.Operation == nil {
+			continue // 旧工具结果没有操作事实，不推断它们是否曾产生副作用。
+		}
+		facts := *value.Operation
+		if !facts.Valid() {
+			return nil, model.ErrInvalidResponse
+		}
+		if facts.RequestHash == "" {
+			continue
+		}
+		if facts.Outcome == tool.OutcomeUnknown || facts.Outcome == tool.OutcomePartial || (facts.Outcome == tool.OutcomeApplied && len(value.Error) > 0 && string(value.Error) != "null") {
+			out[facts.RequestHash] = true
+		} else if facts.Outcome == tool.OutcomeApplied || facts.Outcome == tool.OutcomeNone {
+			delete(out, facts.RequestHash)
+		}
+	}
+	return out, nil
 }
 
 // withContextMessage 为跨供应商上下文恢复保存统一消息，不解析供应商协议。

@@ -42,8 +42,8 @@ func TestWorkspaceToolsAndPermissionBoundary(t *testing.T) {
 		}
 		output, callErr := e.Execute(t.Context(), prepared, prepared.Hash())
 		closeErr := prepared.Close()
-		if callErr != nil || closeErr != nil || !json.Valid(output) {
-			t.Fatalf("%s: %s %v %v", test.Name, output, callErr, closeErr)
+		if callErr != nil || closeErr != nil || !json.Valid(output.Output) || output.Outcome != tool.OutcomeNone {
+			t.Fatalf("%s: %s %v %v", test.Name, output.Output, callErr, closeErr)
 		}
 	}
 	for _, args := range []string{`{"path":"../secret"}`, `{"path":"a.txt","unknown":true}`, `{"path":"a.txt","start_line":-1}`} {
@@ -107,7 +107,7 @@ func TestSearchHandlesEmptyDirectories(t *testing.T) {
 				Matches   []struct{ Path, Text string } `json:"matches"`
 				Truncated bool                          `json:"truncated"`
 			}
-			if err := json.Unmarshal(output, &result); err != nil {
+			if err := json.Unmarshal(output.Output, &result); err != nil {
 				t.Fatal(err)
 			}
 			want := 0
@@ -115,14 +115,14 @@ func TestSearchHandlesEmptyDirectories(t *testing.T) {
 				want = 1
 			}
 			if len(result.Matches) != want || result.Truncated {
-				t.Fatalf("空目录影响搜索结果: %s", output)
+				t.Fatalf("空目录影响搜索结果: %s", output.Output)
 			}
 			resolved, err := filepath.EvalSymlinks(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if nested && (result.Matches[0].Path != filepath.Join(resolved, "a.txt") || result.Matches[0].Text != "needle") {
-				t.Fatalf("其他文件的匹配结果丢失: %s", output)
+				t.Fatalf("其他文件的匹配结果丢失: %s", output.Output)
 			}
 		})
 	}
@@ -189,15 +189,15 @@ func TestFileTargetsWithAndWithoutWorkspace(t *testing.T) {
 				t.Fatalf("审批未固定实际目标: %s", p.Request())
 			}
 			result, err := e.Execute(t.Context(), p, p.Hash())
-			if err != nil || !json.Valid(result) {
-				t.Fatalf("执行失败: %s %v", result, err)
+			if err != nil || !json.Valid(result.Output) {
+				t.Fatalf("执行失败: %s %v", result.Output, err)
 			}
 			if test.operation == "read_file" {
 				var value struct {
 					Text string `json:"text"`
 				}
-				if err := json.Unmarshal(result, &value); err != nil || value.Text != "needle content" {
-					t.Fatalf("文件内容错误: %s %v", result, err)
+				if err := json.Unmarshal(result.Output, &value); err != nil || value.Text != "needle content" {
+					t.Fatalf("文件内容错误: %s %v", result.Output, err)
 				}
 			}
 			if test.operation == "search_text" {
@@ -210,8 +210,8 @@ func TestFileTargetsWithAndWithoutWorkspace(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if err := json.Unmarshal(result, &value); err != nil || len(value.Matches) != 1 || value.Matches[0].Path != resolved {
-					t.Fatalf("搜索范围或结果错误: %s %v", result, err)
+				if err := json.Unmarshal(result.Output, &value); err != nil || len(value.Matches) != 1 || value.Matches[0].Path != resolved {
+					t.Fatalf("搜索范围或结果错误: %s %v", result.Output, err)
 				}
 			}
 		})
@@ -358,11 +358,11 @@ func TestDirectorySearchStaysWithinApprovedTarget(t *testing.T) {
 			Path string `json:"path"`
 		} `json:"matches"`
 	}
-	if err := json.Unmarshal(result, &output); err != nil || len(output.Matches) != 1 {
-		t.Fatalf("搜索越出批准目录: %s %v", result, err)
+	if err := json.Unmarshal(result.Output, &output); err != nil || len(output.Matches) != 1 {
+		t.Fatalf("搜索越出批准目录: %s %v", result.Output, err)
 	}
 	want, err := filepath.EvalSymlinks(filepath.Join(directory, "a.txt"))
 	if err != nil || output.Matches[0].Path != want {
-		t.Fatalf("搜索了相邻目录: %s %v", result, err)
+		t.Fatalf("搜索了相邻目录: %s %v", result.Output, err)
 	}
 }

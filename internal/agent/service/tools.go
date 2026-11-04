@@ -17,33 +17,38 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/policy"
 )
 
-func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, denied map[string]bool) (message model.Message, retErr error) {
+func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, denied, uncertain map[string]bool) (message model.Message, retErr error) {
 	scope, operationErr := e.toolScope(ctx, ex)
 	var prepared *toolexecutor.Prepared
 	if operationErr == nil {
 		prepared, operationErr = e.options.Tools.Prepare(ctx, scope, call.Name, call.Arguments)
 	}
 	var step agent.Step
-	var output json.RawMessage
+	result := tool.Result{Outcome: tool.OutcomeNotApplied}
 	// 先关闭固定调用资源，再保存操作结果；关闭失败也保留在受控错误和执行状态中。
 	defer func() {
 		if prepared != nil {
 			closeErr := prepared.Close()
 			operationErr = errors.Join(operationErr, closeErr)
+			if result.Outcome == tool.OutcomeUnknown || result.Outcome == tool.OutcomePartial || (result.Outcome == tool.OutcomeApplied && operationErr != nil) {
+				uncertain[prepared.Hash()] = true
+			} else if operationErr == nil && (result.Outcome == tool.OutcomeApplied || result.Outcome == tool.OutcomeNone) {
+				delete(uncertain, prepared.Hash())
+			}
 			if step.ID == "" {
 				retErr = errors.Join(retErr, closeErr)
 			}
 		}
 		if step.ID != "" {
 			var finishErr error
-			message, finishErr = e.finishTool(ctx, ex, step, call, output, operationErr)
+			message, finishErr = e.finishTool(ctx, ex, step, call, result, operationErr)
 			retErr = errors.Join(retErr, finishErr)
 		}
 		if err := ctx.Err(); err != nil {
 			retErr = errors.Join(retErr, err)
 		}
 	}()
-	decision := toolDecision(prepared, denied, ex.Run.SettingsSnapshot)
+	decision := toolDecision(prepared, denied, uncertain, ex.Run.SettingsSnapshot)
 	var err error
 	step, err = e.createToolStep(ctx, ex, parent, call, prepared, decision)
 	if err != nil {
@@ -79,6 +84,17 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 		return message, operationStorageError(ctx, err)
 	}
 	step = claimed
+	// 先保存可能已发生操作的边界，保存失败则不调用工具。终态写入失败或崩溃时
+	// 依然有保守的未知记录；正常返回再用工具报告的事实替换它。
+	checkpoint := tool.OutcomeRecord{Version: tool.OperationVersion, Outcome: tool.UnconfirmedOutcome(prepared.Definition().Effects), RequestHash: prepared.Hash()}
+	step.Output, err = json.Marshal(map[string]any{"operation": checkpoint})
+	if err == nil {
+		err = e.repository.SaveStep(ctx, step)
+	}
+	if err != nil {
+		operationErr = err
+		return message, operationStorageError(ctx, err)
+	}
 	if err := e.event(ex, "run.updated", "", "", ex.Run); err != nil {
 		operationErr = err
 		return message, err
@@ -87,11 +103,11 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 		operationErr = err
 		return message, err
 	}
-	output, operationErr = e.options.Tools.Execute(ctx, prepared, prepared.Hash())
+	result, operationErr = e.options.Tools.Execute(ctx, prepared, prepared.Hash())
 	return
 }
 
-func toolDecision(prepared *toolexecutor.Prepared, denied map[string]bool, snapshot *settings.Snapshot) policy.Decision {
+func toolDecision(prepared *toolexecutor.Prepared, denied, uncertain map[string]bool, snapshot *settings.Snapshot) policy.Decision {
 	if snapshot == nil || !snapshot.Valid() {
 		return policy.Decision{Action: policy.Deny, Reason: "invalid_settings_snapshot"}
 	}
@@ -101,11 +117,17 @@ func toolDecision(prepared *toolexecutor.Prepared, denied map[string]bool, snaps
 	if denied[prepared.Hash()] {
 		return policy.Decision{Action: policy.Deny, Reason: "previously_rejected"}
 	}
+	if uncertain[prepared.Hash()] {
+		if snapshot.ApprovalPolicy == policy.Never {
+			return policy.Decision{Action: policy.Deny, Reason: "previous_result_requires_confirmation"}
+		}
+		return policy.Decision{Action: policy.Ask, Reason: "previous_result_requires_confirmation"}
+	}
 	return policy.Evaluate(snapshot.ApprovalPolicy, prepared.Definition().Effects, prepared.OutsideWorkspace())
 }
 
 func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, prepared *toolexecutor.Prepared, decision policy.Decision) (agent.Step, error) {
-	input := map[string]any{"arguments": call.Arguments, "authorization": decision}
+	input := map[string]any{"arguments": call.Arguments, "authorization": decision, "operation_version": tool.OperationVersion}
 	if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
 		input["approval_policy"], input["approvals_reviewer"], input["settings_revision"] = snapshot.ApprovalPolicy, snapshot.ApprovalsReviewer, snapshot.Revision
 	}
@@ -176,18 +198,37 @@ func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, s
 	return "", tool.ErrDenied
 }
 
-func (e *Engine) finishTool(ctx context.Context, ex conversation.Execution, step agent.Step, call model.ToolCall, output json.RawMessage, operationErr error) (model.Message, error) {
+func (e *Engine) finishTool(ctx context.Context, ex conversation.Execution, step agent.Step, call model.ToolCall, result tool.Result, operationErr error) (model.Message, error) {
+	var input struct {
+		RequestHash string `json:"request_hash"`
+	}
+	if err := json.Unmarshal(step.Input, &input); err != nil {
+		return model.Message{}, errors.Join(agent.ErrStorage, err)
+	}
+	facts := tool.OutcomeRecord{Version: tool.OperationVersion, Outcome: result.Outcome, RequestHash: input.RequestHash}
+	fields := map[string]any{"operation": facts, "result": result.Output}
+	var failure struct {
+		Error struct {
+			Kind    string `json:"kind"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
 	if operationErr != nil {
-		output = toolFailure(operationErr)
+		controlled := toolFailure(operationErr)
+		if err := json.Unmarshal(controlled, &failure); err != nil {
+			return model.Message{}, err
+		}
+		fields["error"] = failure.Error
+		if result.Output == nil {
+			// 保留原有失败时 result.error 的结构；实际输出存在时与错误分别保存。
+			fields["result"] = controlled
+		}
 	}
-	if output == nil {
-		output = json.RawMessage(`{}`)
-	}
-	message := model.Message{Role: model.RoleTool, Content: string(output), ToolCallID: call.ID}
-	envelope, err := json.Marshal(map[string]json.RawMessage{"result": output})
+	envelope, err := json.Marshal(fields)
 	if err != nil {
-		return message, err
+		return model.Message{}, err
 	}
+	message := model.Message{Role: model.RoleTool, Content: string(envelope), ToolCallID: call.ID}
 	envelope, err = withContextMessage(envelope, message)
 	if err != nil {
 		return message, err
@@ -199,13 +240,7 @@ func (e *Engine) finishTool(ctx context.Context, ex conversation.Execution, step
 		if errors.Is(operationErr, context.Canceled) {
 			step.Status = agent.Cancelled
 		}
-		var value struct {
-			Error struct{ Kind, Message string } `json:"error"`
-		}
-		if err := json.Unmarshal(output, &value); err != nil {
-			return message, err
-		}
-		step.ErrorKind, step.ErrorMessage = &value.Error.Kind, &value.Error.Message
+		step.ErrorKind, step.ErrorMessage = &failure.Error.Kind, &failure.Error.Message
 	}
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()

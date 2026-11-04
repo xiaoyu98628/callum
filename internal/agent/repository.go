@@ -20,6 +20,7 @@ type Repository interface {
 	// StartTool 原子认领尚未执行的工具步骤，核验审批及当前执行仍有效。
 	StartTool(context.Context, string, string, string, string) (Step, error)
 	Resume(context.Context, string) error
-	// Transcript 读取已完成执行的模型、工具上下文，不包含辅助标题或重发旧分支。
+	// Transcript 读取当前分支的已完成轨迹及未完成执行中的副作用事实，保证调用结果配对。
+	// 不包含辅助标题、失败的最终回答或重发旧分支，不推断旧记录的操作结果。
 	Transcript(context.Context, string) (map[string][]model.Message, error)
 }
