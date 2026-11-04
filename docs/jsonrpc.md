@@ -454,10 +454,11 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | `list_directory` | `path`，可选 `limit` | 查看指定目录；有工作区时可用 `path:"."` |
 | `read_file` | `path`，可选 `start_line`、`end_line` | 按行读取 UTF-8 文本，例如 `path:"note.txt"` |
 | `search_text` | `path`、`query`，可选 `limit` | 搜索字面文本 |
+| `apply_patch` | `patch`、`base_versions` | 创建或修改 UTF-8 文本文件；修改需提供原文件 SHA-256 |
 
-三个工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
+四个工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
 无工作区或访问工作区外目标时，`on-request` 请求用户审批，`always` 请求审批，`never` 拒绝操作。批准只授权该次固定目标，不授权父目录或其他文件。
-目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。当前没有文件写入、删除、Shell、MCP 或插件工具。
+目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。文件创建与修改使用 `apply_patch`；当前没有删除、移动、Shell、MCP 或插件工具。
 `search_text` 搜索空目录返回空匹配，遇到空子目录继续搜索；空目录不作为工具错误。
 
 ### 11.2 approval.get / approval.list
@@ -510,7 +511,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | `always` | 每次有效调用都询问 | 询问用户 |
 | `never` | 自动执行 | 直接拒绝，不创建待审批记录 |
 
-当前产品工具均为读取工具，手工测试 `never` 时工作区内读取仍会成功，无工作区及工作区外读取直接拒绝。删除、外发等类别的拒绝规则通过受控工具测试验证，并不表示当前存在相应产品工具。
+`never` 下工作区内读取和普通补丁修改仍可执行，无工作区或工作区外文件访问、大范围覆盖及其他需要审批的操作直接拒绝。删除、外发类别使用受控工具测试验证，并不表示存在相应产品工具。
 
 ## 12. 图片输入
 
@@ -621,7 +622,7 @@ usage 片段响应示例：
 {"result":{"written":true},"operation":{"version":1,"outcome":"applied","request_hash":"<fixed_operation_hash>"},"error":{"kind":"cancelled","message":"操作已取消"}}
 ```
 
-此例说明“操作已生效、调用随后取消”的记录格式；当前内置工具仍为读取工具，并未开放文件修改接口。
+此例说明“操作已生效、调用随后取消”的记录格式；读取工具的事实为 `none`；`apply_patch` 可以产生修改事实，该工具由模型调用，不是独立 JSON-RPC 方法。
 `outcome` 为 `none`（无副作用）、`not_applied`（确认未生效）、`applied`（已生效）、`partially_applied`（部分生效）或 `unknown`（无法确认）；不能仅用步骤或运行的失败／取消状态判断是否生效。
 恢复未完成的新步骤时附加 `recovered:true`，已保存的明确事实及实际输出保留，未启动的调用为 `not_applied`，已启动但缺少结果的只读调用为 `none`，其他调用为 `unknown`。旧记录不补造这些字段，数据库结构版本不变。
 
@@ -762,3 +763,29 @@ usage 片段响应示例：
 - 配置接口：[catalog](/Users/xiaoyu/www/go/works/callum/internal/stdio/catalog)、[settings](/Users/xiaoyu/www/go/works/callum/internal/stdio/settings)。
 - 对话及执行接口：[conversation](/Users/xiaoyu/www/go/works/callum/internal/stdio/conversation)、[execution](/Users/xiaoyu/www/go/works/callum/internal/stdio/execution)、[approval](/Users/xiaoyu/www/go/works/callum/internal/stdio/approval)、[workspace](/Users/xiaoyu/www/go/works/callum/internal/stdio/workspace)。
 - 进一步的数据与执行约定见 [对话设计](design/conversations.md)。
+
+## 19. 文件补丁工具参数与结果
+
+`apply_patch` 由模型在 `conversation.send` 执行过程中调用，不作为 JSON-RPC 方法单独发送。给模型描述创建或修改要求即可；补丁内容、版本前提和实际目标由 Go 校验，流式参数片段不会触发执行。
+
+读取工具结果的 `result.sha256` 是整个文件内容的 SHA-256，与请求的显示行范围无关。模型工具参数示例：
+
+```json
+{"patch":"*** Begin Patch\n*** Update File: notes.txt\n@@\n-hello\n+hello Callum\n*** End Patch\n","base_versions":[{"path":"notes.txt","sha256":"<read_file 返回的 sha256>"}]}
+```
+
+新增文件使用 `*** Add File: path` 和以 `+` 开始的正文，`base_versions` 为 `[]`；不覆盖已有目标。更新只接受唯一精确匹配，支持 `@@` 定位行及末尾 `*** End of File` 约束；拒绝删除、移动、不完整语法及无效版本。参数限 16 KiB，每次最多 8 个文件、16 个缺失父目录、单个文件最多 1 MiB，目标路径限 1024 字节。新内容为 LF，更新保留已有换行及被替换文件尾的无换行状态。
+
+多目标工具的审批快照在 `request.plan.targets` 中提供全部目标，客户端需要完整展示，不能只检查旧的 `request.target`。每个目标保存 `requested_path`、`path`、`kind`、`within_workspace`、`action`；文件目标还含 `expected_sha256` 和辅助路径 `recovery_path`、`staging_path`。目录创建是本次操作的一部分。`request.tool.effects` 包括可信计划的额外影响，不能由客户端或模型改写。
+
+普通工作区创建和修改沿用当前策略；可能覆盖全部原文，或移除字节上限至少 4 KiB 且达到原文件一半的修改要求审批。路径含 `.git`、`.codex`、`.agents` 目录时按未知影响询问。工作区外或无工作区访问需要审批；`never` 直接拒绝需要审批的操作。冲突以工具 `error.kind:"file_conflict"` 回传，不是新的 JSON-RPC 错误码，也不必导致整次回答失败。
+
+通过 `step.data` 读取 `output` 后，工具的 `result` 包含：
+
+```json
+{"changes":[{"path":"/absolute/notes.txt","action":"update","outcome":"applied","before_sha256":"<original>","intended_sha256":"<expected>","observed_sha256":"<observed>"}],"created_directories":[],"recovery_files":[]}
+```
+
+这个 `result` 外层仍有 `operation`、可选 `error` 及 `context_message`。`changes` 包括未执行的剩余文件，不能仅按数组中最后一项判断整体成功。取消、写入或清理失败后，已生效结果和实际内容哈希保留；辅助文件位置通过 `recovery_files` 返回。
+
+副本使用 `.callum-patch-<操作指纹>-before`（原文，仅更新）及 `-after`（预期内容），在批准后创建，成功后清理。发生部分写入、未知结果或清理失败时保留，客户端可提示用户核实和人工恢复。不会自动回滚、覆盖同名副本或重试。进程中断后可从步骤 input 查固定路径，但不能把未知状态当作某个文件已成功或尚未写入。已有文件通过原句柄更新以保留权限和 ACL；单文件及多文件均不承诺事务隔离或原子替换。

@@ -121,6 +121,8 @@ func (e *Engine) saveAnswer(ctx context.Context, ex conversation.Execution, bloc
 func toolFailure(err error) json.RawMessage {
 	kind, message := "tool_failed", "工具执行失败"
 	switch {
+	case errors.Is(err, tool.ErrConflict):
+		kind, message = "file_conflict", tool.ErrConflict.Error()
 	case errors.Is(err, tool.ErrUnknownOutcome):
 		kind, message = "outcome_unknown", tool.ErrUnknownOutcome.Error()
 	case errors.Is(err, tool.ErrPartialOutcome):

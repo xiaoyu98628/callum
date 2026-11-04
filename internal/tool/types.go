@@ -20,6 +20,7 @@ var (
 	ErrPathBase       = errors.New("相对路径需要工作区，请提供绝对路径或绑定工作区")
 	ErrUnknownOutcome = errors.New("操作结果未知，需要核实后再重试")
 	ErrPartialOutcome = errors.New("操作仅部分生效，需要核实已完成的部分")
+	ErrConflict       = errors.New("文件版本、路径或补丁上下文发生冲突，请重新读取后修改")
 )
 
 // Outcome 描述实际副作用，与工具调用是否成功、执行是否取消分别记录。
@@ -122,6 +123,24 @@ type Target struct {
 	Path            string `json:"path"`
 	Kind            string `json:"kind"`
 	WithinWorkspace bool   `json:"within_workspace"`
+	Action          string `json:"action,omitempty"`
+	ExpectedSHA256  string `json:"expected_sha256,omitempty"`
+	RecoveryPath    string `json:"recovery_path,omitempty"`
+	StagingPath     string `json:"staging_path,omitempty"`
+}
+
+// Plan 固定多目标操作及额外影响。由可信调用实现生成，不能由模型声明权限。
+// AdditionalEffects 只能增加影响，不能抵消工具定义中已有的影响。
+type Plan struct {
+	Targets           []Target `json:"targets"`
+	AdditionalEffects []Effect `json:"additional_effects,omitempty"`
+}
+
+// PlannedInvocation 为实际需要多目标或动态影响判定的工具提供审批计划。
+// Plan 必须只返回元数据，在 Prepare、审批等待及执行开始前保持不变。
+type PlannedInvocation interface {
+	Invocation
+	Plan() Plan
 }
 
 // Invocation 持有一次调用的固定资源；Execute 在使用前重新校验目标。

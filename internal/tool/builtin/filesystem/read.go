@@ -1,6 +1,8 @@
 package filesystem
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 
@@ -15,11 +17,13 @@ func read(a arguments, data []byte) (json.RawMessage, error) {
 	if len(text) > tool.MaxResultBytes-4096 {
 		return nil, tool.ErrLimit
 	}
+	sum := sha256.Sum256(data)
 	return json.Marshal(struct {
 		Path      string `json:"path"`
 		Start     int    `json:"start_line"`
 		End       int    `json:"end_line"`
 		Text      string `json:"text"`
 		Truncated bool   `json:"truncated"`
-	}{a.Path, a.Start, end, text, end < len(lines)})
+		SHA256    string `json:"sha256"`
+	}{a.Path, a.Start, end, text, end < len(lines), hex.EncodeToString(sum[:])})
 }

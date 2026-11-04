@@ -65,7 +65,7 @@
 - internal/workspace：工作区契约；service 负责路径、状态和标识校验。
 - internal/conversation：会话、消息契约；service 负责受理、会话管理和重发，history 负责标题截取及内容指纹。
 - internal/agent：持久化运行、步骤、事件与存储契约；executor 统一管理并发、超时、取消和关闭，service 编排模型与工具循环、辅助标题及状态保存，approval 管理确定操作的审批及等待，events 提供与协议无关的有界订阅。
-- internal/tool：工具契约；registry 管理注册，executor 固定操作及权限边界，policy 独立判断是否需要审批，builtin/filesystem 提供固定目标范围的只读文件工具，工作区作为可选路径基准。
+- internal/tool：工具契约；registry 管理注册，executor 固定操作及权限边界，policy 独立判断是否需要审批，builtin/filesystem 提供固定目标范围的读取及文件补丁工具，工作区作为可选路径基准。
 - internal/inference：兼容的无历史模型调用契约；executor 借用统一运行调度器执行 model.invoke。
 - internal/stdio：服务入口与路由；protocol 定义和解析协议，transport 管理标准流，catalog、workspace、conversation、execution、approval、settings 分别转换对应接口和事件。
 - internal/app：New 创建不依赖通信连接的 Runtime，持有数据库、实例锁、HTTP 连接池、调度器及事件发布器；ServeStdio 接入并清理单个连接，Run 负责独立 stdio 进程的完整生命周期。
@@ -222,7 +222,7 @@ stdio 的 protocol、transport 不依赖业务模块；业务错误和执行事�
 ## 当前阶段与审查范围
 
 - 当前已实现文本及图片输入适配、厂商与模型配置、工作区和普通对话持久化、stdio 事件、多会话有界执行、取消、编辑重发、并行标题和中断状态恢复。
-- 已接通模型自主工具调用、支持可选工作区的只读文件工具、审批决定与取消协调；模型与工具各自保存步骤，调用参数完整后才执行。
+- 已接通模型自主工具调用、支持可选工作区的读取及文件创建、修改工具、审批决定与取消协调；模型与工具各自保存步骤，调用参数完整后才执行。
 - 补充输入、更多工具、MCP、插件、上下文压缩及自动恢复执行属于后续规划。恢复中断状态不等于自动重试模型或工具；图片输出尚未启用。
 - 未进入明确任务范围的前端、持久化、工具审批或多 Agent 协作等能力，不自动列为必须补齐的缺陷或待办。
 - 不强制引入 Web 框架、ORM、依赖注入框架、外部队列或完整的分层体系。

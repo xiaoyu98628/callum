@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -214,5 +216,118 @@ func TestTargetSnapshotAndPreparationCleanup(t *testing.T) {
 		if err := p.Close(); err != nil || instance.closes != 1 {
 			t.Fatalf("重复关闭未保持安全: %v, closes=%d", err, instance.closes)
 		}
+	}
+}
+
+type plannedTool struct {
+	mutableTool
+	plan tool.Plan
+}
+
+func (t *plannedTool) Prepare(context.Context, tool.Scope, json.RawMessage) (tool.Invocation, error) {
+	return t, nil
+}
+func (t *plannedTool) Plan() tool.Plan { return t.plan }
+
+func TestMultiTargetPlanCannotChangeAfterApproval(t *testing.T) {
+	for _, change := range []string{"target", "effect", "none"} {
+		t.Run(change, func(t *testing.T) {
+			dir := t.TempDir()
+			a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+			instance := &plannedTool{definition: tool.Definition{Name: "operation", Description: "多目标审批", Parameters: json.RawMessage(`{}`), Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectRead}}, plan: tool.Plan{Targets: []tool.Target{{RequestedPath: a, Path: a, Kind: "file", WithinWorkspace: true}, {RequestedPath: b, Path: b, Kind: "file", WithinWorkspace: false}}, AdditionalEffects: []tool.Effect{tool.EffectDestructive}}}
+			r := registry.New()
+			if err := r.Register(instance); err != nil {
+				t.Fatal(err)
+			}
+			e, err := executor.New(r, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := e.Prepare(t.Context(), tool.Scope{}, "operation", json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := p.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			if !p.OutsideWorkspace() || !slices.Contains(p.Definition().Effects, tool.EffectDestructive) {
+				t.Fatal("多目标或额外影响丢失")
+			}
+			before := string(p.Request())
+			switch change {
+			case "target":
+				instance.plan.Targets[1].WithinWorkspace = true
+			case "effect":
+				instance.plan.AdditionalEffects[0] = tool.EffectRead
+			}
+			if string(p.Request()) != before {
+				t.Fatal("共享切片改变了审批记录")
+			}
+			_, err = e.Execute(t.Context(), p, p.Hash())
+			if change == "none" {
+				if err != nil || !instance.executed {
+					t.Fatalf("未变化计划无法执行: %v", err)
+				}
+			} else if !errors.Is(err, tool.ErrDenied) || instance.executed {
+				t.Fatalf("计划变化后仍执行: %v", err)
+			}
+		})
+	}
+}
+
+func TestPlanRejectsInvalidEffectsAndPreservesUnclassifiedRisk(t *testing.T) {
+	for _, effect := range []tool.Effect{tool.EffectRead, "invalid"} {
+		t.Run(string(effect), func(t *testing.T) {
+			instance := &plannedTool{definition: tool.Definition{Name: "operation", Description: "额外影响校验", Parameters: json.RawMessage(`{}`), Source: "test", Version: "1"}, plan: tool.Plan{AdditionalEffects: []tool.Effect{effect}}}
+			r := registry.New()
+			if err := r.Register(instance); err != nil {
+				t.Fatal(err)
+			}
+			e, err := executor.New(r, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := e.Prepare(t.Context(), tool.Scope{}, "operation", json.RawMessage(`{}`))
+			if effect == "invalid" {
+				if !errors.Is(err, tool.ErrInvalid) || instance.closes != 1 {
+					t.Fatalf("无效影响未被拒绝或资源泄漏: %v closes=%d", err, instance.closes)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if !slices.Contains(p.Definition().Effects, tool.EffectUnknown) {
+				t.Fatal("额外读取声明抵消了未知影响")
+			}
+		})
+	}
+}
+
+func TestMissingOutcomeIncludesPlannedWriteEffects(t *testing.T) {
+	instance := &plannedTool{definition: tool.Definition{Name: "operation", Description: "动态修改影响", Parameters: json.RawMessage(`{}`), Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectRead}}, result: &tool.Result{Output: json.RawMessage(`{}`)}, plan: tool.Plan{AdditionalEffects: []tool.Effect{tool.EffectWrite}}}
+	r := registry.New()
+	if err := r.Register(instance); err != nil {
+		t.Fatal(err)
+	}
+	e, err := executor.New(r, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.Prepare(t.Context(), tool.Scope{}, "operation", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := p.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	result, err := e.Execute(t.Context(), p, p.Hash())
+	if !errors.Is(err, tool.ErrInvalid) || result.Outcome != tool.OutcomeUnknown {
+		t.Fatalf("忽略额外写入影响而推断为无副作用: %+v %v", result, err)
 	}
 }

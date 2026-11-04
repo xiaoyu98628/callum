@@ -1,4 +1,4 @@
-// Package filesystem 提供固定目标范围的有界只读文件工具，工作区是可选路径基准。
+// Package filesystem 提供固定目标范围的有界文件工具，工作区是可选路径基准。
 package filesystem
 
 import (
@@ -23,6 +23,7 @@ type fileTool struct {
 // Tools 返回独立的工具实例，不读取工作区或注册全局状态。
 func Tools() []tool.Tool {
 	return []tool.Tool{
+		newPatchTool(),
 		fileTool{"list_directory", "查看目录中的文件和子目录。path 支持绝对路径；相对路径需要绑定工作区。工作区外访问需要审批", json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["path"],"additionalProperties":false}`)},
 		fileTool{"read_file", "按行读取 UTF-8 文本文件。path 支持绝对路径；相对路径需要绑定工作区。工作区外访问需要审批", json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}`)},
 		fileTool{"search_text", "在目录或文件中搜索字面文本。path 支持绝对路径；相对路径需要绑定工作区。工作区外访问需要审批", json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["path","query"],"additionalProperties":false}`)},
