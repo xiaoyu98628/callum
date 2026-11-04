@@ -331,3 +331,110 @@ func TestMissingOutcomeIncludesPlannedWriteEffects(t *testing.T) {
 		t.Fatalf("忽略额外写入影响而推断为无副作用: %+v %v", result, err)
 	}
 }
+
+type detailedTool struct {
+	mutableTool
+	details json.RawMessage
+}
+
+func (t *detailedTool) Prepare(context.Context, tool.Scope, json.RawMessage) (tool.Invocation, error) {
+	return t, nil
+}
+func (t *detailedTool) Snapshot() json.RawMessage { return t.details }
+
+func TestApprovalDetailsAreFrozenAndValidated(t *testing.T) {
+	for _, raw := range []string{`{}`, `null`, `[]`, `{"executable":"/fixed","cwd":"/work"}`} {
+		instance := &detailedTool{definition: tool.Definition{Name: "operation", Description: "snapshot", Parameters: json.RawMessage(`{}`), Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectUnknown}}, details: json.RawMessage(raw)}
+		r := registry.New()
+		if err := r.Register(instance); err != nil {
+			t.Fatal(err)
+		}
+		e, err := executor.New(r, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := e.Prepare(t.Context(), tool.Scope{}, "operation", json.RawMessage(`{}`))
+		if raw != `{"executable":"/fixed","cwd":"/work"}` {
+			if !errors.Is(err, tool.ErrInvalid) || instance.closes != 1 {
+				t.Fatalf("无效快照未拒绝或清理: %s %v", raw, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := string(p.Request())
+		instance.details = json.RawMessage(`{"executable":"/changed","cwd":"/work"}`)
+		if string(p.Request()) != before {
+			t.Fatal("已固定请求被工具修改")
+		}
+		if _, err := e.Execute(t.Context(), p, p.Hash()); !errors.Is(err, tool.ErrDenied) || instance.executed {
+			t.Fatal("审批详情变化后仍然执行")
+		}
+		if err := p.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type streamingTool struct {
+	mutableTool
+	chunks []tool.OutputChunk
+}
+
+func (t *streamingTool) Prepare(context.Context, tool.Scope, json.RawMessage) (tool.Invocation, error) {
+	return t, nil
+}
+func (t *streamingTool) ExecuteStream(_ context.Context, emit func(tool.OutputChunk) error) (tool.Result, error) {
+	for _, chunk := range t.chunks {
+		if err := emit(chunk); err != nil {
+			return tool.Result{Outcome: tool.OutcomeUnknown}, err
+		}
+	}
+	return tool.Result{Output: json.RawMessage(`{}`), Outcome: tool.OutcomeNone}, nil
+}
+func TestStreamingOutputBoundaryAndCallbackErrors(t *testing.T) {
+	callbackErr := errors.New("consumer failed")
+	for _, test := range []struct {
+		name                 string
+		chunks               []tool.OutputChunk
+		callbackErr, wantErr error
+	}{
+		{"ordered", []tool.OutputChunk{{Stream: "stdout", Data: []byte("first")}, {Stream: "stderr", Data: []byte("second")}}, nil, nil},
+		{"invalid_stream", []tool.OutputChunk{{Stream: "other", Data: []byte("x")}}, nil, tool.ErrInvalid},
+		{"oversize", []tool.OutputChunk{{Stream: "stdout", Data: make([]byte, tool.MaxOutputChunkBytes+1)}}, nil, tool.ErrInvalid},
+		{"callback", []tool.OutputChunk{{Stream: "stdout", Data: []byte("x")}}, callbackErr, callbackErr},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			instance := &streamingTool{definition: tool.Definition{Name: "operation", Description: "stream", Parameters: json.RawMessage(`{}`), Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectRead}}, chunks: test.chunks}
+			r := registry.New()
+			if err := r.Register(instance); err != nil {
+				t.Fatal(err)
+			}
+			e, err := executor.New(r, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := e.Prepare(t.Context(), tool.Scope{}, "operation", json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := p.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			var sequence int64
+			_, err = e.ExecuteStream(t.Context(), p, p.Hash(), func(chunk tool.OutputChunk) error {
+				sequence++
+				if chunk.Sequence != sequence {
+					t.Error("序号错误")
+				}
+				return test.callbackErr
+			})
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("流式错误丢失: %v", err)
+			}
+		})
+	}
+}

@@ -38,8 +38,8 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 					w.WriteHeader(400)
 					return
 				}
-				if len(input.Tools) != 4 {
-					t.Errorf("未提供四个工具定义: %d", len(input.Tools))
+				if len(input.Tools) != 5 {
+					t.Errorf("未提供五个工具定义: %d", len(input.Tools))
 				}
 				last := input.Messages[len(input.Messages)-1]
 				if last.Role == "tool" {

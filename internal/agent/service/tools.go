@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"time"
@@ -103,7 +104,10 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 		operationErr = err
 		return message, err
 	}
-	result, operationErr = e.options.Tools.Execute(ctx, prepared, prepared.Hash())
+	result, operationErr = e.options.Tools.ExecuteStream(ctx, prepared, prepared.Hash(), func(chunk tool.OutputChunk) error {
+		// 转为独立字符串后再发布，订阅队列不借用工具的读取缓冲区。
+		return e.event(ex, "tool.output", step.ID, "", agent.ToolOutput{Sequence: chunk.Sequence, Stream: chunk.Stream, Encoding: "base64", Data: base64.StdEncoding.EncodeToString(chunk.Data)})
+	})
 	return
 }
 

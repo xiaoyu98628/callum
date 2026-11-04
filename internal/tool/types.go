@@ -12,6 +12,12 @@ import (
 const MaxResultBytes = 64 << 10
 const MaxArgumentBytes = 16 << 10
 
+const (
+	MaxOutputChunkBytes = 4 << 10
+	MaxOutputBytes      = 64 << 10
+	MaxOutputEvents     = 128
+)
+
 var (
 	ErrInvalid        = errors.New("工具参数无效")
 	ErrDenied         = errors.New("操作超出授权工作区或权限范围")
@@ -150,6 +156,30 @@ type Invocation interface {
 	Target() *Target
 	Execute(context.Context) (Result, error)
 	Close() error
+}
+
+// SnapshotInvocation 提供服务端生成的补充审批详情，不包含凭据或可变引用。
+// 快照必须是非空 JSON 对象，不超过 MaxArgumentBytes；执行前重新比较其内容。
+// 未实现此接口的工具保持现有审批快照格式。
+type SnapshotInvocation interface {
+	Invocation
+	Snapshot() json.RawMessage
+}
+
+// OutputChunk 是一次工具调用的输出片段。Sequence 由执行器分配，从 1 开始。
+// Data 允许任意字节，回调只能在返回前借用；需要保存时必须复制。
+type OutputChunk struct {
+	Sequence int64
+	Stream   string
+	Data     []byte
+}
+
+// StreamingInvocation 在执行期间同步发布有界输出。回调失败必须停止执行并清理。
+// 返回前必须等待全部生产者退出，不允许返回后继续调用 emit；emit 为 nil 时仅保存最终结果。
+// emit 必须及时返回，不得在回调内同步等待本次调用的 Close。
+type StreamingInvocation interface {
+	Invocation
+	ExecuteStream(context.Context, func(OutputChunk) error) (Result, error)
 }
 
 // Tool 的 Validate 返回规范化参数；Prepare 固定目标，但不得读取正文或执行操作。

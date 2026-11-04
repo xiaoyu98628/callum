@@ -72,7 +72,7 @@ func TestPatchToolsThroughStdio(t *testing.T) {
 					w.WriteHeader(400)
 					return
 				}
-				if len(req.Tools) != 4 {
+				if len(req.Tools) != 5 {
 					t.Errorf("工具数量不符: %d", len(req.Tools))
 				}
 				last := req.Messages[len(req.Messages)-1]

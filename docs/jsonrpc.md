@@ -447,6 +447,8 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 客户端不提供 `tool`、工具参数或“已批准”字段。只有模型实际发起工具调用时，才出现 `tool_call` 步骤及相应审批；纯文本回答不会触发审批。
 
+所有内置文件和命令工具采用统一的参数规则：单个 UTF-8 JSON 对象，最多 16 KiB；拒绝重复字段（包括嵌套对象）、未知或大小写不匹配字段、`null`、类型错误、过深嵌套及尾随内容。各工具的业务默认值和范围分别校验；参数未通过时不会准备目标、启动命令或申请审批。读取工具此前接受的重复字段现在明确拒绝，合法请求与审批指纹保持兼容。
+
 当前提供的模型工具如下，它们不是 JSON-RPC 方法：
 
 | 工具 | 主要参数 | 用途 |
@@ -455,10 +457,11 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | `read_file` | `path`，可选 `start_line`、`end_line` | 按行读取 UTF-8 文本，例如 `path:"note.txt"` |
 | `search_text` | `path`、`query`，可选 `limit` | 搜索字面文本 |
 | `apply_patch` | `patch`、`base_versions` | 创建或修改 UTF-8 文本文件；修改需提供原文件 SHA-256 |
+| `run_command` | `command` 数组，可选 `cwd` | 非交互命令执行，实时推送输出并保存最终结果；始终按未知影响审批 |
 
-四个工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
+四个文件工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
 无工作区或访问工作区外目标时，`on-request` 请求用户审批，`always` 请求审批，`never` 拒绝操作。批准只授权该次固定目标，不授权父目录或其他文件。
-目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。文件创建与修改使用 `apply_patch`；当前没有删除、移动、Shell、MCP 或插件工具。
+目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。文件创建与修改使用 `apply_patch`；当前没有独立删除、移动、交互终端、MCP 或插件工具。`run_command` 可显式启动解释器，但不自动套 Shell，cwd 不构成访问隔离。
 `search_text` 搜索空目录返回空匹配，遇到空子目录继续搜索；空目录不作为工具错误。
 
 ### 11.2 approval.get / approval.list
@@ -472,7 +475,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 审批字段包括 `id`、`run_id`、`step_id`、`request`、`request_hash`、`status`、`decided_by`、`decision_note`、`created_at`、`updated_at`、`decided_at`。
 
-`request` 是 Go 生成的工具定义、可选工作区、实际目标和规范化参数快照；`request_hash` 绑定本次操作。审批没有过期时间。
+`request` 是 Go 生成的工具定义、可选工作区、实际目标和规范化参数快照；`request_hash` 绑定本次操作。审批没有过期时间。命令还包含服务端生成的 `request.details`（实际可执行文件、cwd、身份及环境配置摘要），参与指纹；环境值不落库。
 无工作区时 `request.workspace` 为 `null`。文件工具的 `request.target` 包含 `requested_path`（请求绝对路径，相对路径已基于工作区解析）、`path`（解析符号链接后的实际绝对路径）、`kind`（`file` 或 `directory`）、`within_workspace`（实际目标是否在工作区内）。这些字段由服务端生成，客户端只提交审批决定及说明。
 
 待审批通知示例，下面只展示事件定位和待决定状态所需的关键字段；实际 `approval` 还包含上述操作快照、哈希及时间字段：
@@ -684,6 +687,7 @@ usage 片段响应示例：
 | `message.updated` | 消息标识及完整 `message` | 替换当前消息，包括工具调用轮暂存内容清空 |
 | `step.created` | 会话、执行、步骤标识及 `step` | 新增模型／工具步骤 |
 | `step.updated` | 标识及 `step` | 更新步骤状态和数据大小，按需查询原始字段 |
+| `tool.output` | 会话、执行、步骤标识及 `output` | 输出含步骤内 sequence、stdout/stderr、base64 字节；不是最终结果 |
 | `approval.requested` | 会话、执行、步骤标识、`approval_id`、`approval` | 展示确定操作，等待用户决定 |
 | `approval.updated` | 同上 | 更新审批决定；不能当作执行完成 |
 | `run.completed` | 会话、执行标识及 `run` | 本次执行完成 |
@@ -789,3 +793,29 @@ usage 片段响应示例：
 这个 `result` 外层仍有 `operation`、可选 `error` 及 `context_message`。`changes` 包括未执行的剩余文件，不能仅按数组中最后一项判断整体成功。取消、写入或清理失败后，已生效结果和实际内容哈希保留；辅助文件位置通过 `recovery_files` 返回。
 
 副本使用 `.callum-patch-<操作指纹>-before`（原文，仅更新）及 `-after`（预期内容），在批准后创建，成功后清理。发生部分写入、未知结果或清理失败时保留，客户端可提示用户核实和人工恢复。不会自动回滚、覆盖同名副本或重试。进程中断后可从步骤 input 查固定路径，但不能把未知状态当作某个文件已成功或尚未写入。已有文件通过原句柄更新以保留权限和 ACL；单文件及多文件均不承诺事务隔离或原子替换。
+
+
+## 20. 非交互命令执行
+
+`run_command` 是模型工具，通过 `conversation.send` 请求任务，不能将以下工具参数直接作为 stdio 请求发送：
+
+```json
+{"command":["go","test","./..."],"cwd":"."}
+```
+
+command 是 1 至 256 项字符串数组，整个参数 JSON 不超过 16 KiB。cwd 省略或相对时以绑定工作区为基准；无工作区必须提供绝对 cwd，不使用 Callum 进程目录。可执行文件解析为绝对路径并记录身份；Windows 直接启动 exe/com，脚本需显式指定解释器。stdin 为空，无 PTY、后续输入或后台会话。
+命令统一声明 unknown：on-request 和 always 请求审批，never 拒绝。它以当前用户权限运行，能够访问工作目录之外的资源；当前没有操作系统沙箱。审批 details 固定实际可执行文件、cwd、身份及非敏感环境配置摘要，执行前再次校验，不保证完整依赖图或原子启动隔离。
+
+客户端持续读取 JSONL，在命令结束前即可收到：
+
+```json
+{"jsonrpc":"2.0","method":"tool.output","params":{"conversation_id":"<conversation_id>","run_id":"<run_id>","step_id":"<step_id>","output":{"sequence":1,"stream":"stdout","encoding":"base64","data":"aGVsbG8K"}}}
+```
+
+sequence 在单个步骤内递增，从 1 开始；按 step_id 分流后解码 base64 字节。两个流各自保持读取顺序，不承诺跨流原始写入顺序，也不能把每片视为完整 UTF-8 字符或成功信号。模型 stream=false 仍可收到命令输出；model.invoke 不提供此工具。
+每片最多 4 KiB，一次调用最多推送 64 KiB、128 片；最终分别保留 stdout/stderr 的前 16 KiB，按 utf-8 或 base64 编码，每流最多 24 KiB JSON，总结果不超过 64 KiB。超出后继续排空管道，用 truncated、stream_truncated 标记并保存实际读取字节数。
+
+命令结束后用 step.list 定位 name=run_command 的步骤，通过 step.data 查询 output。最终 result 含 started、pid、exit_code、可选 signal、timed_out、cancelled、cleanup_complete、stdout、stderr、stream_truncated。输出对象为 encoding、data、bytes、truncated。片段不逐片持久化，不承诺断线重放，最终有界结果可查询。
+启动失败为 not_applied；正常退出并完成收尾为 applied，仅表示命令调用已执行至退出，业务成败仍看 exit_code，非零码原样返回。启动后取消、超时或结果不明为 unknown，保存部分输出且不自动重试；pid 仅供核实，不授权重启后按旧 PID 结束进程。
+
+沿用 --tool-timeout，默认 30 秒，不包含审批等待。run.cancel 与连接/应用关闭会取消并等待所属执行。Unix 清理独立进程组内的后代，不保证回收主动脱离进程组、由外部服务启动，或在 Callum 异常退出后继续运行的进程；Windows 10+/Server 2016+ 以 Job 管理普通子进程。主进程、管道各最多 2 秒收尾，Windows 另有最多 2 秒 Job 成员确认；清理失败如实报告，审批不等于沙箱隔离。平台原生验证与交叉编译结果分别说明。

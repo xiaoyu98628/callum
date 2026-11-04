@@ -29,9 +29,22 @@ func TestDirectoryArguments(t *testing.T) {
 		`{"path":".","limit":201}`, `{"path":".","limit":1.5}`,
 		`{"path":".","query":"text"}`, `{"path":".","start_line":1}`,
 		`{"path":".","Path":"other"}`,
+		`{"path":".","path":"other"}`,
+		`{"path":".","limit":1,"limit":2}`,
+		`{"path":".","Limit":1}`,
+		`{"path":"."} {}`,
+		`{"path":".","limit":"1"}`,
 	} {
 		if _, err := instance.Validate(json.RawMessage(raw)); !errors.Is(err, tool.ErrInvalid) {
 			t.Fatalf("接受目录工具的无效参数: %s, %v", raw, err)
+		}
+		if invocation, err := instance.Prepare(t.Context(), tool.Scope{}, json.RawMessage(raw)); !errors.Is(err, tool.ErrInvalid) {
+			if invocation != nil {
+				if closeErr := invocation.Close(); closeErr != nil {
+					t.Error(closeErr)
+				}
+			}
+			t.Fatalf("准备阶段接受无效参数: %s, %v", raw, err)
 		}
 	}
 }

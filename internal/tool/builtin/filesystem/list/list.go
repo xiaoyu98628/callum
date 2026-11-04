@@ -21,48 +21,18 @@ func (directoryTool) Definition() tool.Definition {
 	return tool.Definition{Name: "list_directory", Description: "查看目录中的文件和子目录。path 支持绝对路径；相对路径需要绑定工作区。工作区外访问需要审批", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["path"],"additionalProperties":false}`), Source: "builtin", Version: "2", Effects: []tool.Effect{tool.EffectRead}}
 }
 
-type arguments struct {
-	Path  string `json:"path"`
-	Limit int    `json:"limit,omitempty"`
-}
-
 func (directoryTool) Validate(raw json.RawMessage) (json.RawMessage, error) {
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || fields == nil {
-		return nil, tool.ErrInvalid
-	}
-	for key, value := range fields {
-		switch key {
-		case "path", "limit":
-		default:
-			return nil, tool.ErrInvalid
-		}
-		if string(value) == "null" {
-			return nil, tool.ErrInvalid
-		}
-	}
-	var a arguments
-	if json.Unmarshal(raw, &a) != nil {
-		return nil, tool.ErrInvalid
-	}
-	path, err := fileaccess.CleanPath(a.Path)
+	a, err := decodeArguments(raw)
 	if err != nil {
 		return nil, err
-	}
-	a.Path = path
-	if a.Limit < 0 || a.Limit > 200 {
-		return nil, tool.ErrInvalid
-	}
-	if a.Limit == 0 {
-		a.Limit = 100
 	}
 	return json.Marshal(a)
 }
 
 func (directoryTool) Prepare(ctx context.Context, scope tool.Scope, raw json.RawMessage) (tool.Invocation, error) {
-	var a arguments
-	if json.Unmarshal(raw, &a) != nil {
-		return nil, tool.ErrInvalid
+	a, err := decodeArguments(raw)
+	if err != nil {
+		return nil, err
 	}
 	handle, err := fileaccess.Prepare(ctx, scope, a.Path, fileaccess.Directory)
 	if err != nil {

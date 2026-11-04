@@ -334,6 +334,34 @@ func TestPatchValidationRejectsMissingOrExtraVersions(t *testing.T) {
 	}
 }
 
+func TestPatchArgumentsRejectAmbiguousJSON(t *testing.T) {
+	instance := New()
+	valid := string(patchTestArgs(t, "*** Update File: a\n@@\n-x\n+y", patchVersion{"a", strings.Repeat("0", 64)}))
+	for _, raw := range []string{
+		valid + ` {}`,
+		strings.Replace(valid, `"patch":`, `"Patch":`, 1),
+		strings.Replace(valid, `"path":"a"`, `"Path":"a"`, 1),
+		strings.Replace(valid, `"path":"a"`, `"path":"a","path":"b"`, 1),
+		strings.Replace(valid, `"path":"a"`, `"path":"a","unknown":true`, 1),
+		strings.Replace(valid, `"path":"a"`, `"path":null`, 1),
+		strings.Replace(valid, `"path":"a"`, `"path":1`, 1),
+		strings.Replace(valid, `"base_versions":[`, `"base_versions":[null,`, 1),
+	} {
+		if _, err := instance.Validate(json.RawMessage(raw)); !errors.Is(err, tool.ErrInvalid) {
+			t.Fatalf("接受无效补丁参数: %s, %v", raw, err)
+		}
+		invocation, err := instance.Prepare(t.Context(), tool.Scope{}, json.RawMessage(raw))
+		if invocation != nil {
+			if closeErr := invocation.Close(); closeErr != nil {
+				t.Error(closeErr)
+			}
+		}
+		if !errors.Is(err, tool.ErrInvalid) {
+			t.Fatalf("准备阶段接受无效补丁参数: %s, %v", raw, err)
+		}
+	}
+}
+
 func TestConcurrentPatchesCannotOverwriteEachOther(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "note")

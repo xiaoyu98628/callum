@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ import (
 	conversationstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/conversation"
 	settingsstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/settings"
 	workspacestore "github.com/xiaoyu98628/callum/internal/storage/sqlite/workspace"
+	"github.com/xiaoyu98628/callum/internal/tool/builtin/command"
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem"
 	toolexecutor "github.com/xiaoyu98628/callum/internal/tool/executor"
 	"github.com/xiaoyu98628/callum/internal/tool/registry"
@@ -146,7 +148,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 		return nil, err
 	}
 	registry := registry.New()
-	for _, instance := range filesystem.Tools() {
+	for _, instance := range append(filesystem.Tools(), command.Tools(os.Environ())...) {
 		if err := registry.Register(instance); err != nil {
 			return nil, err
 		}

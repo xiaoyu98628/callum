@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,6 +22,7 @@ type Operation struct {
 	Workspace *tool.Scope     `json:"workspace"`
 	Target    *tool.Target    `json:"target,omitempty"`
 	Plan      *tool.Plan      `json:"plan,omitempty"`
+	Details   json.RawMessage `json:"details,omitempty"`
 	Arguments json.RawMessage `json:"arguments"`
 	Summary   string          `json:"summary"`
 }
@@ -32,6 +34,7 @@ type Prepared struct {
 	instance   tool.Tool
 	definition tool.Definition
 	plan       *tool.Plan
+	details    json.RawMessage
 	effects    []tool.Effect
 	request    json.RawMessage
 	hash       string
@@ -123,6 +126,10 @@ func (e *Executor) Prepare(ctx context.Context, scope tool.Scope, name string, a
 	if err != nil {
 		return nil, errors.Join(err, invocation.Close())
 	}
+	details, err := invocationSnapshot(invocation)
+	if err != nil {
+		return nil, errors.Join(err, invocation.Close())
+	}
 	effects := slices.Clone(definition.Effects)
 	if plan != nil {
 		// 未分类工具不能借额外的 write/read 声明降低原有审批要求。
@@ -140,12 +147,26 @@ func (e *Executor) Prepare(ctx context.Context, scope tool.Scope, name string, a
 	}
 	effective := definition
 	effective.Effects = effects
-	request, err := json.Marshal(Operation{Tool: effective, Workspace: workspace, Target: target, Plan: plan, Arguments: normalized, Summary: definition.Description})
+	request, err := json.Marshal(Operation{Tool: effective, Workspace: workspace, Target: target, Plan: plan, Details: details, Arguments: normalized, Summary: definition.Description})
 	if err != nil {
 		return nil, errors.Join(err, invocation.Close())
 	}
 	hash := sha256.Sum256(request)
-	return &Prepared{invocation: invocation, target: target, plan: plan, effects: effects, instance: t, definition: definition, request: request, hash: hex.EncodeToString(hash[:])}, nil
+	return &Prepared{invocation: invocation, target: target, plan: plan, details: details, effects: effects, instance: t, definition: definition, request: request, hash: hex.EncodeToString(hash[:])}, nil
+}
+
+func invocationSnapshot(invocation tool.Invocation) (json.RawMessage, error) {
+	detailed, ok := invocation.(tool.SnapshotInvocation)
+	if !ok {
+		return nil, nil
+	}
+	raw := detailed.Snapshot()
+	var value map[string]json.RawMessage
+	if len(raw) > tool.MaxArgumentBytes || json.Unmarshal(raw, &value) != nil || len(value) == 0 {
+		return nil, tool.ErrInvalid
+	}
+	// 归一化对象顺序并持有独立副本；执行前比较同一规范化结果。
+	return json.Marshal(value)
 }
 
 func invocationPlan(invocation tool.Invocation) (*tool.Plan, error) {
@@ -169,6 +190,11 @@ func invocationPlan(invocation tool.Invocation) (*tool.Plan, error) {
 
 // Execute 的 approvedHash 来自权限判定或已批准记录，工具结果必须是有界有效 JSON。
 func (e *Executor) Execute(ctx context.Context, p *Prepared, approvedHash string) (tool.Result, error) {
+	return e.ExecuteStream(ctx, p, approvedHash, nil)
+}
+
+// ExecuteStream 沿用普通工具的权限边界，并串行转交输出；旧工具无需实现流式接口。
+func (e *Executor) ExecuteStream(ctx context.Context, p *Prepared, approvedHash string, emit func(tool.OutputChunk) error) (tool.Result, error) {
 	notApplied := tool.Result{Outcome: tool.OutcomeNotApplied}
 	if p == nil || p.hash != approvedHash {
 		return notApplied, tool.ErrDenied
@@ -182,6 +208,13 @@ func (e *Executor) Execute(ctx context.Context, p *Prepared, approvedHash string
 		return notApplied, err
 	}
 	if (plan == nil) != (p.plan == nil) || (plan != nil && (!slices.Equal(plan.Targets, p.plan.Targets) || !slices.Equal(plan.AdditionalEffects, p.plan.AdditionalEffects))) {
+		return notApplied, tool.ErrDenied
+	}
+	details, err := invocationSnapshot(p.invocation)
+	if err != nil {
+		return notApplied, err
+	}
+	if !bytes.Equal(details, p.details) {
 		return notApplied, tool.ErrDenied
 	}
 	definition := p.instance.Definition()
@@ -201,7 +234,35 @@ func (e *Executor) Execute(ctx context.Context, p *Prepared, approvedHash string
 	if err := call.Err(); err != nil {
 		return notApplied, err
 	}
-	result, err := p.invocation.Execute(call)
+	var result tool.Result
+	var streamErr error
+	var outputMu sync.Mutex
+	var count, outputBytes int
+	if streaming, ok := p.invocation.(tool.StreamingInvocation); ok && emit != nil {
+		result, err = streaming.ExecuteStream(call, func(chunk tool.OutputChunk) error {
+			outputMu.Lock()
+			defer outputMu.Unlock()
+			if streamErr != nil {
+				return streamErr
+			}
+			if call.Err() != nil {
+				streamErr = call.Err()
+			} else if (chunk.Stream != "stdout" && chunk.Stream != "stderr") || len(chunk.Data) == 0 || len(chunk.Data) > tool.MaxOutputChunkBytes {
+				streamErr = tool.ErrInvalid
+			} else if count >= tool.MaxOutputEvents || outputBytes+len(chunk.Data) > tool.MaxOutputBytes {
+				streamErr = tool.ErrLimit
+			} else {
+				count++
+				outputBytes += len(chunk.Data)
+				chunk.Sequence = int64(count)
+				streamErr = emit(chunk)
+			}
+			return streamErr
+		})
+	} else {
+		result, err = p.invocation.Execute(call)
+	}
+	err = errors.Join(err, streamErr)
 	if !result.Outcome.Valid() {
 		result.Outcome = tool.UnconfirmedOutcome(p.effects)
 		err = errors.Join(err, tool.ErrInvalid)

@@ -31,9 +31,23 @@ func TestSearchArguments(t *testing.T) {
 		`{"path":".","query":null}`, `{"path":".","query":"x","limit":null}`,
 		`{"path":".","query":"x","limit":-1}`, `{"path":".","query":"x","limit":101}`,
 		`{"path":".","query":"x","end_line":1}`, `{"path":"../outside","query":"x"}`,
+		`{"path":".","path":"other","query":"x"}`,
+		`{"path":".","query":"x","query":"y"}`,
+		`{"path":".","query":"x","limit":1,"limit":2}`,
+		`{"path":".","query":2}`,
+		`{"path":".","query":"x"} {}`,
+		`{"path":".","Query":"x"}`,
 	} {
 		if _, err := instance.Validate(json.RawMessage(raw)); !errors.Is(err, tool.ErrInvalid) {
 			t.Fatalf("接受搜索工具的无效参数: %s, %v", raw, err)
+		}
+		if invocation, err := instance.Prepare(t.Context(), tool.Scope{}, json.RawMessage(raw)); !errors.Is(err, tool.ErrInvalid) {
+			if invocation != nil {
+				if closeErr := invocation.Close(); closeErr != nil {
+					t.Error(closeErr)
+				}
+			}
+			t.Fatalf("准备阶段接受无效参数: %s, %v", raw, err)
 		}
 	}
 }

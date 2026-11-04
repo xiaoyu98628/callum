@@ -21,7 +21,7 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 适配器通过运行时配置接收 API 根地址和凭据，并由调用方传入 HTTP 客户端，
 请求中的模型 ID 使用远端模型 ID。连接池由调用方管理，每次请求的超时与取消通过 `context.Context` 传递。
 适配器不会自行读取 `OPENAI_*` 环境变量，也不会继承其中的组织、项目或自定义请求头。
-普通对话支持文本和本地图片输入；已接通支持可选工作区的文件读取与补丁工具、模型自主工具调用与审批；图片输出与上下文压缩尚未接入。非流式请求失败时可能返回部分文本，
+普通对话支持文本和本地图片输入；已接通支持可选工作区的文件读取与补丁工具、跨平台非交互命令执行、模型自主工具调用与审批；图片输出与上下文压缩尚未接入。非流式请求失败时可能返回部分文本，
 流式事件的接收方应以 `Stream` 返回 `nil` 作为整个调用成功的依据。
 非流式响应和流式分片都会校验消息结构及所消费字段的 JSON 类型，合法空文本仍可正常返回。
 响应或分片包含非 NULL 的 `audio` 生成字段时，明确返回不支持的输出错误；`audio:null` 和未知厂商元数据不影响正常文本处理。
@@ -38,7 +38,7 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 3. **Agent 与工具**：实现工具注册、参数与权限校验、工具执行，以及结果回传模型的执行循环。
 4. **上下文压缩与恢复**：管理历史摘要和压缩版本，触发规则另行确定；中断状态已持久化，不自动重试执行。
 
-已确认的表结构、事件和后续功能约定见 [对话设计](docs/design/conversations.md)。当前已完成模型接入、普通对话、文件读取与补丁工具循环及审批；补充输入、更多工具和压缩随对应功能引入。
+已确认的表结构、事件和后续功能约定见 [对话设计](docs/design/conversations.md)。当前已完成模型接入、普通对话、文件读取、补丁与命令工具循环及审批；补充输入、更多工具和压缩随对应功能引入。
 
 当前模块与后续规划按职责组织如下：
 
@@ -73,6 +73,9 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | `internal/tool/builtin/filesystem` | 文件工具统一装配入口 | 已实现 |
 | `internal/tool/builtin/filesystem/list`、`read`、`search`、`patch` | 独立的目录查看、按行读取、字面搜索及文件补丁工具 | 已实现 |
 | `internal/tool/builtin/filesystem/internal/fileaccess` | 文件工具内部共享的固定目标、身份检查、句柄及有界文本读取 | 已实现 |
+| `internal/tool/builtin/command` | 命令工具统一装配入口 | 已实现 |
+| `internal/tool/builtin/command/run` | 命令审批快照、进程组/Job 生命周期及有界双流输出 | 已实现，平台验证结果分别说明 |
+| `internal/tool/builtin/internal/arguments` | 文件与命令工具共用的严格 JSON 参数结构校验 | 已实现 |
 | `internal/stdio/approval` | 审批查询和决定接口 | 已实现 |
 | `internal/agent/events` | 有界事件订阅、过滤及慢订阅者隔离 | 已实现 |
 | `internal/storage/sqlite/workspace`、`conversation`、`agent` | 普通对话仓储及跨表事务 | 已实现 |
@@ -83,8 +86,10 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 
 目录按业务与职责划分；契约保留在模块根包，具体业务、存储和通信实现进入职责明确的子包。
 测试跟随对应实现，跨模块测试通过公开入口组装；不为规划能力创建空包或占位实现。
-文件工具由 `filesystem.Tools()` 汇总，各工具子包独立负责定义、参数校验、准备及执行；
-子包之间不相互依赖，共享文件访问由内部 `fileaccess` 包提供。
+文件和命令工具分别由 `filesystem.Tools()`、`command.Tools(environment)` 汇总，根包只负责工具集合入口；
+具体工具子包通过 `New()` 提供统一工具契约，各自负责定义、业务参数校验、准备及执行。
+命令实现位于 `command/run`，工具定义、参数解析和调用生命周期分别放置；环境由装配层显式传入。
+各工具通过内部 `arguments` 包统一校验 JSON 结构，共享文件访问仍由 `filesystem/internal/fileaccess` 提供。
 
 `provider/service.Service` 通过 `provider.Repository` 接口访问配置，由 `sqlite/catalog.Repository` 实现该接口。
 GORM 映射和驱动错误处理集中在存储包，业务服务不导入 ORM 或数据库驱动。
@@ -374,12 +379,13 @@ content 示例：`[{"type":"text","text":"分析图片"},{"type":"image","path":
 | `message.created` / `message.updated` | message 快照；非流式回答通过最终消息快照返回 |
 | `message.delta` | block_index 和 delta，例如 `{"type":"text","text":"你好"}`，只追加到对应消息 |
 | `step.created` / `step.updated` | step 元数据，output、usage、definition 通过 step.data 获取 |
+| `tool.output` | 工具输出分片，含步骤内 sequence、stdout/stderr、base64 字节 |
 | `run.completed` / `run.failed` / `run.cancelled` | run 终态快照；失败提供受控 error.kind、error.message |
 
 状态落库后通知；若终态持久化失败，run.failed 明确附带 persisted=false，表示数据库终态未确认，不能按成功保存处理。
 原始大结果不随每次步骤通知重复发送。重新打开会话通过消息、运行和步骤查询恢复展示。
 工作区、会话有未结束执行时，禁止归档、删除和移动等影响执行的操作；标题及置顶可在执行中修改。
-工具与审批使用 `step.created`、`step.updated`、`run.updated`、`approval.requested`、`approval.updated`；补充输入和压缩事件属于后续功能，当前不发送。
+工具与审批使用 `step.created`、`step.updated`、`tool.output`、`run.updated`、`approval.requested`、`approval.updated`；补充输入和压缩事件属于后续功能，当前不发送。
 
 联调示例（替换响应中的实际 ID，保持 stdin 打开）：
 
@@ -484,6 +490,7 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 
 `internal/agent` 接替原 `internal/run` 的执行管理职责，并编排模型与工具循环；数据库表名、`run_id` 和现有事件名称保持兼容。
 所有模型默认收到已注册工具定义并自主选择是否调用，不需要工具能力开关；流式参数全部组装并校验后，Go 才执行权限判断及操作。
+所有内置文件和命令工具的参数必须为单个 UTF-8 JSON 对象，不超过 16 KiB；统一拒绝重复字段（含嵌套对象）、未知或大小写不匹配的字段、`null`、类型错误、过深嵌套及尾随内容。业务默认值、路径和数值范围由各工具校验，`Validate` 与 `Prepare` 采用同一解析与业务规则。三个读取工具此前接受的重复字段现在返回参数无效；合法请求的规范化结果、定义及审批指纹保持不变。
 内置 `list_directory`、`read_file`、`search_text`、`apply_patch`，同轮工具按模型返回顺序串行执行，工具步骤以该轮 `model_call` 为父步骤。
 模型步骤保存实际请求参数、可用工具定义和上下文指纹，不重复保存整套历史或凭据。流式工具调用的供应商未知扩展字段按属性保留。
 每次回答最多 8 轮模型调用、32 次工具调用，总模型正文仍受 1 MiB 上限约束；辅助标题独立记录，不计入回答轮次。
@@ -540,7 +547,7 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 任何破坏性、外发或未知类别都不能被同时声明的读取类别抵消；未声明类别按未知操作处理，无效类别不允许注册。
 普通修改只适用于经工具实现确认的常规文件修改；影响较大的覆盖必须声明 `destructive`，不能仅声明 `write`。
 这些类别不能由模型参数声明，批准只授权固定目标的本次操作，不能扩大到其他路径或绕过参数校验。
-当前提供三个读取工具和 `apply_patch` 创建、修改工具；删除及外发操作仍仅通过受控工具验证，对应产品工具尚未接入。
+当前提供三个读取工具、`apply_patch` 创建修改工具和 `run_command` 命令工具。独立的删除及外发工具尚未接入；命令可能产生这些影响，因此统一按 `unknown` 审批。
 
 每个工具步骤的 `input` 保存 `settings_revision`、`approval_policy`、`approvals_reviewer`，以及 `authorization.action`（`allow`、`ask`、`deny`）和规则标识 `authorization.reason`。
 判定是执行前的规则结果；`ask` 的实际用户决定通过关联审批记录查询。自动放行及策略拒绝不会伪造用户审批记录。
@@ -578,7 +585,7 @@ go run ./cmd/callum --data-dir .callum/dev-approval
 每次 `conversation.send` 的受理响应仍先于该执行事件。保持 stdin 打开直到终态，`approval.updated` 表示决定已保存，`run.completed` 才表示整次执行成功。
 `Runtime.Approvals()` 提供相同业务能力，其他通信入口无需复用 JSON-RPC 类型。
 不绑定工作区时，可省略 `workspace_id`，在问题中提供测试文件的绝对路径；模型调用文件工具后按上述审批流程处理。完整请求示例见 [JSON-RPC 测试文档](docs/jsonrpc.md#11-工具调用及审批)。
-工具协议已通过本机模拟回归；用户提供的 `newidea / deepseek-flash` 配置运行日志显示，流式工具调用、逐次审批、文件和目录读取、结果回传及继续回答均已完成。这只验证该次端点与模型组合，不代表其他配置均已验证。该次真实端点记录不包含新增补丁工具的验证；补丁使用受控模型、真实临时文件和 stdio 回归验证。命令执行、MCP、插件、补充输入及上下文压缩仍属于后续范围。
+工具协议已通过本机模拟回归；用户提供的 `newidea / deepseek-flash` 配置运行日志显示，流式工具调用、逐次审批、文件和目录读取、结果回传及继续回答均已完成。这只验证该次端点与模型组合，不代表其他配置均已验证。该次真实端点记录不包含新增补丁工具的验证；补丁和命令工具使用受控模型、真实临时文件、受控进程和 stdio 回归验证。MCP、插件、补充输入及上下文压缩仍属于后续范围。
 
 ### 文件创建与修改
 
@@ -609,3 +616,39 @@ go run ./cmd/callum --data-dir .callum/dev-approval
 结果 `changes` 逐文件保存路径、操作、`outcome`、实际读取到的 `before_sha256`、`intended_sha256` 和可获得的 `observed_sha256`，另有 `created_directories`、`recovery_files`。失败或取消不会清除已发生的修改；进程异常退出时未完成步骤保持保守未知，固定辅助路径可从步骤 input 查询，不宣称能够还原未持久化的精确进度。手动核实后再决定保留文件、恢复原文或发起新的补丁。
 
 macOS 的文件读写、权限、ACL、取消、冲突、并发及 stdio 流式链路使用临时资源验证；Linux、Windows 交叉构建和测试编译与各自原生运行验证分开记录。当前环境没有 Linux/Windows 原生运行结果。
+
+
+### 非交互命令执行
+
+`run_command` 由模型在 `conversation.send` 中调用，不是独立的 JSON-RPC 方法。参数示例：
+
+```json
+{"command":["go","test","./..."],"cwd":"."}
+```
+
+`command` 是可执行文件及参数数组，最多 256 项，整个参数 JSON 继续限 16 KiB；空参数合法，空可执行文件、NUL、重复键、未知字段及非字符串项被拒绝。
+`cwd` 省略时使用绑定工作区；相对路径以工作区为基准且不能越界，未绑定工作区时必须明确提供绝对 `cwd`，不使用 Callum 进程目录。
+可执行文件支持绝对路径、相对于实际工作目录的路径，或在服务端固定 PATH 中查找名称；忽略空和相对 PATH 项。Windows 直接启动 `.exe` / `.com`，无扩展名依次查找这两种格式，不隐式执行 `.bat` / `.cmd`。
+不自动套 Shell。需要 Shell 语法时，在数组中明确指定相应解释器及其参数；解释器自身的转义规则仍由调用方遵守。stdin 连接空设备，无 PTY、后续输入或持久后台会话。
+
+环境由 app 显式传入并在工具装配时筛选，只保留 PATH、HOME、USERPROFILE、TMPDIR、TEMP、TMP、SYSTEMROOT、WINDIR、COMSPEC、PATHEXT、LANG、LC_ALL、LC_CTYPE，另按实际目录生成 PWD；Windows 名称不区分大小写。模型不能设置环境变量。API Key、令牌、代理凭据等任意环境项不会继承。
+审批 `request.details` 保存解析后的可执行文件、身份及大小/修改时间、实际 cwd 及身份、环境名单与配置摘要，不保存环境值；规范化参数保留在 `request.arguments`。详情不超过 16 KiB，参与 `request_hash`，执行前重新比较并检查原路径、句柄、工作区和可执行文件元数据。未实现补充快照的文件工具省略 details，原审批格式与指纹保持兼容。
+此检查不锁定整个软件依赖图，也不承诺执行前检查与路径启动之间的原子隔离。
+
+命令可信影响固定为 `unknown`，即使 cwd 在工作区内也需审批：on-request、always 询问，never 拒绝。命令以 Callum 当前用户权限运行；cwd 仅决定启动目录，不能限制文件访问或网络访问。当前没有操作系统沙箱，也不增加 sandbox_mode 设置。
+
+进程受现有 `--tool-timeout` 限制（默认 30 秒），审批等待不计入。macOS、Linux 创建独立进程组并在正常主进程退出、取消、超时时终止组内残留成员；主动 setsid/setpgid 脱离的进程、通过其他服务启动的工作不在回收保证内；Unix 上 Callum 被强制终止或崩溃也不保证回收仍运行的子进程，重启后需按未知结果核实。Windows 10+ / Server 2016+ 创建进程时加入 Job Object，禁用普通 breakaway 并启用最后句柄关闭终止成员；Job 只负责进程生命周期，不构成文件或网络沙箱。终止后主进程与管道各有最多 2 秒收尾等待，Windows 另有最多 2 秒 Job 成员确认；清理失败明确返回错误及不完整清理状态，不宣称强制终止一定成功。
+
+工具输出无论模型请求的 stream 为 true 或 false 都可实时推送；模型在命令结束后收到最终结果。通知示例：
+
+```json
+{"jsonrpc":"2.0","method":"tool.output","params":{"conversation_id":"<conversation_id>","run_id":"<run_id>","step_id":"<step_id>","output":{"sequence":1,"stream":"stdout","encoding":"base64","data":"aGVsbG8K"}}}
+```
+
+sequence 在单个步骤内从 1 递增；两个流各自保持读取顺序，不承诺还原跨 stdout/stderr 的原始写入顺序。客户端应持续读取 JSONL、按 step_id 分流并解码字节，不把片段当作完整 UTF-8 字符或最终成功信号。
+每片最多 4 KiB 原始字节，每次调用实时推送最多 64 KiB、128 片。保存 stdout/stderr 各自前 16 KiB 原始字节，编码后各不超过 24 KiB JSON，最终结果仍不超过 64 KiB。达到上限继续排空管道，分别设置 truncated 和 stream_truncated，并保留实际读取字节数；输出片段只即时发布，不逐片落库或承诺重放。慢订阅者沿用有界队列规则，断开对应消费者，不取消共享执行；最终结果通过 step.data 查询。
+
+结果包含 started、pid（未启动时为 null，仅供核实，不作为重启后的进程控制凭据）、exit_code（未获得时为 null）、可选 signal、timed_out、cancelled、cleanup_complete、stdout、stderr、stream_truncated。每个输出对象为 encoding（utf-8 或 base64）、data、bytes、truncated；二进制或不能构成完整 UTF-8 的保留前缀使用 base64；UTF-8 文本按实际 JSON 转义长度和字符边界截断。
+启动失败为 not_applied；正常退出且生命周期收尾成功为 applied，仅证明命令调用已经执行完毕，非零 exit_code 仍原样交给模型判断业务失败。启动后取消、超时、信号终止或结果不明为 unknown，并保留已经收到的输出。未记录结果的中断命令沿用持久化保守未知及重新审批规则，不自动重试。
+
+`.github/workflows/verify.yml` 配置 macOS、Linux、Windows 的原生竞态测试、静态检查和无 CGO 构建；Go 版本读取 go.mod。工作流配置存在不等于运行通过，平台原生结果以实际 CI 记录为准；本地交叉编译只证明对应目标可构建。

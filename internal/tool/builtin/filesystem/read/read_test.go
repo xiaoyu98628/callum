@@ -31,9 +31,23 @@ func TestReadArguments(t *testing.T) {
 		`{"path":"note","start_line":null}`, `{"path":"note","end_line":-1}`,
 		`{"path":"note","start_line":5,"end_line":4}`, `{"path":"note","end_line":1001}`,
 		`{"path":"note","start_line":1000001}`, `{"path":"note","start_line":1.5}`,
+		`{"path":"note","path":"other"}`,
+		`{"path":"note","start_line":1,"start_line":2}`,
+		`{"path":"note","end_line":1,"end_line":2}`,
+		`{"path":"note","End_line":2}`,
+		`{"path":"note"} {}`,
+		`{"path":"note","start_line":"1"}`,
 	} {
 		if _, err := instance.Validate(json.RawMessage(raw)); !errors.Is(err, tool.ErrInvalid) {
 			t.Fatalf("接受读取工具的无效参数: %s, %v", raw, err)
+		}
+		if invocation, err := instance.Prepare(t.Context(), tool.Scope{}, json.RawMessage(raw)); !errors.Is(err, tool.ErrInvalid) {
+			if invocation != nil {
+				if closeErr := invocation.Close(); closeErr != nil {
+					t.Error(closeErr)
+				}
+			}
+			t.Fatalf("准备阶段接受无效参数: %s, %v", raw, err)
 		}
 	}
 }

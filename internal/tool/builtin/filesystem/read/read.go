@@ -21,55 +21,18 @@ func (readTool) Definition() tool.Definition {
 	return tool.Definition{Name: "read_file", Description: "按行读取 UTF-8 文本文件。path 支持绝对路径；相对路径需要绑定工作区。工作区外访问需要审批", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}`), Source: "builtin", Version: "2", Effects: []tool.Effect{tool.EffectRead}}
 }
 
-type arguments struct {
-	Path  string `json:"path"`
-	Start int    `json:"start_line,omitempty"`
-	End   int    `json:"end_line,omitempty"`
-}
-
 func (readTool) Validate(raw json.RawMessage) (json.RawMessage, error) {
-	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || fields == nil {
-		return nil, tool.ErrInvalid
-	}
-	for key, value := range fields {
-		switch key {
-		case "path", "start_line", "end_line":
-		default:
-			return nil, tool.ErrInvalid
-		}
-		if string(value) == "null" {
-			return nil, tool.ErrInvalid
-		}
-	}
-	var a arguments
-	if json.Unmarshal(raw, &a) != nil {
-		return nil, tool.ErrInvalid
-	}
-	path, err := fileaccess.CleanPath(a.Path)
+	a, err := decodeArguments(raw)
 	if err != nil {
 		return nil, err
-	}
-	a.Path = path
-	if a.Start < 0 || a.End < 0 {
-		return nil, tool.ErrInvalid
-	}
-	if a.Start == 0 {
-		a.Start = 1
-	}
-	if a.End == 0 {
-		a.End = a.Start + 199
-	}
-	if a.Start > 1_000_000 || a.End < a.Start || a.End-a.Start >= 1000 {
-		return nil, tool.ErrInvalid
 	}
 	return json.Marshal(a)
 }
 
 func (readTool) Prepare(ctx context.Context, scope tool.Scope, raw json.RawMessage) (tool.Invocation, error) {
-	var a arguments
-	if json.Unmarshal(raw, &a) != nil {
-		return nil, tool.ErrInvalid
+	a, err := decodeArguments(raw)
+	if err != nil {
+		return nil, err
 	}
 	handle, err := fileaccess.Prepare(ctx, scope, a.Path, fileaccess.File)
 	if err != nil {

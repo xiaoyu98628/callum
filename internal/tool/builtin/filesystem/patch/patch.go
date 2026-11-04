@@ -2,12 +2,10 @@
 package patch
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -16,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/xiaoyu98628/callum/internal/tool"
+	toolargs "github.com/xiaoyu98628/callum/internal/tool/builtin/internal/arguments"
 )
 
 type patchVersion struct {
@@ -56,19 +55,10 @@ func patchPath(path string) (string, error) {
 
 func decodePatch(raw json.RawMessage) (patchArguments, []patchFile, error) {
 	var args patchArguments
-	if len(raw) > tool.MaxArgumentBytes {
-		return args, nil, tool.ErrLimit
+	if _, err := toolargs.Decode(raw, &args); err != nil {
+		return args, nil, err
 	}
-	if !utf8.Valid(raw) || !uniquePatchJSON(json.NewDecoder(bytes.NewReader(raw)), 0) {
-		return args, nil, tool.ErrInvalid
-	}
-	d := json.NewDecoder(bytes.NewReader(raw))
-	d.DisallowUnknownFields()
-	if d.Decode(&args) != nil || args.BaseVersions == nil {
-		return args, nil, tool.ErrInvalid
-	}
-	var extra any
-	if !errors.Is(d.Decode(&extra), io.EOF) {
+	if args.BaseVersions == nil {
 		return args, nil, tool.ErrInvalid
 	}
 	files, err := parsePatch(args.Patch)
@@ -101,48 +91,6 @@ func decodePatch(raw json.RawMessage) (patchArguments, []patchFile, error) {
 	return args, files, nil
 }
 
-// uniquePatchJSON 拒绝重复字段及过深结构，确保归一化和审批使用同一份含义。
-func uniquePatchJSON(d *json.Decoder, depth int) bool {
-	if depth > 8 {
-		return false
-	}
-	token, err := d.Token()
-	if err != nil {
-		return false
-	}
-	delim, ok := token.(json.Delim)
-	if !ok {
-		return true
-	}
-	switch delim {
-	case '{':
-		seen := map[string]bool{}
-		for d.More() {
-			key, err := d.Token()
-			if err != nil {
-				return false
-			}
-			s, ok := key.(string)
-			if !ok || seen[s] {
-				return false
-			}
-			seen[s] = true
-			if !uniquePatchJSON(d, depth+1) {
-				return false
-			}
-		}
-	case '[':
-		for d.More() {
-			if !uniquePatchJSON(d, depth+1) {
-				return false
-			}
-		}
-	default:
-		return false
-	}
-	_, err = d.Token()
-	return err == nil
-}
 func (*patchTool) Validate(raw json.RawMessage) (json.RawMessage, error) {
 	args, _, err := decodePatch(raw)
 	if err != nil {
