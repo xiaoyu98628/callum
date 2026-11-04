@@ -35,11 +35,11 @@ func validateModel(in provider.ModelInput) error {
 		}
 	}
 	selected := make(map[string]bool, len(in.ModelType))
-	for _, feature := range in.ModelType {
-		if !knownFeature(feature) || !in.Capabilities[feature] || selected[feature] {
-			return fmt.Errorf("%w: 所选功能不受支持或重复", provider.ErrInvalidConfig)
+	for _, kind := range in.ModelType {
+		if !provider.ValidModelType(kind) || selected[kind] {
+			return fmt.Errorf("%w: 模型内容类型无效或重复", provider.ErrInvalidConfig)
 		}
-		selected[feature] = true
+		selected[kind] = true
 	}
 	levels := make(map[string]bool, len(in.ReasoningLevels))
 	if supported, known := in.Capabilities["reasoning"]; known && !supported && len(in.ReasoningLevels) > 0 {

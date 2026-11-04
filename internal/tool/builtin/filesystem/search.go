@@ -18,7 +18,7 @@ type match struct {
 	Text string `json:"text"`
 }
 
-func search(ctx context.Context, root *os.Root, a arguments) (json.RawMessage, error) {
+func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base string) (json.RawMessage, error) {
 	out := make([]match, 0)
 	visited, bytesRead := 0, 0
 	truncated := false
@@ -32,11 +32,17 @@ func search(ctx context.Context, root *os.Root, a arguments) (json.RawMessage, e
 			return nil
 		}
 		visited++
-		stat, err := root.Lstat(path)
+		var stat os.FileInfo
+		var err error
+		if file != nil {
+			stat, err = file.Stat()
+		} else {
+			stat, err = root.Lstat(path)
+		}
 		if err != nil {
 			return tool.ErrDenied
 		}
-		// 搜索不跟随符号链接；单文件读取仍由 Root 阻止越界链接。
+		// 目录搜索不跟随子项符号链接，不扩大本次固定目录的访问范围。
 		if stat.Mode()&os.ModeSymlink != 0 {
 			return nil
 		}
@@ -70,7 +76,12 @@ func search(ctx context.Context, root *os.Root, a arguments) (json.RawMessage, e
 		if !stat.Mode().IsRegular() {
 			return nil
 		}
-		data, err := textFile(ctx, root, path)
+		var data []byte
+		if file != nil {
+			data, err = fileText(ctx, file)
+		} else {
+			data, err = textFile(ctx, root, path)
+		}
 		if errors.Is(err, tool.ErrLimit) || errors.Is(err, tool.ErrUnavailable) {
 			truncated = true
 			return nil
@@ -88,7 +99,7 @@ func search(ctx context.Context, root *os.Root, a arguments) (json.RawMessage, e
 					}
 					truncated = true
 				}
-				out = append(out, match{path, i + 1, line})
+				out = append(out, match{filepath.Join(base, path), i + 1, line})
 				if len(out) >= a.Limit {
 					truncated = true
 					break

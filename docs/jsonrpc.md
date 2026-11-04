@@ -86,7 +86,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | 7 | 查询消息、执行、步骤和 usage | 记录用户消息 ID、步骤 ID；验证持久化 |
 | 8 | `conversation.resend` | 编辑最后一条用户消息；旧回答从消息列表移除 |
 | 9 | 可选测试 `model.invoke` | 使用尚未选择扩展功能的模型，观察兼容事件 |
-| 10 | `workspace.create`，更新模型启用 `tools` | 保存工作区 ID；厂商端点须实际支持工具调用 |
+| 10 | 可选的 `workspace.create` | 工具默认提供；相对路径需要工作区，绝对路径不要求绑定工作区 |
 | 11 | 读取最新设置，保存 `always` | 新执行逐次审批；运行中旧执行仍用原快照 |
 | 12 | 在绑定工作区的新会话中提问 | 模型实际调用工具后收到审批；批准、拒绝或取消 |
 | 13 | 可选测试图片、多会话、非法参数 | 按后文说明逐项执行 |
@@ -224,11 +224,12 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | `enabled` | boolean | 必须显式提交 `true` 或 `false` |
 | `context_window` | integer/null | 已确认的上下文窗口；填写时必须大于零，未知则省略或 `null` |
 | `max_output_tokens` | integer/null | 已确认的最大输出 Token 数；填写时必须大于零 |
-| `capabilities` | object/null | 已知能力，键只支持 `image_input`、`tools`、`reasoning`，值必须为布尔值 |
-| `model_type` | string[] | 当前选中的功能，必须已在 `capabilities` 中声明为 `true`，不能重复 |
+| `capabilities` | object/null | 具体能力，支持 `image_input`、`tools`、`reasoning` 布尔值；`tools` 仅保留兼容元数据，不作为开关 |
+| `model_type` | string[] | 可多选的内容类型：`text`、`image`、`audio`、`video`，不能重复；空数组表示尚未标注 |
 | `reasoning_levels` | object[]/null | 每项包含 `display_name`、`remote_value`；远端值以真实厂商定义为准 |
 
-`reasoning` 和推理等级可以作为元数据保存，但当前执行适配不支持选中 `reasoning` 功能；不要据此在请求中增加推理等级参数。图片输入与工具按后文接入测试，图片输出尚未启用。
+普通对话与 Agent 默认向所有模型提供工具，无需填写 `capabilities.tools`，也不在 `model_type` 中选择工具。`capabilities:null`、`model_type:[]` 的配置同样可以调用工具。
+`reasoning` 和推理等级仅作元数据，不自动传入推理参数，也不阻止文本请求。图片输入需 `capabilities.image_input:true`；标注 `model_type:["image"]` 不自动声明图片输入或输出。图片输出及音视频输入输出尚未接入，类型字段只保存元数据。
 
 上下文窗口、最大输出 Token 和推理等级属于配置元数据，不会自动变成每次请求的 `max_tokens` 或推理参数，也不用于本地 Token 预算检查。
 
@@ -423,21 +424,24 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 ## 11. 工具调用及审批
 
-### 11.1 启用模型工具功能
+### 11.1 默认工具调用
 
-仅在厂商端点和模型实际支持工具调用时启用。以下请求完整替换模型配置，其余可选元数据会清空：
+使用已有启用模型即可。所有模型在普通对话中默认获得工具定义，不需要更新模型能力或类型；已有 `capabilities.tools:false` 也不会关闭工具。
+若要验证逐次审批，读取最新设置并保存 `approval_policy:always`，使用实际 `revision`。必须在发送本次问题之前保存，因为受理后设置已固定成快照。
 
-```json
-{"jsonrpc":"2.0","id":"model-enable-tools","method":"model.update","params":{"id":"<model_id>","provider_id":"<provider_id>","display_name":"测试模型","remote_model_id":"<remote_model_id>","enabled":true,"capabilities":{"tools":true},"model_type":["tools"]}}
-```
-
-再读取最新设置并保存 `approval_policy:always`，使用实际 `revision`。必须在发送本次问题之前保存，因为受理后设置已固定成快照。
-
-绑定工作区创建会话：
+绑定工作区创建会话，可在问题中使用相对路径或工作区内绝对路径：
 
 ```json
 {"jsonrpc":"2.0","id":"chat-tools","method":"conversation.send","params":{"model_id":"<model_id>","workspace_id":"<workspace_id>","stream":true,"content":[{"type":"text","text":"请使用文件读取工具读取工作区的 note.txt，告诉我完整内容。"}]}}
 ```
+
+也可以不创建、不绑定工作区，直接提供第 1 节临时测试文件的绝对路径，将 `<workspace_path>` 替换为实际值：
+
+```json
+{"jsonrpc":"2.0","id":"chat-file-without-workspace","method":"conversation.send","params":{"model_id":"<model_id>","stream":true,"content":[{"type":"text","text":"请使用文件读取工具读取 <workspace_path>/note.txt，根据实际内容回答。"}]}}
+```
+
+工具提供不以绑定工作区为前提。无工作区时文件工具必须使用绝对路径；相对路径会得到 `path_base_required` 工具错误，不会以 Go 服务当前目录作为基准。
 
 客户端不提供 `tool`、工具参数或“已批准”字段。只有模型实际发起工具调用时，才出现 `tool_call` 步骤及相应审批；纯文本回答不会触发审批。
 
@@ -445,11 +449,13 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 | 工具 | 主要参数 | 用途 |
 | --- | --- | --- |
-| `list_directory` | `path`，可选 `limit` | 查看工作区目录，例如 `path:"."` |
+| `list_directory` | `path`，可选 `limit` | 查看指定目录；有工作区时可用 `path:"."` |
 | `read_file` | `path`，可选 `start_line`、`end_line` | 按行读取 UTF-8 文本，例如 `path:"note.txt"` |
 | `search_text` | `path`、`query`，可选 `limit` | 搜索字面文本 |
 
-工具路径必须在授权工作区内。模型参数校验及工作区边界不能通过用户批准绕过；当前没有文件写入、删除、Shell、MCP 或插件工具。
+三个工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
+无工作区或访问工作区外目标时，`on-request` 请求用户审批，`always` 请求审批，`never` 拒绝操作。批准只授权该次固定目标，不授权父目录或其他文件。
+目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。当前没有文件写入、删除、Shell、MCP 或插件工具。
 
 ### 11.2 approval.get / approval.list
 
@@ -462,7 +468,8 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 审批字段包括 `id`、`run_id`、`step_id`、`request`、`request_hash`、`status`、`decided_by`、`decision_note`、`created_at`、`updated_at`、`decided_at`。
 
-`request` 是 Go 生成的工具定义、工作区和规范化参数快照；`request_hash` 绑定本次操作。审批没有过期时间。
+`request` 是 Go 生成的工具定义、可选工作区、实际目标和规范化参数快照；`request_hash` 绑定本次操作。审批没有过期时间。
+无工作区时 `request.workspace` 为 `null`。文件工具的 `request.target` 包含 `requested_path`（请求绝对路径，相对路径已基于工作区解析）、`path`（解析符号链接后的实际绝对路径）、`kind`（`file` 或 `directory`）、`within_workspace`（实际目标是否在工作区内）。这些字段由服务端生成，客户端只提交审批决定及说明。
 
 待审批通知示例，下面只展示事件定位和待决定状态所需的关键字段；实际 `approval` 还包含上述操作快照、哈希及时间字段：
 
@@ -494,23 +501,23 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 ### 11.4 三种策略的测试区别
 
-| 策略 | 当前三个读取工具 | 需要审批的操作 |
+| 策略 | 工作区内读取（含绝对路径） | 无工作区／工作区外访问及其他需要审批的操作 |
 | --- | --- | --- |
 | `on-request` | 自动执行，不创建虚假的用户批准记录 | 询问用户 |
 | `always` | 每次有效调用都询问 | 询问用户 |
 | `never` | 自动执行 | 直接拒绝，不创建待审批记录 |
 
-当前产品工具均为读取工具，手工测试 `never` 时读取仍会成功。删除、外发等类别的拒绝规则通过受控工具测试验证，并不表示当前存在相应产品工具。
+当前产品工具均为读取工具，手工测试 `never` 时工作区内读取仍会成功，无工作区及工作区外读取直接拒绝。删除、外发等类别的拒绝规则通过受控工具测试验证，并不表示当前存在相应产品工具。
 
 ## 12. 图片输入
 
-仅在厂商模型实际支持图片输入时执行。以下完整更新会把当前选中的功能改为图片输入：
+仅在厂商模型实际支持图片输入时执行。以下完整更新声明图片输入能力，并标注文本、图片内容类型；其余可选元数据会清空：
 
 ```json
-{"jsonrpc":"2.0","id":"model-enable-image","method":"model.update","params":{"id":"<model_id>","provider_id":"<provider_id>","display_name":"测试模型","remote_model_id":"<remote_model_id>","enabled":true,"capabilities":{"image_input":true},"model_type":["image_input"]}}
+{"jsonrpc":"2.0","id":"model-enable-image","method":"model.update","params":{"id":"<model_id>","provider_id":"<provider_id>","display_name":"测试模型","remote_model_id":"<remote_model_id>","enabled":true,"capabilities":{"image_input":true},"model_type":["text","image"]}}
 ```
 
-如果需要图片与工具同时启用，并且端点支持两者，应同时保留 `capabilities` 中的两个 `true`，以及 `model_type:["image_input","tools"]`。
+工具默认提供，不需要为图片与工具组合另设开关。类型数组可以为空；是否允许图片输入取决于 `capabilities.image_input`，不从类型数组推断。
 
 图片内容块使用本地绝对路径：
 
@@ -638,7 +645,7 @@ usage 片段响应示例：
 
 流式完成事件不要求重复携带完整 `text`，客户端累计前面的增量。失败／取消事件的 `params.error` 为带 `code`、`message`、可选 `data` 的受控错误对象。
 
-此接口当前要求模型的 `model_type` 为空数组；选择了图片、工具或推理功能的模型配置返回 `1005`。不能用它测试图片或工具审批。
+此接口只接受文本，不提供工具定义或工具循环；模型内容类型及能力元数据不阻止文本请求。图片输入和工具审批使用 `conversation.send` 测试。
 
 `<invoke_run_id>` 是临时执行标识，不是持久化 UUIDv7；可用于 `run.cancel`，不能用于 `run.get`、`run.list` 或 `step.list`。
 
@@ -724,7 +731,10 @@ usage 片段响应示例：
 | 对已批准的审批再提交拒绝 | `1003` |
 | 拒绝后模型再次请求相同操作 | 不再次申请审批，不自动执行该操作 |
 | 已归档或删除会话继续发送 | 状态错误；恢复并取消归档后可重试 |
-| 工具尝试工作区外路径 | 参数或权限错误，批准不能放宽边界 |
+| 工具读取工作区内绝对路径 | 与对应相对路径采用相同审批规则 |
+| 工具尝试工作区外路径／无工作区绝对路径 | `on-request`／`always` 等待单次审批；`never` 拒绝 |
+| 无工作区时工具使用相对路径 | 工具结果为 `path_base_required` |
+| 等待审批时目标文件或符号链接被替换 | 批准后仍拒绝执行，不读取替换目标 |
 | 进程关闭后重新启动同一测试数据目录 | 设置和消息保留，未结束执行标为中断，不自动重试 |
 
 ## 18. 实现依据

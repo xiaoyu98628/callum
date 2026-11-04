@@ -76,7 +76,6 @@ type Resolved struct {
 	Snapshot   model.Snapshot
 	Protocol   string
 	ImageInput bool
-	Tools      bool
 }
 
 type Resolver func(context.Context, string) (Resolved, error)

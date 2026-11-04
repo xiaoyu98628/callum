@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -42,7 +41,12 @@ func (f *policyTestTool) Validate(args json.RawMessage) (json.RawMessage, error)
 	}
 	return json.RawMessage(`{}`), nil
 }
-func (f *policyTestTool) Execute(ctx context.Context, _ *os.Root, _ json.RawMessage) (json.RawMessage, error) {
+func (f *policyTestTool) Prepare(context.Context, tool.Scope, json.RawMessage) (tool.Invocation, error) {
+	return f, nil
+}
+func (f *policyTestTool) Target() *tool.Target { return nil }
+func (f *policyTestTool) Close() error         { return nil }
+func (f *policyTestTool) Execute(ctx context.Context) (json.RawMessage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -122,7 +126,7 @@ func TestToolApprovalPoliciesBeforeExecution(t *testing.T) {
 			}
 			snapshot := model.Snapshot{ID: policyTestID(t), DisplayName: "测试模型", RemoteModelID: "test", Provider: model.ProviderSnapshot{ID: policyTestID(t), Name: "测试厂商"}}
 			service, err := conversationservice.New(conversations, func(context.Context, string) (agent.Resolved, error) {
-				return agent.Resolved{Client: policyTestModel{args: json.RawMessage(test.args), denied: test.action == policy.Deny}, Snapshot: snapshot, Protocol: "chatcompletions", Tools: true}, nil
+				return agent.Resolved{Client: policyTestModel{args: json.RawMessage(test.args), denied: test.action == policy.Deny}, Snapshot: snapshot, Protocol: "chatcompletions"}, nil
 			}, runtime.manager, engine)
 			if err != nil {
 				t.Fatal(err)

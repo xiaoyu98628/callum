@@ -36,8 +36,19 @@ type ModelInput struct {
 	ContextWindow   *int64
 	MaxOutputTokens *int64
 	Capabilities    map[string]bool
+	// ModelType 是内容类型元数据，不作为工具开关；空数组表示尚未标注。
 	ModelType       []string
 	ReasoningLevels []ReasoningLevel
+}
+
+// ValidModelType 判断模型内容类型是否受支持；不代表适配器具备相应输入或输出能力。
+func ValidModelType(kind string) bool {
+	switch kind {
+	case "text", "image", "audio", "video":
+		return true
+	default:
+		return false
+	}
 }
 
 // Model 是包含本地记录标识与时间戳的模型配置，不代表适配器已实现其声明的能力。

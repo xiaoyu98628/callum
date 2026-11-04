@@ -18,7 +18,7 @@ func newModelResolver(providers *providerservice.Service, client *http.Client) i
 		if err != nil {
 			return nil, "", err
 		}
-		if runtime.Protocol != "chatcompletions" || len(runtime.Model.ModelType) != 0 {
+		if runtime.Protocol != "chatcompletions" {
 			return nil, "", inference.ErrUnsupported
 		}
 		adapter, err := chatcompletions.New(chatcompletions.Config{BaseURL: runtime.BaseURL, APIKey: runtime.APIKey}, client)
@@ -35,21 +35,10 @@ func newConversationResolver(providers *providerservice.Service, client *http.Cl
 		if runtime.Protocol != "chatcompletions" {
 			return agent.Resolved{}, inference.ErrUnsupported
 		}
-		imageInput, tools := false, false
-		for _, feature := range runtime.Model.ModelType {
-			switch feature {
-			case "image_input":
-				imageInput = true
-			case "tools":
-				tools = true
-			default:
-				return agent.Resolved{}, inference.ErrUnsupported
-			}
-		}
 		adapter, err := chatcompletions.New(chatcompletions.Config{BaseURL: runtime.BaseURL, APIKey: runtime.APIKey}, client)
 		if err != nil {
 			return agent.Resolved{}, err
 		}
-		return agent.Resolved{Client: adapter, Protocol: runtime.Protocol, ImageInput: imageInput, Tools: tools, Snapshot: model.Snapshot{ID: runtime.Model.ID, DisplayName: runtime.Model.DisplayName, RemoteModelID: runtime.Model.RemoteModelID, Provider: model.ProviderSnapshot{ID: runtime.Model.ProviderID, Name: runtime.ProviderName}}}, nil
+		return agent.Resolved{Client: adapter, Protocol: runtime.Protocol, ImageInput: runtime.Model.Capabilities["image_input"], Snapshot: model.Snapshot{ID: runtime.Model.ID, DisplayName: runtime.Model.DisplayName, RemoteModelID: runtime.Model.RemoteModelID, Provider: model.ProviderSnapshot{ID: runtime.Model.ProviderID, Name: runtime.ProviderName}}}, nil
 	}
 }

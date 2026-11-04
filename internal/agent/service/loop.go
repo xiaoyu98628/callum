@@ -31,10 +31,8 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		return err
 	}
 	var definitions []model.ToolDefinition
-	if resolved.Tools && ex.Conversation.WorkspaceID != nil {
-		for _, d := range e.options.Tools.Definitions() {
-			definitions = append(definitions, d.ToolDefinition)
-		}
+	for _, d := range e.options.Tools.Definitions() {
+		definitions = append(definitions, d.ToolDefinition)
 	}
 	denied := map[string]bool{}
 	count, totalText := 0, 0
@@ -119,6 +117,8 @@ func (e *Engine) saveAnswer(ctx context.Context, ex conversation.Execution, bloc
 func toolFailure(err error) json.RawMessage {
 	kind, message := "tool_failed", "工具执行失败"
 	switch {
+	case errors.Is(err, tool.ErrPathBase):
+		kind, message = "path_base_required", tool.ErrPathBase.Error()
 	case errors.Is(err, tool.ErrDenied):
 		kind, message = "permission_denied", "操作超出权限范围或已被拒绝"
 	case errors.Is(err, tool.ErrInvalid):

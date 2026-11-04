@@ -196,7 +196,7 @@ func TestCatalogThroughProtocol(t *testing.T) {
 	if bytes.Contains(f.Result, []byte("fake-private-key")) || !bytes.Contains(f.Result, []byte(`"has_api_key":true`)) {
 		t.Fatalf("凭据查询不正确: %s", f.Result)
 	}
-	params := map[string]any{"provider_id": providerID.ID, "display_name": "测试模型", "remote_model_id": "remote", "enabled": true, "capabilities": map[string]bool{"reasoning": true}, "model_type": []string{"reasoning"}, "reasoning_levels": []map[string]string{{"display_name": "中", "remote_value": "medium"}}}
+	params := map[string]any{"provider_id": providerID.ID, "display_name": "测试模型", "remote_model_id": "remote", "enabled": true, "capabilities": map[string]bool{"reasoning": true}, "model_type": []string{"text", "image"}, "reasoning_levels": []map[string]string{{"display_name": "中", "remote_value": "medium"}}}
 	f = p.call(t, "model.create", params)
 	assertOK(t, f)
 	var modelID idResult

@@ -83,7 +83,7 @@ func TestGORMZeroValues(t *testing.T) {
 	in.ContextWindow = new(int64(1000))
 	in.MaxOutputTokens = new(int64(100))
 	in.Capabilities = map[string]bool{"reasoning": true}
-	in.ModelType = []string{"reasoning"}
+	in.ModelType = []string{"text", "image"}
 	in.ReasoningLevels = []provider.ReasoningLevel{{DisplayName: "标准", RemoteValue: "medium"}}
 	if err := s.UpdateModel(t.Context(), id, in); err != nil {
 		t.Fatal(err)

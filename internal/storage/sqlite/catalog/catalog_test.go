@@ -52,7 +52,7 @@ func TestCatalogPersistenceAndConstraints(t *testing.T) {
 	}
 	in := provider.ModelInput{ProviderID: pid, DisplayName: "日常助手", RemoteModelID: "remote-chat", Enabled: true,
 		ContextWindow: new(int64(128000)), MaxOutputTokens: new(int64(8000)),
-		Capabilities: map[string]bool{"reasoning": true, "tools": false}, ModelType: []string{"reasoning"},
+		Capabilities: map[string]bool{"reasoning": true, "tools": false}, ModelType: []string{"text", "image"},
 		ReasoningLevels: []provider.ReasoningLevel{{DisplayName: "标准", RemoteValue: "medium"}}}
 	id, err := s.CreateModel(t.Context(), in)
 	if err != nil {

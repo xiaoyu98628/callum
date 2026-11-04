@@ -30,7 +30,7 @@ func TestApprovalPolicyDoesNotExpandOperationPermissions(t *testing.T) {
 				policy policy.ApprovalPolicy
 				want   policy.Action
 			}{{policy.OnRequest, test.request}, {policy.Always, policy.Ask}, {policy.Never, test.never}} {
-				got := policy.Evaluate(choice.policy, test.effects)
+				got := policy.Evaluate(choice.policy, test.effects, false)
 				if got.Action != choice.want || got.Reason == "" {
 					t.Fatalf("%s: %+v，期望 %s", choice.policy, got, choice.want)
 				}
@@ -41,13 +41,28 @@ func TestApprovalPolicyDoesNotExpandOperationPermissions(t *testing.T) {
 
 func TestInvalidPolicyAndOperationFailClosed(t *testing.T) {
 	for _, p := range []policy.ApprovalPolicy{"", "auto-read", "allow-all"} {
-		if got := policy.Evaluate(p, []tool.Effect{tool.EffectRead}); got.Action != policy.Deny {
+		if got := policy.Evaluate(p, []tool.Effect{tool.EffectRead}, false); got.Action != policy.Deny {
 			t.Fatalf("未知审批策略被放行: %s %+v", p, got)
 		}
 	}
 	for _, p := range []policy.ApprovalPolicy{policy.OnRequest, policy.Always, policy.Never} {
-		if got := policy.Evaluate(p, []tool.Effect{tool.EffectRead, "invalid"}); got.Action != policy.Deny {
+		if got := policy.Evaluate(p, []tool.Effect{tool.EffectRead, "invalid"}, false); got.Action != policy.Deny {
 			t.Fatalf("无效类别被忽略或允许审批: %s %+v", p, got)
+		}
+	}
+}
+
+func TestOutsideWorkspaceRequiresApproval(t *testing.T) {
+	for _, test := range []struct {
+		policy policy.ApprovalPolicy
+		want   policy.Action
+	}{
+		{policy.OnRequest, policy.Ask}, {policy.Always, policy.Ask}, {policy.Never, policy.Deny},
+	} {
+		for _, effects := range [][]tool.Effect{{tool.EffectRead}, {tool.EffectWrite}, {tool.EffectRead, tool.EffectDestructive}} {
+			if got := policy.Evaluate(test.policy, effects, true); got.Action != test.want {
+				t.Fatalf("工作区外访问被错误放行: %s %+v", test.policy, got)
+			}
 		}
 	}
 }

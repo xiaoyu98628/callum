@@ -139,7 +139,7 @@ func TestSettingsUpdateIsolatesRunningApprovalAndNewRun(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer sub.Close()
-	mid, wid := setupToolModel(t, p, upstream.URL), setupToolWorkspace(t, p)
+	mid, wid := setupConversationModel(t, p, upstream.URL), setupToolWorkspace(t, p)
 	setApprovalPolicy(t, p, "always")
 	oldSettings := readSettings(t, p)
 	send := func(text string) string {

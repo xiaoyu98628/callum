@@ -21,7 +21,7 @@ func (r providerSummary) toProvider() provider.Provider {
 		HasAPIKey: r.HasAPIKey, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 }
 
-// toRecord 将配置转为数据库记录，统一将未选择功能保存为空数组。
+// toRecord 将配置转为数据库记录，未标注的内容类型统一保存为空数组。
 func toRecord(in provider.ModelInput) schema.Model {
 	types := in.ModelType
 	if types == nil {

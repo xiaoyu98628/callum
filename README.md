@@ -21,7 +21,7 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 适配器通过运行时配置接收 API 根地址和凭据，并由调用方传入 HTTP 客户端，
 请求中的模型 ID 使用远端模型 ID。连接池由调用方管理，每次请求的超时与取消通过 `context.Context` 传递。
 适配器不会自行读取 `OPENAI_*` 环境变量，也不会继承其中的组织、项目或自定义请求头。
-普通对话支持文本和本地图片输入；已接通工作区只读工具、模型自主工具调用与审批；图片输出与上下文压缩尚未接入。非流式请求失败时可能返回部分文本，
+普通对话支持文本和本地图片输入；已接通支持可选工作区的只读文件工具、模型自主工具调用与审批；图片输出与上下文压缩尚未接入。非流式请求失败时可能返回部分文本，
 流式事件的接收方应以 `Stream` 返回 `nil` 作为整个调用成功的依据。
 非流式响应和流式分片都会校验消息结构及所消费字段的 JSON 类型，合法空文本仍可正常返回。
 非流式响应体关闭失败会作为调用错误返回，并保留同时发生的读取、解析或供应商错误。
@@ -104,7 +104,7 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 迁移逻辑及其测试集中在独立目录，迁移包不反向导入 SQLite 存储包，也不重复定义表映射。
 `migrations/migrate.go` 负责版本判断、事务和回滚；
 `migrations/000001_create_model_config.go` 负责创建厂商表、模型表及其约束和索引，以及已有库的主键类型检查。
-`000002_create_conversation_core.go` 创建普通对话五张表。`000003_create_run_approvals.go` 增加审批表及步骤组合唯一索引。`000004_create_app_settings.go` 增加应用设置表、默认执行设置及运行配置快照。新库顺序执行四个迁移后，在同一事务中记录版本 `4`；已有版本 `1`、`2`、`3` 的库通过检查后保留配置、对话和审批并升级。旧执行快照保持 NULL，不推断其历史权限。
+`000002_create_conversation_core.go` 创建普通对话五张表。`000003_create_run_approvals.go` 增加审批表及步骤组合唯一索引。`000004_create_app_settings.go` 增加应用设置表、默认执行设置及运行配置快照。新库顺序执行四个迁移，在同一事务中记录版本 `4`；已有版本 `1`、`2`、`3` 的库通过检查后保留配置、对话和审批并升级。旧执行快照保持 NULL，不推断其历史权限。
 初始化失败会关闭此前创建的连接池；初始化上下文不绑定到运行时实例，
 每次配置操作都接收自己的 `context.Context`。
 
@@ -175,11 +175,12 @@ UUID 生成复用 `github.com/google/uuid v1.6.0`，已从间接依赖改为直�
 同一厂商可以配置多个连接，厂商名称不强制唯一；同一厂商配置下的远端模型标识必须唯一。
 模型通过外键关联厂商，仍有模型引用时不能删除厂商。
 
-`capabilities` 是模型声明支持的功能，使用 JSON 对象，当前识别 `reasoning`、`image_input`、`tools`；
-未出现的键表示未知，`false` 表示明确不支持。
-`model_type` 是用户选中启用的功能，使用 JSON 数组，必须属于已明确支持的功能且不能重复。
-它不表示单选的模型用途分类。保存这些元数据不意味着当前协议适配器已经实现相应能力，
-调用装配会验证适配器支持情况，不支持的选中功能会拒绝调用。
+`model_type` 是可多选的内容类型元数据，使用 JSON 数组，允许 `text`、`image`、`audio`、`video`，不能重复；空数组表示尚未标注，不阻止文本对话或工具调用。
+`capabilities` 保存具体能力，使用 JSON 对象，当前识别 `reasoning`、`image_input`、`tools`。
+`image_input:true` 声明支持图片输入；缺少该键或为 `false` 时拒绝图片输入。`reasoning` 及推理等级仅作元数据，不自动设置远端推理参数。
+当前所有模型在普通对话与 Agent 执行中默认获得已注册工具，`capabilities.tools` 保留为兼容元数据，无论缺失、`true` 或 `false` 都不控制工具提供，也不要求在 `model_type` 中选择工具。
+内容类型与具体能力相互独立：标注 `image` 不等于支持图片输入或图片输出，标注 `audio`、`video` 不会使适配器自动获得音视频能力。
+当前适配器支持文本及明确声明的图片输入，图片输出、音视频输入输出尚未接入。
 
 `reasoning_levels` 保存展示名称和远端参数值，例如：
 
@@ -209,7 +210,9 @@ Token 容量未知时保存 SQL `NULL`，填写时必须大于零，不自动推
 新库在同一写事务中建立配置、普通对话、审批与应用设置结构并记录版本 `4`，失败时回滚。
 已有版本 `1` 的数据库会检查两张配置表均使用单列 `TEXT` 类型的 `id` 主键，检查通过后继续使用，
 不会重新分配记录标识，随后增加普通对话表。曾使用相同版本号的整数主键结构会被拒绝，不提供自动升级。
-版本 `2` 升级时增加审批表及组合唯一索引；版本 `3` 升级时增加应用设置、初始化默认值并为执行表增加可空快照。版本 `4` 检查设置组唯一索引、快照约束及既有配置、对话和审批结构；历史同版本号但缺少相应结构的库会被拒绝。
+版本 `2` 升级时增加审批表及组合唯一索引；版本 `3` 升级时增加应用设置、初始化默认值并为执行表增加可空快照。
+开发阶段不提供旧 `model_type` 功能标签的数据转换；新建和更新配置按内容类型规则校验。
+当前版本检查设置组唯一索引、快照约束及既有配置、对话和审批结构；历史同版本号但缺少相应结构的库会被拒绝。
 已有配置表但没有结构版本、结构检查失败，
 或版本不受支持时会返回错误并保留原有数据、结构和版本号，不自动删除或重建数据库。
 开发时可通过 `--data-dir` 指向独立的新数据目录。
@@ -283,9 +286,9 @@ go run ./cmd/callum --max-concurrent-runs 2 --call-timeout 3m
 修改和删除接口成功返回记录 ID，不会将不存在的记录自动创建出来。
 
 `messages` 是完整文本消息数组，包含 `role` 和 `content`，支持 `system`、`user`、`assistant`，
-每次最多 256 条。这是兼容的 `model.invoke` 接口约定，不补充历史、不保存执行记录，`model_type` 必须为空。
-普通对话允许启用 `image_input`、`tools`，要求 capabilities 明确支持。`tools` 是工具能力启用开关，具体是否调用、调用哪个工具和参数由模型决定；推理参数尚未接入。
-只有绑定有效工作区的对话才向模型提供文件工具，未绑定工作区时仍可普通问答。用户提问不需要携带工具名称或调用参数。
+每次最多 256 条。这是兼容的 `model.invoke` 接口约定，不补充历史、不保存执行记录，只处理文本，不提供工具循环；模型内容类型及能力元数据不会阻止它执行文本请求。
+普通对话与 Agent 默认向所有模型提供已注册工具，具体是否调用、调用哪个工具和参数由模型决定。图片输入需 `capabilities.image_input:true`，推理参数尚未接入。
+工具提供不要求会话绑定工作区。文件工具支持绝对路径，相对路径需要工作区作为基准；用户提问不需要携带工具名称或调用参数。
 Token 容量字段只是配置元数据，当前不做 Token 估算或设置输出 Token 参数。
 
 每次调用重新查询厂商和模型配置，不在网络等待期间占用数据库连接。
@@ -473,13 +476,17 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 ## Agent 工具与审批
 
 `internal/agent` 接替原 `internal/run` 的执行管理职责，并编排模型与工具循环；数据库表名、`run_id` 和现有事件名称保持兼容。
-模型收到工具定义后自主选择是否调用；流式参数全部组装并校验后，Go 才执行权限判断及操作。
+所有模型默认收到已注册工具定义并自主选择是否调用，不需要工具能力开关；流式参数全部组装并校验后，Go 才执行权限判断及操作。
 内置 `list_directory`、`read_file`、`search_text`，同轮工具按模型返回顺序串行执行，工具步骤以该轮 `model_call` 为父步骤。
 模型步骤保存实际请求参数、可用工具定义和上下文指纹，不重复保存整套历史或凭据。流式工具调用的供应商未知扩展字段按属性保留。
 每次回答最多 8 轮模型调用、32 次工具调用，总模型正文仍受 1 MiB 上限约束；辅助标题独立记录，不计入回答轮次。
 每轮模型请求单独取得并释放请求槽位。审批等待不设置过期时间，也不持有事务或模型请求槽位；由用户决定或执行取消结束等待，仍占用全局活动执行容量和会话互斥。
 
-工具路径必须是工作区内的相对路径，通过 `os.Root` 固定根句柄并阻止 `..`、绝对路径及越界符号链接。
+文件工具支持绝对路径；相对路径必须是工作区内的本地路径，不接受 `..` 越界，工作区内的绝对路径采用相同审批规则。
+无工作区时不会使用服务进程当前目录解析相对路径，而是返回 `path_base_required`，要求绝对路径或绑定工作区。
+符号链接按解析后的实际目标分类。工作区外及无工作区访问在 `on-request` 下逐次审批，`never` 直接拒绝。
+准备调用时只固定句柄和元数据，不读取正文或目录条目；单文件固定文件句柄，目录通过 `os.Root` 限制在此次目标目录内。
+执行前重新检查路径、目标身份及工作区状态；目标被替换或链接被重定向时拒绝执行，批准单个文件不授权其父目录及相邻文件。
 单个文本文件最多读取 1 MiB；`read_file` 默认读取 200 行、单次最多 1000 行；工具结果最多 64 KiB，参数最多 16 KiB。
 `list_directory` 默认返回 100 项、最多 200 项。`search_text` 执行字面匹配，默认最多 50 条、可设至 100 条；
 最多检查 1000 个路径、32 层深度和累计 8 MiB 文件内容，跳过符号链接与 `.git`，通过 `truncated` 表示省略。
@@ -493,7 +500,8 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 
 审批表为 `conversation_run_approvals`：`id`、`run_id`、唯一 `step_id`、JSON `request`、`request_hash`、`status`、
 `decided_by`、`decision_note`、`created_at`、`updated_at`、`decided_at`。
-`request` 是 Go 生成的工具定义、工作区与规范化参数快照，SHA-256 绑定此次操作；客户端只能提交决定及说明。
+`request` 是 Go 生成的工具定义、可选工作区、规范化参数与实际目标快照，SHA-256 绑定此次操作；客户端只能提交决定及说明。
+无工作区时 `request.workspace` 为 `null`；文件工具的 `request.target` 包含 `requested_path`（解析基准后的请求路径）、`path`（解析链接后的实际绝对路径）、`kind`（`file` 或 `directory`）及 `within_workspace`。
 `ApprovalPolicy` 与 `ApprovalsReviewer` 是独立设置，保存在 `app_settings` 的 `execution` 配置组中，客户端通过接口修改，无需重启 Go 服务。
 `approval_policy` 默认 `on-request`，按需询问；`always` 对每次有效工具调用询问；`never` 不询问，但需要审批的操作直接拒绝。
 `approvals_reviewer` 当前只支持 `user`，不接受 `auto_review`。模型不能覆盖这些设置。
@@ -511,15 +519,15 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 快照由服务端生成，受理回调及事件消费者不能通过共享指针修改执行器内的配置。
 
 工具在可信定义中声明 `effects`，支持 `read`、`write`、`destructive`、`external`、`unknown`，可包含多个类别。
-参数及工作区校验通过后，工作区读取和普通修改按规则自动放行；删除、大范围覆盖、外发和影响未知的操作需要审批。
+参数及目标校验通过后，工作区读取和普通修改按规则自动放行；工作区外及无工作区文件访问、删除、大范围覆盖、外发和影响未知的操作需要审批。
 任何破坏性、外发或未知类别都不能被同时声明的读取类别抵消；未声明类别按未知操作处理，无效类别不允许注册。
 普通修改只适用于经工具实现确认的常规文件修改；影响较大的覆盖必须声明 `destructive`，不能仅声明 `write`。
-这些类别不能由模型参数声明，审批不能放宽未授权路径或绕过参数校验。
+这些类别不能由模型参数声明，批准只授权固定目标的本次操作，不能扩大到其他路径或绕过参数校验。
 当前只提供三个读取工具，修改、删除和外发类别的判定通过受控工具验证，对应产品工具尚未接入。
 
 每个工具步骤的 `input` 保存 `settings_revision`、`approval_policy`、`approvals_reviewer`，以及 `authorization.action`（`allow`、`ask`、`deny`）和规则标识 `authorization.reason`。
 判定是执行前的规则结果；`ask` 的实际用户决定通过关联审批记录查询。自动放行及策略拒绝不会伪造用户审批记录。
-工作区路径由工具执行器独立校验；本次未加入 `sandbox_mode`，未实现操作系统沙箱或“完全访问”模式。
+文件目标由可信工具实现独立固定和校验，通用执行器不要求工具依赖工作区或文件系统；未加入 `sandbox_mode`，未实现操作系统沙箱或“完全访问”模式。
 模型请求及工具执行仍分别受 `--call-timeout`、`--tool-timeout` 限制；审批等待没有超时配置。
 审批状态为 `pending`、`approved`、`rejected`、`cancelled`。批准后再次校验权限与取消信号，并在事务中认领尚未执行的工具步骤。
 相同决定重复提交保持幂等，冲突决定返回错误；本机用户决定记录为 `local_user`，不是外部身份认证。
@@ -527,7 +535,7 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 取消或关闭会结束等待，保存待审批记录的取消状态；已批准的记录保留，批准不表示操作已完成。
 重启只恢复中断状态，不自动重试工具。
 
-手工验证时使用独立开发数据目录，已有厂商配置后创建支持工具的模型，并绑定工作区：
+手工验证时使用独立开发数据目录，已有厂商配置后创建模型即可测试工具。以下示例绑定工作区，相对路径与工作区内绝对路径均可使用：
 
 ```sh
 go run ./cmd/callum --data-dir .callum/dev-approval
@@ -541,7 +549,7 @@ go run ./cmd/callum --data-dir .callum/dev-approval
 ```
 
 ```json
-{"jsonrpc":"2.0","id":"1","method":"model.create","params":{"provider_id":"<provider_id>","display_name":"工具模型","remote_model_id":"<remote_model_id>","enabled":true,"capabilities":{"tools":true},"model_type":["tools"]}}
+{"jsonrpc":"2.0","id":"1","method":"model.create","params":{"provider_id":"<provider_id>","display_name":"工具模型","remote_model_id":"<remote_model_id>","enabled":true,"model_type":["text"]}}
 {"jsonrpc":"2.0","id":"2","method":"workspace.create","params":{"name":"项目","root_path":"/absolute/path/to/project"}}
 {"jsonrpc":"2.0","id":"3","method":"conversation.send","params":{"model_id":"<model_id>","workspace_id":"<workspace_id>","stream":true,"content":[{"type":"text","text":"读取 main.go 并解释它的作用"}]}}
 {"jsonrpc":"2.0","id":"4","method":"approval.list","params":{"run_id":"<run_id>","status":"pending"}}
@@ -552,4 +560,5 @@ go run ./cmd/callum --data-dir .callum/dev-approval
 收到 `approval.requested` 后查看其中 `approval.request`，批准或以 `decision: "rejected"` 拒绝；审批 ID 来自通知或查询，
 每次 `conversation.send` 的受理响应仍先于该执行事件。保持 stdin 打开直到终态，`approval.updated` 表示决定已保存，`run.completed` 才表示整次执行成功。
 `Runtime.Approvals()` 提供相同业务能力，其他通信入口无需复用 JSON-RPC 类型。
-目前工具协议已通过本机模拟验证，真实供应商工具端点尚未验证；文件写入、命令执行、MCP、插件、补充输入及上下文压缩仍属于后续范围。
+不绑定工作区时，可省略 `workspace_id`，在问题中提供测试文件的绝对路径；模型调用文件工具后按上述审批流程处理。完整请求示例见 [JSON-RPC 测试文档](docs/jsonrpc.md#11-工具调用及审批)。
+工具协议已通过本机模拟回归；用户提供的 `newidea / deepseek-flash` 配置运行日志显示，流式工具调用、逐次审批、文件和目录读取、结果回传及继续回答均已完成。这只验证该次端点与模型组合，不代表其他配置均已验证。文件写入、命令执行、MCP、插件、补充输入及上下文压缩仍属于后续范围。

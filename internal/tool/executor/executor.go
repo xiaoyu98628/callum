@@ -6,9 +6,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/xiaoyu98628/callum/internal/tool"
@@ -18,19 +18,22 @@ import (
 // Operation 是服务端生成的审批快照，与实际执行使用相同的规范化参数。
 type Operation struct {
 	Tool      tool.Definition `json:"tool"`
-	Workspace tool.Scope      `json:"workspace"`
+	Workspace *tool.Scope     `json:"workspace"`
+	Target    *tool.Target    `json:"target,omitempty"`
 	Arguments json.RawMessage `json:"arguments"`
 	Summary   string          `json:"summary"`
 }
 
-// Prepared 持有固定的操作和根句柄，创建者必须 Close；等待审批期间不能替换操作。
+// Prepared 持有固定操作和调用资源，创建者必须 Close；等待审批期间不能替换操作。
 type Prepared struct {
-	root       *os.Root
+	invocation tool.Invocation
+	target     *tool.Target
 	instance   tool.Tool
-	arguments  json.RawMessage
 	definition tool.Definition
 	request    json.RawMessage
 	hash       string
+	closeOnce  sync.Once
+	closeErr   error
 }
 
 func (p *Prepared) Request() json.RawMessage { return slices.Clone(p.request) }
@@ -41,9 +44,13 @@ func (p *Prepared) Definition() tool.Definition {
 	d.Effects = slices.Clone(d.Effects)
 	return d
 }
-func (p *Prepared) Close() error { return p.root.Close() }
+func (p *Prepared) OutsideWorkspace() bool { return p.target != nil && !p.target.WithinWorkspace }
+func (p *Prepared) Close() error {
+	p.closeOnce.Do(func() { p.closeErr = p.invocation.Close() })
+	return p.closeErr
+}
 
-// Executor 在审批之前校验参数并固定工作区，审批之后再次检查操作指纹。
+// Executor 在审批前校验参数并固定调用，具体资源由工具持有，不强制要求工作区。
 type Executor struct {
 	registry *registry.Registry
 	timeout  time.Duration
@@ -62,7 +69,7 @@ func (e *Executor) Prepare(ctx context.Context, scope tool.Scope, name string, a
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if scope.ID == "" || !filepath.IsAbs(scope.RootPath) {
+	if scope != (tool.Scope{}) && (scope.ID == "" || !filepath.IsAbs(scope.RootPath)) {
 		return nil, tool.ErrDenied
 	}
 	if len(args) > tool.MaxArgumentBytes {
@@ -76,24 +83,42 @@ func (e *Executor) Prepare(ctx context.Context, scope tool.Scope, name string, a
 	if err != nil {
 		return nil, err
 	}
-	root, err := os.OpenRoot(scope.RootPath)
+	invocation, err := t.Prepare(ctx, scope, normalized)
 	if err != nil {
-		return nil, tool.ErrUnavailable
+		if invocation != nil {
+			err = errors.Join(err, invocation.Close())
+		}
+		return nil, err
+	}
+	if invocation == nil {
+		return nil, tool.ErrInvalid
+	}
+	var workspace *tool.Scope
+	if scope.ID != "" {
+		workspace = new(scope)
+	}
+	target := invocation.Target()
+	if target != nil {
+		target = new(*target)
 	}
 	definition := t.Definition()
 	definition.Parameters = slices.Clone(definition.Parameters)
 	definition.Effects = slices.Clone(definition.Effects)
-	request, err := json.Marshal(Operation{Tool: definition, Workspace: scope, Arguments: normalized, Summary: definition.Description})
+	request, err := json.Marshal(Operation{Tool: definition, Workspace: workspace, Target: target, Arguments: normalized, Summary: definition.Description})
 	if err != nil {
-		return nil, errors.Join(err, root.Close())
+		return nil, errors.Join(err, invocation.Close())
 	}
 	hash := sha256.Sum256(request)
-	return &Prepared{root: root, instance: t, arguments: normalized, definition: definition, request: request, hash: hex.EncodeToString(hash[:])}, nil
+	return &Prepared{invocation: invocation, target: target, instance: t, definition: definition, request: request, hash: hex.EncodeToString(hash[:])}, nil
 }
 
 // Execute 的 approvedHash 来自权限判定或已批准记录，工具结果必须是有界有效 JSON。
 func (e *Executor) Execute(ctx context.Context, p *Prepared, approvedHash string) (json.RawMessage, error) {
 	if p == nil || p.hash != approvedHash {
+		return nil, tool.ErrDenied
+	}
+	target := p.invocation.Target()
+	if (target == nil) != (p.target == nil) || (target != nil && *target != *p.target) {
 		return nil, tool.ErrDenied
 	}
 	definition := p.instance.Definition()
@@ -113,7 +138,7 @@ func (e *Executor) Execute(ctx context.Context, p *Prepared, approvedHash string
 	if err := call.Err(); err != nil {
 		return nil, err
 	}
-	result, err := p.instance.Execute(call, p.root, p.arguments)
+	result, err := p.invocation.Execute(call)
 	if err == nil {
 		err = call.Err()
 	}

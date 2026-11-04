@@ -38,9 +38,9 @@ type Decision struct {
 	Reason string `json:"reason"`
 }
 
-// Evaluate 只处理已经完成参数和工作区校验的操作；审批不能绕过这些校验。
+// Evaluate 只处理已经完成参数和目标校验的操作；工作区外目标需要单次审批。
 // Effects 必须来自可信注册代码，不能使用模型提供的类别或风险描述。
-func Evaluate(p ApprovalPolicy, effects []tool.Effect) Decision {
+func Evaluate(p ApprovalPolicy, effects []tool.Effect, outsideWorkspace bool) Decision {
 	if !p.Valid() {
 		return Decision{Deny, "invalid_approval_policy"}
 	}
@@ -50,6 +50,9 @@ func Evaluate(p ApprovalPolicy, effects []tool.Effect) Decision {
 		}
 	}
 	decision := classify(effects)
+	if outsideWorkspace && decision.Action == Allow {
+		decision = Decision{Ask, "outside_workspace"}
+	}
 	switch p {
 	case Always:
 		return Decision{Ask, "policy_always"}

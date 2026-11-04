@@ -1,19 +1,13 @@
 package filesystem
 
 import (
-	"context"
 	"encoding/json"
-	"os"
 	"strings"
 
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
-func read(ctx context.Context, root *os.Root, a arguments) (json.RawMessage, error) {
-	data, err := textFile(ctx, root, a.Path)
-	if err != nil {
-		return nil, err
-	}
+func read(a arguments, data []byte) (json.RawMessage, error) {
 	lines := strings.Split(string(data), "\n")
 	start := min(a.Start-1, len(lines))
 	end := min(a.End, len(lines))

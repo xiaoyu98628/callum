@@ -41,7 +41,7 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 			result.Content = []model.Block{{Type: "text", Text: result.Text}}
 		}
 		fillFailure(&result, resolved.Protocol, retErr)
-		if resolved.Tools && retErr == nil {
+		if retErr == nil {
 			var err error
 			result.Output, err = withContextMessage(result.Output, model.Message{Role: model.RoleAssistant, Content: result.Text, ToolCalls: result.ToolCalls})
 			if err != nil {

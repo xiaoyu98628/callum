@@ -25,7 +25,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	}
 	var step agent.Step
 	var output json.RawMessage
-	// 先关闭固定根句柄，再保存操作结果；关闭失败也保留在受控错误和执行状态中。
+	// 先关闭固定调用资源，再保存操作结果；关闭失败也保留在受控错误和执行状态中。
 	defer func() {
 		if prepared != nil {
 			closeErr := prepared.Close()
@@ -101,7 +101,7 @@ func toolDecision(prepared *toolexecutor.Prepared, denied map[string]bool, snaps
 	if denied[prepared.Hash()] {
 		return policy.Decision{Action: policy.Deny, Reason: "previously_rejected"}
 	}
-	return policy.Evaluate(snapshot.ApprovalPolicy, prepared.Definition().Effects)
+	return policy.Evaluate(snapshot.ApprovalPolicy, prepared.Definition().Effects, prepared.OutsideWorkspace())
 }
 
 func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, prepared *toolexecutor.Prepared, decision policy.Decision) (agent.Step, error) {
@@ -217,7 +217,7 @@ func (e *Engine) finishTool(ctx context.Context, ex conversation.Execution, step
 
 func (e *Engine) toolScope(ctx context.Context, ex conversation.Execution) (tool.Scope, error) {
 	if ex.Conversation.WorkspaceID == nil {
-		return tool.Scope{}, tool.ErrDenied
+		return tool.Scope{}, nil
 	}
 	workspace, err := e.options.Workspace(ctx, *ex.Conversation.WorkspaceID)
 	if err != nil {

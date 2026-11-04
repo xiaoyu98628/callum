@@ -14,18 +14,6 @@ import (
 	"github.com/xiaoyu98628/callum/internal/config"
 )
 
-func setupToolModel(t *testing.T, p *appPeer, url string) string {
-	t.Helper()
-	mid := setupConversationModel(t, p, url)
-	frame := p.call(t, "model.get", map[string]any{"id": mid})
-	requireOK(t, frame)
-	var value map[string]any
-	if err := json.Unmarshal(frame.Result, &value); err != nil {
-		t.Fatal(err)
-	}
-	requireOK(t, p.call(t, "model.update", map[string]any{"id": mid, "provider_id": value["provider_id"], "display_name": "工具模型", "remote_model_id": "remote-model", "enabled": true, "capabilities": map[string]bool{"tools": true}, "model_type": []string{"tools"}}))
-	return mid
-}
 func setupToolWorkspace(t *testing.T, p *appPeer) string {
 	t.Helper()
 	root := t.TempDir()
@@ -50,7 +38,7 @@ func TestAgentRejectsRepeatedOperationAndLimitsLoop(t *testing.T) {
 	cfg.MaxConcurrentRuns = 1
 	p := startApp(t, cfg, io.Discard)
 	setApprovalPolicy(t, p, "always")
-	mid := setupToolModel(t, p, upstream.URL)
+	mid := setupConversationModel(t, p, upstream.URL)
 	wid := setupToolWorkspace(t, p)
 	accepted := p.call(t, "conversation.send", map[string]any{"model_id": mid, "workspace_id": wid, "stream": false, "content": messageBlocks("读取")})
 	runID := resultString(t, accepted, "run_id")
@@ -105,7 +93,7 @@ func TestPausedAgentIsolationAndShutdown(t *testing.T) {
 	cfg.MaxConcurrentRuns = 2
 	p := startApp(t, cfg, io.Discard)
 	setApprovalPolicy(t, p, "always")
-	mid := setupToolModel(t, p, upstream.URL)
+	mid := setupConversationModel(t, p, upstream.URL)
 	wid := setupToolWorkspace(t, p)
 	first := p.call(t, "conversation.send", map[string]any{"model_id": mid, "workspace_id": wid, "stream": false, "content": messageBlocks("读取")})
 	firstID := resultString(t, first, "run_id")
@@ -160,7 +148,7 @@ func TestIncompleteToolStreamDoesNotExecute(t *testing.T) {
 	cfg.MaxConcurrentRuns = 1
 	p := startApp(t, cfg, io.Discard)
 	setApprovalPolicy(t, p, "always")
-	mid := setupToolModel(t, p, upstream.URL)
+	mid := setupConversationModel(t, p, upstream.URL)
 	wid := setupToolWorkspace(t, p)
 	accepted := p.call(t, "conversation.send", map[string]any{"model_id": mid, "workspace_id": wid, "stream": true, "content": messageBlocks("读取")})
 	runID := resultString(t, accepted, "run_id")

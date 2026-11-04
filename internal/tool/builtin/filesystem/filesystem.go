@@ -1,4 +1,4 @@
-// Package filesystem 提供限定在工作区内的有界只读文件工具。
+// Package filesystem 提供固定目标范围的有界只读文件工具，工作区是可选路径基准。
 package filesystem
 
 import (
@@ -23,14 +23,14 @@ type fileTool struct {
 // Tools 返回独立的工具实例，不读取工作区或注册全局状态。
 func Tools() []tool.Tool {
 	return []tool.Tool{
-		fileTool{"list_directory", "查看工作区目录中的文件和子目录", json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["path"],"additionalProperties":false}`)},
-		fileTool{"read_file", "按行读取工作区中的 UTF-8 文本文件", json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}`)},
-		fileTool{"search_text", "在工作区目录的 UTF-8 文本文件中搜索字面文本", json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["path","query"],"additionalProperties":false}`)},
+		fileTool{"list_directory", "查看目录中的文件和子目录。path 支持绝对路径；相对路径需要绑定工作区。工作区外访问需要审批", json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["path"],"additionalProperties":false}`)},
+		fileTool{"read_file", "按行读取 UTF-8 文本文件。path 支持绝对路径；相对路径需要绑定工作区。工作区外访问需要审批", json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}`)},
+		fileTool{"search_text", "在目录或文件中搜索字面文本。path 支持绝对路径；相对路径需要绑定工作区。工作区外访问需要审批", json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["path","query"],"additionalProperties":false}`)},
 	}
 }
 
 func (t fileTool) Definition() tool.Definition {
-	return tool.Definition{Name: t.name, Description: t.description, Parameters: append(json.RawMessage(nil), t.schema...), Source: "builtin", Version: "1", Effects: []tool.Effect{tool.EffectRead}}
+	return tool.Definition{Name: t.name, Description: t.description, Parameters: append(json.RawMessage(nil), t.schema...), Source: "builtin", Version: "2", Effects: []tool.Effect{tool.EffectRead}}
 }
 
 type arguments struct {
@@ -63,7 +63,7 @@ func (t fileTool) Validate(raw json.RawMessage) (json.RawMessage, error) {
 	var a arguments
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
-	if d.Decode(&a) != nil || a.Path == "" || !utf8.ValidString(a.Path) || filepath.IsAbs(a.Path) || !filepath.IsLocal(a.Path) || strings.ContainsRune(a.Path, 0) {
+	if d.Decode(&a) != nil || a.Path == "" || !utf8.ValidString(a.Path) || (!filepath.IsAbs(a.Path) && !filepath.IsLocal(a.Path)) || strings.ContainsRune(a.Path, 0) {
 		return nil, tool.ErrInvalid
 	}
 	a.Path = filepath.Clean(a.Path)
@@ -102,20 +102,12 @@ func (t fileTool) Validate(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(a)
 }
 
-func (t fileTool) Execute(ctx context.Context, root *os.Root, raw json.RawMessage) (json.RawMessage, error) {
+func (t fileTool) Prepare(ctx context.Context, scope tool.Scope, raw json.RawMessage) (tool.Invocation, error) {
 	var a arguments
 	if err := json.Unmarshal(raw, &a); err != nil {
 		return nil, tool.ErrInvalid
 	}
-	switch t.name {
-	case "list_directory":
-		return list(ctx, root, a)
-	case "read_file":
-		return read(ctx, root, a)
-	case "search_text":
-		return search(ctx, root, a)
-	}
-	return nil, tool.ErrUnavailable
+	return prepare(ctx, scope, t.name, a)
 }
 
 // open 使用非阻塞标志打开路径，避免命名管道阻塞取消；只读普通文件和目录才可使用。
@@ -136,6 +128,14 @@ func textFile(ctx context.Context, root *os.Root, path string) (data []byte, ret
 		return nil, err
 	}
 	defer func() { retErr = errors.Join(retErr, f.Close()) }()
+	return fileText(ctx, f)
+}
+
+// fileText 可读取已固定的单文件句柄，不会再次根据模型路径打开其他文件。
+func fileText(ctx context.Context, f *os.File) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	stat, err := f.Stat()
 	if err != nil {
 		return nil, tool.ErrUnavailable
@@ -146,7 +146,7 @@ func textFile(ctx context.Context, root *os.Root, path string) (data []byte, ret
 	if stat.Size() > 1<<20 {
 		return nil, tool.ErrLimit
 	}
-	data, err = io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	data, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
 	if err != nil {
 		return nil, tool.ErrUnavailable
 	}

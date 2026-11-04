@@ -102,16 +102,6 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 				setApprovalPolicy(t, p, "always")
 			}
 			mid := setupConversationModel(t, p, upstream.URL)
-			frame := p.call(t, "model.get", map[string]any{"id": mid})
-			requireOK(t, frame)
-			var modelValue map[string]any
-			if err := json.Unmarshal(frame.Result, &modelValue); err != nil {
-				t.Fatal(err)
-			}
-			modelValue["capabilities"], modelValue["model_type"] = map[string]bool{"tools": true}, []string{"tools"}
-			// 更新接口只接受配置字段。
-			update := map[string]any{"id": mid, "provider_id": modelValue["provider_id"], "display_name": "工具模型", "remote_model_id": "remote-model", "enabled": true, "capabilities": modelValue["capabilities"], "model_type": modelValue["model_type"]}
-			requireOK(t, p.call(t, "model.update", update))
 			root := t.TempDir()
 			if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("workspace-content"), 0600); err != nil {
 				t.Fatal(err)

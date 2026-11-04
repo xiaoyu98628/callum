@@ -258,12 +258,11 @@ func TestStorageToModelThroughStdio(t *testing.T) {
 	requireOK(t, p.call(t, "model.set_enabled", map[string]any{"id": mid, "enabled": true}))
 	modelParams["id"] = mid
 	modelParams["capabilities"] = map[string]bool{"tools": true}
-	modelParams["model_type"] = []string{"tools"}
+	modelParams["model_type"] = []string{"text", "image"}
 	requireOK(t, p.call(t, "model.update", modelParams))
-	f = p.call(t, "model.invoke", map[string]any{"model_id": mid, "messages": []map[string]string{{"role": "user", "content": "工具"}}})
-	if f.Error == nil || f.Error.Code != 1005 {
-		t.Fatalf("未实现的功能被静默忽略: %+v", f)
-	}
+	// 类型与能力元数据不能阻止兼容接口执行文本请求；该接口不负责工具循环。
+	invoke(false, "元数据不限制文本调用")
+	p.event(t, "run.completed")
 	p.stop(t)
 	if strings.Contains(p.seen.String(), "fake-integration-key") || strings.Contains(logs.String(), "fake-integration-key") {
 		t.Fatal("凭据泄露到协议或日志")
