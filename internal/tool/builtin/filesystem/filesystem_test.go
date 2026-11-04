@@ -68,63 +68,61 @@ func TestWorkspaceToolsAndPermissionBoundary(t *testing.T) {
 	}
 }
 
-func TestSearchHandlesEmptyDirectories(t *testing.T) {
-	for _, nested := range []bool{false, true} {
-		t.Run(map[bool]string{false: "empty_root", true: "empty_child"}[nested], func(t *testing.T) {
-			dir := t.TempDir()
-			if nested {
-				if err := os.Mkdir(filepath.Join(dir, "empty"), 0700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle"), 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			r := registry.New()
-			for _, instance := range filesystem.Tools() {
-				if err := r.Register(instance); err != nil {
-					t.Fatal(err)
-				}
-			}
-			e, err := executor.New(r, time.Second)
-			if err != nil {
-				t.Fatal(err)
-			}
-			prepared, err := e.Prepare(t.Context(), tool.Scope{ID: "workspace", RootPath: dir}, "search_text", json.RawMessage(`{"path":".","query":"needle"}`))
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(func() {
-				if err := prepared.Close(); err != nil {
-					t.Error(err)
-				}
-			})
-			output, err := e.Execute(t.Context(), prepared, prepared.Hash())
-			if err != nil {
-				t.Fatalf("搜索空目录失败: %v", err)
-			}
-			var result struct {
-				Matches   []struct{ Path, Text string } `json:"matches"`
-				Truncated bool                          `json:"truncated"`
-			}
-			if err := json.Unmarshal(output.Output, &result); err != nil {
-				t.Fatal(err)
-			}
-			want := 0
-			if nested {
-				want = 1
-			}
-			if len(result.Matches) != want || result.Truncated {
-				t.Fatalf("空目录影响搜索结果: %s", output.Output)
-			}
-			resolved, err := filepath.EvalSymlinks(dir)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if nested && (result.Matches[0].Path != filepath.Join(resolved, "a.txt") || result.Matches[0].Text != "needle") {
-				t.Fatalf("其他文件的匹配结果丢失: %s", output.Output)
-			}
-		})
+func TestReadVersionCanAuthorizePatch(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "note")
+	if err := os.WriteFile(path, []byte("head\r\nold\r\ntail"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r := registry.New()
+	for _, instance := range filesystem.Tools() {
+		if err := r.Register(instance); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e, err := executor.New(r, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := tool.Scope{ID: "w", RootPath: dir}
+	read, err := e.Prepare(t.Context(), scope, "read_file", json.RawMessage(`{"path":"note","start_line":2,"end_line":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, callErr := e.Execute(t.Context(), read, read.Hash())
+	if err := errors.Join(callErr, read.Close()); err != nil {
+		t.Fatal(err)
+	}
+	var version struct{ SHA256, Text string }
+	if err := json.Unmarshal(result.Output, &version); err != nil {
+		t.Fatal(err)
+	}
+	if version.Text != "old\r" || len(version.SHA256) != 64 {
+		t.Fatalf("读取范围或整文件版本错误: %s", result.Output)
+	}
+	args, err := json.Marshal(map[string]any{
+		"patch":         "*** Begin Patch\n*** Update File: note\n@@\n head\n-old\n+new\n tail\n*** End Patch\n",
+		"base_versions": []map[string]string{{"path": "note", "sha256": version.SHA256}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	patch, err := e.Prepare(t.Context(), scope, "apply_patch", args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := patch.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	result, err = e.Execute(t.Context(), patch, patch.Hash())
+	if err != nil || result.Outcome != tool.OutcomeApplied {
+		t.Fatalf("读取版本无法用于补丁: %s, %v", result.Output, err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil || string(content) != "head\r\nnew\r\ntail" {
+		t.Fatalf("修改结果错误: %q, %v", content, err)
 	}
 }
 

@@ -1,8 +1,8 @@
-package filesystem
+// Package fileaccess 管理文件工具共享的固定目标、句柄与有界文本读取。
+package fileaccess
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,11 +11,10 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
-// invocation 在审批前只固定句柄和元数据，不读取文件正文或目录内容。
+// Handle 在审批前只固定句柄和元数据，不读取文件正文或目录内容。
+// 创建者负责 Close；借用的文件与目录句柄不得由调用方单独关闭。
 // 单文件持有文件句柄，目录持有仅覆盖目标目录的 Root，不授权相邻资源。
-type invocation struct {
-	name          string
-	args          arguments
+type Handle struct {
 	target        tool.Target
 	info          os.FileInfo
 	root          *os.Root
@@ -27,11 +26,24 @@ type invocation struct {
 	closeErr      error
 }
 
-func prepare(ctx context.Context, scope tool.Scope, name string, a arguments) (_ tool.Invocation, retErr error) {
+// Kind 限定允许固定的目标类型。
+type Kind uint8
+
+const (
+	File            Kind = iota // 仅普通文件。
+	Directory                   // 仅目录。
+	FileOrDirectory             // 普通文件或目录。
+)
+
+// Prepare 固定已校验路径的目标及可选工作区身份，不读取正文。成功后由调用方关闭句柄。
+func Prepare(ctx context.Context, scope tool.Scope, path string, kind Kind) (_ *Handle, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	requested := a.Path
+	if kind > FileOrDirectory {
+		return nil, tool.ErrInvalid
+	}
+	requested := path
 	if !filepath.IsAbs(requested) {
 		if scope.ID == "" {
 			return nil, tool.ErrPathBase
@@ -46,7 +58,7 @@ func prepare(ctx context.Context, scope tool.Scope, name string, a arguments) (_
 	if err != nil {
 		return nil, tool.ErrUnavailable
 	}
-	p := &invocation{name: name, args: a, info: info, scope: scope,
+	p := &Handle{info: info, scope: scope,
 		target: tool.Target{RequestedPath: requested, Path: resolved, Kind: "file"}}
 	defer func() {
 		if retErr != nil {
@@ -55,10 +67,10 @@ func prepare(ctx context.Context, scope tool.Scope, name string, a arguments) (_
 	}()
 	if info.IsDir() {
 		p.target.Kind = "directory"
-	} else if !info.Mode().IsRegular() || name == "list_directory" {
+	} else if !info.Mode().IsRegular() {
 		return nil, tool.ErrUnavailable
 	}
-	if name == "read_file" && !info.Mode().IsRegular() {
+	if (kind == File && !info.Mode().IsRegular()) || (kind == Directory && !info.IsDir()) {
 		return nil, tool.ErrUnavailable
 	}
 	if scope.ID != "" {
@@ -104,7 +116,7 @@ func prepare(ctx context.Context, scope tool.Scope, name string, a arguments) (_
 			opened, err = p.root.Stat(".")
 		}
 	} else {
-		p.file, err = root.OpenFile(relative, os.O_RDONLY|nonblock, 0)
+		p.file, err = OpenFile(root, relative, os.O_RDONLY, 0)
 		if err == nil {
 			opened, err = p.file.Stat()
 		}
@@ -112,17 +124,27 @@ func prepare(ctx context.Context, scope tool.Scope, name string, a arguments) (_
 	if err != nil || !os.SameFile(info, opened) {
 		return nil, tool.ErrDenied
 	}
-	if err := p.check(ctx); err != nil {
+	if err := p.Check(ctx); err != nil {
 		return nil, err
 	}
 	return p, nil
 }
 
-func (p *invocation) Target() *tool.Target { return new(p.target) }
+// Target 返回固定目标元数据的副本。
+func (p *Handle) Target() *tool.Target { return new(p.target) }
 
-// check 检查原始路径、目标身份及工作区是否仍与审批时一致。
+// Info 返回准备阶段记录的目标身份和元数据。
+func (p *Handle) Info() os.FileInfo { return p.info }
+
+// File 借出固定普通文件句柄；目录目标返回 nil。生命周期归 Handle 所有。
+func (p *Handle) File() *os.File { return p.file }
+
+// Root 借出固定目录句柄；文件目标返回 nil。生命周期归 Handle 所有。
+func (p *Handle) Root() *os.Root { return p.root }
+
+// Check 检查原始路径、目标身份及工作区是否仍与审批时一致。
 // 读取始终使用固定句柄；检查之后发生的路径替换也不能把读取重定向到别的文件。
-func (p *invocation) check(ctx context.Context) error {
+func (p *Handle) Check(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -147,35 +169,8 @@ func (p *invocation) check(ctx context.Context) error {
 	return nil
 }
 
-func (p *invocation) Execute(ctx context.Context) (tool.Result, error) {
-	output, err := p.execute(ctx)
-	return tool.Result{Output: output, Outcome: tool.OutcomeNone}, err
-}
-
-func (p *invocation) execute(ctx context.Context) (json.RawMessage, error) {
-	if err := p.check(ctx); err != nil {
-		return nil, err
-	}
-	a := p.args
-	switch p.name {
-	case "read_file":
-		data, err := fileText(ctx, p.file)
-		if err != nil {
-			return nil, err
-		}
-		a.Path = p.target.Path
-		return read(a, data)
-	case "list_directory":
-		a.Path = "."
-		return list(ctx, p.root, a)
-	case "search_text":
-		a.Path = "."
-		return search(ctx, p.root, p.file, a, p.target.Path)
-	}
-	return nil, tool.ErrUnavailable
-}
-
-func (p *invocation) Close() error {
+// Close 释放持有的句柄，可重复调用。
+func (p *Handle) Close() error {
 	p.closeOnce.Do(func() {
 		if p.root != nil {
 			p.closeErr = p.root.Close()

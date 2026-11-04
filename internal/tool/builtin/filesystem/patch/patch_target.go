@@ -1,4 +1,4 @@
-package filesystem
+package patch
 
 import (
 	"context"
@@ -14,12 +14,13 @@ import (
 	"sync/atomic"
 
 	"github.com/xiaoyu98628/callum/internal/tool"
+	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem/internal/fileaccess"
 )
 
 type patchTarget struct {
 	patch                patchFile
 	target               tool.Target
-	fixed                *invocation
+	fixed                *fileaccess.Handle
 	basePath             string
 	baseInfo             os.FileInfo
 	root                 *os.Root
@@ -100,7 +101,7 @@ func (p *patchInvocation) prepare(ctx context.Context, args patchArguments, file
 		}
 		// 不读取正文即可做保守分类：可能覆盖全部内容，或删除上限达到
 		// 原文件一半且至少 4 KiB 时要求审批。真正内容和版本在批准后校验。
-		if entry.fixed != nil && file.removedUpper > 0 && (file.removedUpper >= entry.fixed.info.Size() || (file.removedUpper >= 4096 && file.removedUpper*2 >= entry.fixed.info.Size())) {
+		if entry.fixed != nil && file.removedUpper > 0 && (file.removedUpper >= entry.fixed.Info().Size() || (file.removedUpper >= 4096 && file.removedUpper*2 >= entry.fixed.Info().Size())) {
 			if !slices.Contains(p.plan.AdditionalEffects, tool.EffectDestructive) {
 				p.plan.AdditionalEffects = append(p.plan.AdditionalEffects, tool.EffectDestructive)
 			}
@@ -135,21 +136,21 @@ func (p *patchInvocation) prepareTarget(ctx context.Context, entry *patchTarget,
 		requested = filepath.Join(p.scope.RootPath, requested)
 	}
 	if entry.patch.action == "update" {
-		fixed, err := prepare(ctx, p.scope, "read_file", arguments{Path: requested})
+		fixed, err := fileaccess.Prepare(ctx, p.scope, requested, fileaccess.File)
 		if err != nil {
 			return err
 		}
-		entry.fixed = fixed.(*invocation)
-		entry.target = entry.fixed.target
+		entry.fixed = fixed
+		entry.target = *entry.fixed.Target()
 		entry.basePath = filepath.Dir(entry.target.Path)
 		entry.baseInfo, err = os.Stat(entry.basePath)
 		if err != nil {
 			return tool.ErrUnavailable
 		}
-		if entry.fixed.info.Size() > 1<<20 {
+		if entry.fixed.Info().Size() > 1<<20 {
 			return tool.ErrLimit
 		}
-		if err := patchFileReady(entry.fixed.file); err != nil {
+		if err := patchFileReady(entry.fixed.File()); err != nil {
 			return err
 		}
 	} else {
@@ -298,14 +299,14 @@ func (t *patchTarget) check(ctx context.Context, p *patchInvocation) error {
 		return tool.ErrDenied
 	}
 	if t.fixed != nil {
-		if err := t.fixed.check(ctx); err != nil {
+		if err := t.fixed.Check(ctx); err != nil {
 			return err
 		}
-		current, err := t.fixed.file.Stat()
-		if err != nil || current.Size() != t.fixed.info.Size() || current.Mode() != t.fixed.info.Mode() || !current.ModTime().Equal(t.fixed.info.ModTime()) {
+		current, err := t.fixed.File().Stat()
+		if err != nil || current.Size() != t.fixed.Info().Size() || current.Mode() != t.fixed.Info().Mode() || !current.ModTime().Equal(t.fixed.Info().ModTime()) {
 			return tool.ErrConflict
 		}
-		return patchFileReady(t.fixed.file)
+		return patchFileReady(t.fixed.File())
 	}
 	actual, _, _, _, err := creationTarget(t.target.RequestedPath)
 	if err != nil {
@@ -317,7 +318,7 @@ func (t *patchTarget) check(ctx context.Context, p *patchInvocation) error {
 	return nil
 }
 func samePatchFile(a, b *patchTarget) bool {
-	return a.fixed != nil && b.fixed != nil && os.SameFile(a.fixed.info, b.fixed.info)
+	return a.fixed != nil && b.fixed != nil && os.SameFile(a.fixed.Info(), b.fixed.Info())
 }
 func (p *patchInvocation) overlaps(other *patchInvocation) bool {
 	for _, a := range p.files {

@@ -1,6 +1,6 @@
 //go:build darwin || linux
 
-package filesystem
+package patch
 
 import (
 	"context"
@@ -108,7 +108,7 @@ func TestPatchCleanupErrorKeepsAppliedOutputAndCopies(t *testing.T) {
 	path := filepath.Join(dir, "note")
 	before := "head\nold\ntail\n"
 	patchTestWrite(t, path, before)
-	instance := newPatchTool()
+	instance := New()
 	args, err := instance.Validate(patchTestArgs(t, "*** Update File: note\n@@\n head\n-old\n+new\n tail", patchVersion{"note", textSHA256([]byte(before))}))
 	if err != nil {
 		t.Fatal(err)

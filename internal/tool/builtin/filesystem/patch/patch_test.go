@@ -1,4 +1,4 @@
-package filesystem
+package patch
 
 import (
 	"context"
@@ -20,10 +20,8 @@ import (
 func patchTestExecutor(t *testing.T) *executor.Executor {
 	t.Helper()
 	r := registry.New()
-	for _, instance := range Tools() {
-		if err := r.Register(instance); err != nil {
-			t.Fatal(err)
-		}
+	if err := r.Register(New()); err != nil {
+		t.Fatal(err)
 	}
 	e, err := executor.New(r, 5*time.Second)
 	if err != nil {
@@ -80,25 +78,7 @@ func TestPatchCreatesAndUpdatesWithBoundVersions(t *testing.T) {
 	}
 	e := patchTestExecutor(t)
 	scope := tool.Scope{ID: "workspace", RootPath: dir}
-	read, err := e.Prepare(t.Context(), scope, "read_file", json.RawMessage(`{"path":"old.txt","start_line":2,"end_line":2}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	r, err := e.Execute(t.Context(), read, read.Hash())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := read.Close(); err != nil {
-		t.Fatal(err)
-	}
-	var observed struct {
-		SHA256 string `json:"sha256"`
-		Text   string `json:"text"`
-	}
-	if json.Unmarshal(r.Output, &observed) != nil || observed.SHA256 != textSHA256([]byte(before)) || observed.Text != "old\r" {
-		t.Fatalf("读取没有返回整文件哈希: %s", r.Output)
-	}
-	args := patchTestArgs(t, "*** Update File: old.txt\n@@\n header\n-old\n+new\n tail\n*** Add File: nested/note.txt\n+创建的内容", patchVersion{"old.txt", observed.SHA256})
+	args := patchTestArgs(t, "*** Update File: old.txt\n@@\n header\n-old\n+new\n tail\n*** Add File: nested/note.txt\n+创建的内容", patchVersion{"old.txt", textSHA256([]byte(before))})
 	p := patchTestPrepare(t, e, scope, args)
 	if p.OutsideWorkspace() || policy.Evaluate(policy.OnRequest, p.Definition().Effects, false).Action != policy.Allow {
 		t.Fatal("普通修改未使用工作区策略")
@@ -290,7 +270,7 @@ func TestPatchCancellationPreservesAppliedFilesAndRecoveryCopies(t *testing.T) {
 	for _, path := range []string{first, second} {
 		patchTestWrite(t, path, before)
 	}
-	instance := newPatchTool()
+	instance := New()
 	raw := patchTestArgs(t, "*** Update File: one\n@@\n head\n-old\n+new\n tail\n*** Update File: two\n@@\n head\n-old\n+new\n tail", patchVersion{"one", textSHA256([]byte(before))}, patchVersion{"two", textSHA256([]byte(before))})
 	normalized, err := instance.Validate(raw)
 	if err != nil {
@@ -338,7 +318,7 @@ func TestPatchLargeReplacementRequiresApproval(t *testing.T) {
 }
 
 func TestPatchValidationRejectsMissingOrExtraVersions(t *testing.T) {
-	instance := newPatchTool()
+	instance := New()
 	for _, raw := range []json.RawMessage{
 		patchTestArgs(t, "*** Update File: a\n@@\n-x\n+y"),
 		patchTestArgs(t, "*** Add File: a\n+x", patchVersion{"a", strings.Repeat("0", 64)}),
@@ -474,7 +454,7 @@ func (c *replaceCreatedPatchParent) Err() error {
 }
 func TestPatchDoesNotContinueThroughReplacedCreatedParent(t *testing.T) {
 	dir := t.TempDir()
-	instance := newPatchTool()
+	instance := New()
 	raw, err := instance.Validate(patchTestArgs(t, "*** Add File: created/nested/note\n+data"))
 	if err != nil {
 		t.Fatal(err)

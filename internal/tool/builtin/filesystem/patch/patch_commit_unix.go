@@ -1,6 +1,6 @@
 //go:build darwin || linux
 
-package filesystem
+package patch
 
 import (
 	"errors"

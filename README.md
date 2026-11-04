@@ -70,7 +70,9 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | `internal/agent/executor`、`service` | 统一调度、模型与工具循环、并行标题及终态保存 | 已实现 |
 | `internal/agent/approval` | 审批快照、决定及等待协调 | 已实现 |
 | `internal/tool/registry`、`executor` | 工具注册、规范化、权限边界及执行 | 已实现 |
-| `internal/tool/builtin/filesystem` | 目录查看、按行读取、字面搜索及文件补丁 | 已实现 |
+| `internal/tool/builtin/filesystem` | 文件工具统一装配入口 | 已实现 |
+| `internal/tool/builtin/filesystem/list`、`read`、`search`、`patch` | 独立的目录查看、按行读取、字面搜索及文件补丁工具 | 已实现 |
+| `internal/tool/builtin/filesystem/internal/fileaccess` | 文件工具内部共享的固定目标、身份检查、句柄及有界文本读取 | 已实现 |
 | `internal/stdio/approval` | 审批查询和决定接口 | 已实现 |
 | `internal/agent/events` | 有界事件订阅、过滤及慢订阅者隔离 | 已实现 |
 | `internal/storage/sqlite/workspace`、`conversation`、`agent` | 普通对话仓储及跨表事务 | 已实现 |
@@ -81,6 +83,8 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 
 目录按业务与职责划分；契约保留在模块根包，具体业务、存储和通信实现进入职责明确的子包。
 测试跟随对应实现，跨模块测试通过公开入口组装；不为规划能力创建空包或占位实现。
+文件工具由 `filesystem.Tools()` 汇总，各工具子包独立负责定义、参数校验、准备及执行；
+子包之间不相互依赖，共享文件访问由内部 `fileaccess` 包提供。
 
 `provider/service.Service` 通过 `provider.Repository` 接口访问配置，由 `sqlite/catalog.Repository` 实现该接口。
 GORM 映射和驱动错误处理集中在存储包，业务服务不导入 ORM 或数据库驱动。

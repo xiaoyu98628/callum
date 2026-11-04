@@ -1,4 +1,4 @@
-package filesystem
+package patch
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/xiaoyu98628/callum/internal/tool"
+	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem/internal/fileaccess"
 )
 
 type patchChange struct {
@@ -39,7 +40,7 @@ func patchSnapshot(ctx context.Context, file *os.File) ([]byte, error) {
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, tool.ErrUnavailable
 	}
-	return fileText(ctx, file)
+	return fileaccess.ReadText(ctx, file)
 }
 
 func (p *patchInvocation) Execute(ctx context.Context) (result tool.Result, retErr error) {
@@ -69,7 +70,7 @@ func (p *patchInvocation) Execute(ctx context.Context) (result tool.Result, retE
 			return result, err
 		}
 		if entry.fixed != nil {
-			data, err := patchSnapshot(ctx, entry.fixed.file)
+			data, err := patchSnapshot(ctx, entry.fixed.File())
 			if err != nil {
 				return result, err
 			}
@@ -235,7 +236,7 @@ func privatePatchCopy(ctx context.Context, root *os.Root, path string, data []by
 		return nil, err
 	}
 	name := filepath.Base(path)
-	file, err := root.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_RDWR|nonblock, 0600)
+	file, err := fileaccess.OpenFile(root, name, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 	if errors.Is(err, os.ErrExist) {
 		return nil, tool.ErrConflict
 	}
@@ -303,11 +304,11 @@ func (p *patchInvocation) writeTarget(ctx context.Context, t *patchTarget, befor
 	if err := t.checkParent(); err != nil {
 		return err
 	}
-	flags := os.O_RDWR | nonblock
+	flags := os.O_RDWR
 	if t.fixed == nil {
 		flags |= os.O_CREATE | os.O_EXCL
 	}
-	file, err := t.parent.OpenFile(t.name, flags, 0600)
+	file, err := fileaccess.OpenFile(t.parent, t.name, flags, 0600)
 	if errors.Is(err, os.ErrExist) {
 		return tool.ErrConflict
 	}
@@ -324,7 +325,7 @@ func (p *patchInvocation) writeTarget(ctx context.Context, t *patchTarget, befor
 		change.Outcome = tool.OutcomeUnknown
 		return err
 	}
-	if t.fixed != nil && !os.SameFile(info, t.fixed.info) {
+	if t.fixed != nil && !os.SameFile(info, t.fixed.Info()) {
 		return tool.ErrDenied
 	}
 	if err := patchFileReady(file); err != nil {

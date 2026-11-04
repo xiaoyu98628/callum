@@ -1,4 +1,5 @@
-package filesystem
+// Package patch 提供带版本校验和固定目标审批的文件补丁工具。
+package patch
 
 import (
 	"bytes"
@@ -27,14 +28,15 @@ type patchArguments struct {
 }
 
 // patchTool 的互斥范围仅覆盖正在写入的重叠目标，不占用审批等待时间。
-// 锁由一次 Tools 装配持有，无后台任务；执行结束立即删除活动项。
+// 锁由工具实例持有，无后台任务；执行结束立即删除活动项。
 type patchTool struct {
 	mu      sync.Mutex
 	active  []*patchInvocation
 	changed chan struct{}
 }
 
-func newPatchTool() *patchTool { return &patchTool{changed: make(chan struct{})} }
+// New 返回独立的补丁工具，重叠目标的写入互斥仅在该实例内共享。
+func New() tool.Tool { return &patchTool{changed: make(chan struct{})} }
 func (*patchTool) Definition() tool.Definition {
 	return tool.Definition{Name: "apply_patch", Description: "创建或修改 UTF-8 文本文件，最多8个文件。patch 使用 *** Begin Patch / *** Add File: path（正文每行以+开始）/ *** Update File: path（@@ 后使用空格上下文、-旧行、+新行）/ *** End Patch。修改前用 read_file 获取整个文件的 sha256，在 base_versions 中为每个 Update File 提供同一路径和 sha256；新增文件不提供版本且不能覆盖已有文件。不支持删除、移动或模糊匹配。相对路径需要工作区，绝对路径不要求工作区。", Parameters: json.RawMessage(`{"type":"object","properties":{"patch":{"type":"string"},"base_versions":{"type":"array","items":{"type":"object","properties":{"path":{"type":"string"},"sha256":{"type":"string"}},"required":["path","sha256"],"additionalProperties":false}}},"required":["patch","base_versions"],"additionalProperties":false}`), Source: "builtin", Version: "1", Effects: []tool.Effect{tool.EffectWrite}}
 }

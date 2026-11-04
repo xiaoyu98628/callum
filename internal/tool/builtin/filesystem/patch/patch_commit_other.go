@@ -1,6 +1,6 @@
 //go:build !darwin && !linux && !windows
 
-package filesystem
+package patch
 
 import (
 	"github.com/xiaoyu98628/callum/internal/tool"

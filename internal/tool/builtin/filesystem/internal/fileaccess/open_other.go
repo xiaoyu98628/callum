@@ -1,5 +1,5 @@
 //go:build !unix
 
-package filesystem
+package fileaccess
 
 const nonblock = 0
