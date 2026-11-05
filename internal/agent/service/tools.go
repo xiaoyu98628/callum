@@ -51,7 +51,17 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	}()
 	decision := toolDecision(prepared, denied, uncertain, ex.Run.SettingsSnapshot)
 	var err error
-	step, err = e.createToolStep(ctx, ex, parent, call, prepared, decision)
+	var directoryIDs []string
+	if decision.Action == policy.Ask && decision.Reason == "outside_workspace" && e.options.Approvals != nil {
+		directoryIDs, err = e.options.Approvals.MatchDirectories(ctx, ex.Conversation.ID, prepared.Targets(), prepared.Definition().Effects)
+		if err != nil {
+			return message, operationStorageError(ctx, err)
+		}
+		if len(directoryIDs) > 0 {
+			decision = policy.Decision{Action: policy.Allow, Reason: "conversation_directory_grant"}
+		}
+	}
+	step, err = e.createToolStep(ctx, ex, parent, call, prepared, decision, directoryIDs)
 	if err != nil {
 		return message, err
 	}
@@ -82,6 +92,9 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	claimed, err := e.repository.StartTool(ctx, ex.Run.ID, step.ID, approvalID, prepared.Hash())
 	if err != nil {
 		operationErr = err
+		if errors.Is(err, tool.ErrDenied) {
+			return
+		}
 		return message, operationStorageError(ctx, err)
 	}
 	step = claimed
@@ -130,8 +143,11 @@ func toolDecision(prepared *toolexecutor.Prepared, denied, uncertain map[string]
 	return policy.Evaluate(snapshot.ApprovalPolicy, prepared.Definition().Effects, prepared.OutsideWorkspace())
 }
 
-func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, prepared *toolexecutor.Prepared, decision policy.Decision) (agent.Step, error) {
+func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, prepared *toolexecutor.Prepared, decision policy.Decision, directoryIDs []string) (agent.Step, error) {
 	input := map[string]any{"arguments": call.Arguments, "authorization": decision, "operation_version": tool.OperationVersion}
+	if len(directoryIDs) > 0 {
+		input["directory_grant_ids"] = directoryIDs
+	}
 	if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
 		input["approval_policy"], input["approvals_reviewer"], input["settings_revision"] = snapshot.ApprovalPolicy, snapshot.ApprovalsReviewer, snapshot.Revision
 	}

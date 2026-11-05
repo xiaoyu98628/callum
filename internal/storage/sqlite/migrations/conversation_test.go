@@ -39,7 +39,7 @@ func TestUpgradeConversationPreservesConfigAndRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 测试库还原为真实版本 1 的两张配置表，模拟已有用户配置。
-	for _, table := range []string{"conversation_context_versions", "app_settings", "conversation_run_approvals", "conversation_run_steps", "conversation_messages", "conversation_runs", "conversations", "workspaces"} {
+	for _, table := range []string{"conversation_directory_grants", "conversation_context_versions", "app_settings", "conversation_run_approvals", "conversation_run_steps", "conversation_messages", "conversation_runs", "conversations", "workspaces"} {
 		if err := db.DB.Exec("DROP TABLE " + table).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -111,7 +111,7 @@ func TestUpgradeConversationPreservesConfigAndRollsBack(t *testing.T) {
 	if err := upgraded.DB.Raw("PRAGMA user_version").Scan(&version).Error; err != nil {
 		t.Fatal(err)
 	}
-	if version != 5 {
+	if version != 6 {
 		t.Fatalf("升级版本错误: %d", version)
 	}
 }

@@ -27,6 +27,7 @@ func TestContextMigrationPreservesSettingsAndRollsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, sql := range []string{
+		"DROP TABLE conversation_directory_grants",
 		"DROP TABLE conversation_context_versions",
 		"DELETE FROM app_settings WHERE key='context_compaction'",
 		"PRAGMA user_version=4",

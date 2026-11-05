@@ -484,7 +484,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 Agent 不设固定模型轮次、累计工具次数或单次响应工具调用数量上限，也不再因调用次数产生 iteration_limit。执行持续到模型完成、用户取消、连接/应用退出或不可继续的错误。历史执行中已有的错误记录保留原值。并发、单次模型/工具超时、审批、Token 预算及内容边界继续生效。
 
-单次请求最多提供 32 个工具定义；每个工具参数不超过 16 KiB，响应中调用 ID、名称和参数的累计字段字节不超过 8 MiB，原始上游响应不超过 16 MiB。工具调用参数完整后才执行；执行前检查整批调用及最小结果结构容量，实际结果逐次检查累计上下文。触及资源边界停止并保留已发生操作及结果，不自动重试；当前问题和整个当前执行工具链仍保留原文。
+工具定义种类数不设本地固定上限，由实际请求大小和远端协议校验；每个工具参数不超过 16 KiB，响应中调用 ID、名称和参数的累计字段字节不超过 8 MiB，原始上游响应不超过 16 MiB。工具调用参数完整后才执行；执行前检查整批调用及最小结果结构容量，实际结果逐次检查累计上下文。触及资源边界停止并保留已发生操作及结果，不自动重试；当前问题和整个当前执行工具链仍保留原文。
 
 ### 11.1 默认工具调用
 
@@ -520,7 +520,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 | `run_command` | `command` 数组，可选 `cwd` | 非交互命令执行，实时推送输出并保存最终结果；始终按未知影响审批 |
 
 四个文件工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
-无工作区或访问工作区外目标时，`on-request` 请求用户审批，`always` 请求审批，`never` 拒绝操作。批准只授权该次固定目标，不授权父目录或其他文件。
+无工作区或访问工作区外目标时，`on-request` 请求用户审批，`always` 请求审批，`never` 拒绝操作。默认批准只授权该次固定目标；具备目录选项时，用户可明确选择当前会话的目录及子目录授权。
 目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。文件创建与修改使用 `apply_patch`；当前没有独立删除、移动、交互终端、MCP 或插件工具。`run_command` 可显式启动解释器，但不自动套 Shell，cwd 不构成访问隔离。
 `search_text` 搜索空目录返回空匹配，遇到空子目录继续搜索；空目录不作为工具错误。
 
@@ -619,7 +619,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 | `error_kind`、`error_message` | 执行错误，正常完成时为 `null` |
 | `created_at`、`updated_at`、`finished_at` | Unix 毫秒时间，未结束时完成时间为 `null` |
 
-当前运行流程产生 `running`、`awaiting_approval`、`completed`、`failed`、`cancelled` 状态；重启恢复可将未结束执行标为 `interrupted`。`awaiting_user_input` 虽已在结构中定义，补充输入流程尚未接入。
+当前运行流程产生 `running`、`awaiting_approval`、`awaiting_user_input`、`completed`、`failed`、`cancelled` 状态；重启恢复可将未结束执行标为 `interrupted`。`awaiting_user_input` 表示已持久化问题并等待用户回复；回复提交后继续同一执行，取消或重启不会自动重放。
 
 ### run.cancel
 
@@ -752,6 +752,8 @@ usage 片段响应示例：
 | `tool.output` | 会话、执行、步骤标识及 `output` | 输出含步骤内 sequence、stdout/stderr、base64 字节；不是最终结果 |
 | `approval.requested` | 会话、执行、步骤标识、`approval_id`、`approval` | 展示确定操作，等待用户决定 |
 | `approval.updated` | 同上 | 更新审批决定；不能当作执行完成 |
+| `user_input.requested` | 会话、执行、步骤标识、`input_id`、`user_input` | 展示固定问题和选项，等待用户回复 |
+| `user_input.updated` | 同上 | 更新已回答、跳过或取消状态；不能当作执行完成 |
 | `run.completed` | 会话、执行标识及 `run` | 本次执行完成 |
 | `run.failed` | 标识、`run`、通常还有 `error` | 展示失败；最终持久化失败时可能含 `persisted:false` |
 | `run.cancelled` | 标识、`run`、通常还有 `error` | 本次执行取消 |
@@ -766,7 +768,7 @@ usage 片段响应示例：
 
 `model.invoke` 使用 `run.text_delta`、`run.completed`、`run.failed`、`run.cancelled`，其 `params` 不包含持久化 `run` 对象或 `conversation_id`。
 
-当前不发送 `step.output_delta`、`user_input.requested`、`user_input.updated`、`run.interrupted` 或独立的上下文压缩通知。压缩复用 step.created/step.updated 与执行事件。重启恢复中断状态及新工具步骤的保守操作事实，客户端查询执行记录获取结果，不承诺重放旧事件。
+当前不发送 `step.output_delta`、`run.interrupted` 或独立的上下文压缩通知。压缩复用 step.created/step.updated 与执行事件。重启恢复中断状态及新工具步骤的保守操作事实，客户端查询执行记录获取结果，不承诺重放旧事件。
 
 ## 17. 错误码与负向测试
 
@@ -817,7 +819,7 @@ usage 片段响应示例：
 | 拒绝后模型再次请求相同操作 | 不再次申请审批，不自动执行该操作 |
 | 已归档或删除会话继续发送 | 状态错误；恢复并取消归档后可重试 |
 | 工具读取工作区内绝对路径 | 与对应相对路径采用相同审批规则 |
-| 工具尝试工作区外路径／无工作区绝对路径 | `on-request`／`always` 等待单次审批；`never` 拒绝 |
+| 工具尝试工作区外路径／无工作区绝对路径 | `on-request` 在没有匹配的会话目录授权时询问；`always` 逐次询问；`never` 拒绝 |
 | 无工作区时工具使用相对路径 | 工具结果为 `path_base_required` |
 | 等待审批时目标文件或符号链接被替换 | 批准后仍拒绝执行，不读取替换目标 |
 | 进程关闭后重新启动同一测试数据目录 | 设置和消息保留，未结束执行标为中断，不自动重试 |
@@ -881,3 +883,44 @@ sequence 在单个步骤内递增，从 1 开始；按 step_id 分流后解码 b
 启动失败为 not_applied；正常退出并完成收尾为 applied，仅表示命令调用已执行至退出，业务成败仍看 exit_code，非零码原样返回。启动后取消、超时或结果不明为 unknown，保存部分输出且不自动重试；pid 仅供核实，不授权重启后按旧 PID 结束进程。
 
 沿用 --tool-timeout，默认 30 秒，不包含审批等待。run.cancel 与连接/应用关闭会取消并等待所属执行。Unix 清理独立进程组内的后代，不保证回收主动脱离进程组、由外部服务启动，或在 Callum 异常退出后继续运行的进程；Windows 10+/Server 2016+ 以 Job 管理普通子进程。主进程、管道各最多 2 秒收尾，Windows 另有最多 2 秒 Job 成员确认；清理失败如实报告，审批不等于沙箱隔离。平台原生验证与交叉编译结果分别说明。
+
+
+## 21. 用户补充输入
+
+普通对话向模型提供 `request_user_input` 工具。模型提交完整参数后，服务验证并冻结问题；这与文件、命令工具的审批相互独立，用户回复不授予操作权限。
+
+```json
+{"question":"另一个任务是否已经结束？","options":["已结束，可以复验","仍在进行"]}
+```
+
+问题最多 4096 个 UTF-8 字节，`options` 必须是数组，可为空，最多 8 个互不重复的非空选项，每项最多 1024 字节；完整参数最多 16 KiB。拒绝重复、未知字段、空问题及尾随 JSON。选项下标从 0 开始。客户端不能修改已冻结的问题或选项。
+
+```json
+{"jsonrpc":"2.0","id":"input-list","method":"user_input.list","params":{"run_id":"<run_id>","status":"pending","limit":100,"offset":0}}
+{"jsonrpc":"2.0","id":"input-get","method":"user_input.get","params":{"id":"<input_id>"}}
+{"jsonrpc":"2.0","id":"input-option","method":"user_input.submit","params":{"input_id":"<input_id>","run_id":"<run_id>","answer":{"option_index":0,"text":"可选的补充说明","skipped":false}}}
+{"jsonrpc":"2.0","id":"input-text","method":"user_input.submit","params":{"input_id":"<input_id>","run_id":"<run_id>","answer":{"option_index":null,"text":"自行撰写的回复","skipped":false}}}
+{"jsonrpc":"2.0","id":"input-skip","method":"user_input.submit","params":{"input_id":"<input_id>","run_id":"<run_id>","answer":{"option_index":null,"text":"","skipped":true}}}
+```
+
+`get`、`submit` 返回问题对象；`list` 返回数组，`run_id` 必填，`status` 只支持省略或 `pending`，分页范围同其他列表。问题对象包含 `id`、`step_id`（与 `id` 相同）、`conversation_id`、`run_id`、`question`、`options`、`status`、`answer`、`created_at`、`updated_at`。状态为 `pending`、`answered`、`skipped`、`cancelled`、`interrupted` 或 `failed`。未回复时 `answer:null`，已回答和跳过时为提交的固定回复。
+
+文字最多 4096 个 UTF-8 字节；非跳过时必须选中有效选项或填写非空文字，允许选择后附加说明。跳过时必须没有选项和文字。相同回复重复提交幂等，不重复触发模型调用；不同回复、跨执行、取消或中断后的提交会被拒绝。提交失败或结果未知时先查询，不自动重新执行。
+
+请求在现有 `user_input` 类型的步骤中持久化；问题、步骤、执行和回答的等待状态在同一事务中改变。等待期间不持有事务或模型请求槽位，不设置用户回复期限。提交成功后固定结果作为对应工具结果继续送给模型，调用与结果保持配对。`run.cancel`、连接关闭或应用退出结束等待；重启恢复把未结束步骤和执行标为 `interrupted`，不自动恢复调用。客户端收起卡片不对应任何决定或取消接口。
+
+## 会话目录授权
+
+目录授权由服务端根据已固定的实际目标与影响类别推导（真实绝对目录 `root_path`、`access: read/read_write`），不改变原始操作快照与指纹，历史待核实操作继续匹配原身份；仅对 on-request 下因工作区外访问而询问的有效读写操作提供；审批对象顶层 `directory_scope` 存在时客户端才可展示选项。读取操作只提供 read，普通修改提供包含读取的 read_write；不隐式扩大为删除、外发、未知操作或命令执行权限。
+
+`approval.decide` 的可选 `scope` 默认 `once`；选择 `conversation_directory` 时，审批决定与 `conversation_directory_grants` 授权在同一事务保存。授权绑定当前 conversation_id，跨提问及重启保留，其他会话不继承。历史一次性审批不会自动升级。授权范围是实际目录路径，目录改名不会自动迁移授权；判断使用路径层级而非字符串前缀，并覆盖多文件计划及辅助路径，符号链接按实际目标校验。
+
+`approval.directory.list` 按 conversation_id 分页查询（limit 默认 100、最大 200，offset 默认 0），返回包含撤销记录的数组；记录包含 id、conversation_id、approval_id、scope、created_at、revoked_at。`approval.directory.revoke` 接收 conversation_id 和 id，重复撤销幂等，不改变来源审批。创建及撤销发布 `directory_grant.updated`，通知包含 conversation_id 与 directory_grant。工具步骤 input.directory_grant_ids 和 authorization.reason=conversation_directory_grant 记录继承来源，不伪造新的用户决定。工具认领事务再次核验撤销状态及范围；撤销不撤回已开始或已单独批准的操作，只使依赖该目录授权的后续操作重新判断。被拒绝或结果待核实的操作、always/never 策略继续执行各自的限制。
+
+```json
+{"jsonrpc":"2.0","id":"approve-directory","method":"approval.decide","params":{"approval_id":"<approval_id>","decision":"approved","scope":"conversation_directory"}}
+{"jsonrpc":"2.0","id":"directory-grants","method":"approval.directory.list","params":{"conversation_id":"<conversation_id>","limit":100,"offset":0}}
+{"jsonrpc":"2.0","id":"revoke-directory","method":"approval.directory.revoke","params":{"conversation_id":"<conversation_id>","id":"<directory_grant_id>"}}
+```
+
+scope 仅接受 once、conversation_directory；拒绝决定不能授予目录权限。不支持选项的审批提交目录授权返回 -32602，已决定审批以不同范围重复提交返回 1003，同一决定与范围保持幂等；重复批准不能重新激活已撤销授权。客户端不允许提交 root_path、access 或其他自定义授权字段。

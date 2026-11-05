@@ -1,7 +1,10 @@
 package executor_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -15,6 +18,46 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/executor"
 	"github.com/xiaoyu98628/callum/internal/tool/registry"
 )
+
+func TestDirectoryOptionsPreserveExistingOperationFingerprint(t *testing.T) {
+	instance := &mutableTool{definition: tool.Definition{ToolDefinition: model.ToolDefinition{Name: "read_file", Description: "目录指纹回归", Parameters: json.RawMessage(`{"type":"object"}`)}, Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectRead}}, target: &tool.Target{RequestedPath: t.TempDir(), Kind: "directory"}}
+	instance.target.Path = instance.target.RequestedPath
+	r := registry.New()
+	if err := r.Register(instance); err != nil {
+		t.Fatal(err)
+	}
+	e, err := executor.New(r, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.Prepare(t.Context(), tool.Scope{}, "read_file", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := p.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	// 此结构固定目录授权引入前的快照字段；原有未知操作必须继续按相同哈希匹配。
+	legacy := struct {
+		Tool      tool.Definition `json:"tool"`
+		Workspace *tool.Scope     `json:"workspace"`
+		Target    *tool.Target    `json:"target,omitempty"`
+		Plan      *tool.Plan      `json:"plan,omitempty"`
+		Details   json.RawMessage `json:"details,omitempty"`
+		Arguments json.RawMessage `json:"arguments"`
+		Summary   string          `json:"summary"`
+	}{Tool: instance.definition, Target: instance.target, Arguments: json.RawMessage(`{}`), Summary: instance.definition.Description}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	if !bytes.Equal(raw, p.Request()) || p.Hash() != hex.EncodeToString(sum[:]) {
+		t.Fatalf("目录授权改变了历史操作身份: %s", p.Request())
+	}
+}
 
 type mutableTool struct {
 	definition tool.Definition

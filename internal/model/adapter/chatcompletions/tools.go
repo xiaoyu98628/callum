@@ -13,17 +13,12 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model"
 )
 
-// 工具定义数是单次请求的资源边界，与模型提出或实际执行的调用次数无关。
-const maxToolDefinitions = 32
 const maxToolArguments = 16 << 10
 const maxToolCallBytes = 8 << 20
 
 var toolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 func addTools(params *openai.ChatCompletionNewParams, defs []model.ToolDefinition) error {
-	if len(defs) > maxToolDefinitions {
-		return model.ErrInputLimit
-	}
 	seen := map[string]bool{}
 	for _, d := range defs {
 		var schema map[string]any

@@ -35,6 +35,35 @@ func TestToolDefinitionsAndMessages(t *testing.T) {
 	}
 }
 
+func TestToolDefinitionsHaveNoLocalCountLimit(t *testing.T) {
+	req := testRequest()
+	for i := range 64 {
+		req.Tools = append(req.Tools, model.ToolDefinition{Name: fmt.Sprintf("tool_%d", i), Parameters: json.RawMessage(`{"type":"object"}`)})
+	}
+	params, err := buildRequest(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent struct {
+		Tools []json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(raw, &sent); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent.Tools) != 64 {
+		t.Fatalf("工具定义被拒绝或截断: %d", len(sent.Tools))
+	}
+	// 去掉数量阈值仍须拒绝重复定义及非法名称。
+	req.Tools = append(req.Tools, req.Tools[0])
+	if _, err := buildRequest(t.Context(), req); !errors.Is(err, model.ErrInvalidResponse) {
+		t.Fatalf("接受重复工具: %v", err)
+	}
+}
+
 func TestLargeToolCallBatchForGenerateAndStream(t *testing.T) {
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprint(stream), func(t *testing.T) {

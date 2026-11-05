@@ -64,6 +64,8 @@ func EmitPersistent(notify func(string, any) error, event agent.Event) error {
 	case agent.Approval:
 		params["approval_id"] = value.ID
 		params["approval"] = value
+	case agent.DirectoryGrant:
+		params["directory_grant"] = value
 	case agent.Run:
 		params["run"] = value
 		if value.ErrorKind != nil && value.ErrorMessage != nil {

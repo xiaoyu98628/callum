@@ -38,7 +38,7 @@ type Decision struct {
 	Reason string `json:"reason"`
 }
 
-// Evaluate 只处理已经完成参数和目标校验的操作；工作区外目标需要单次审批。
+// Evaluate 只处理已经完成参数和目标校验的操作；工作区外目标需要审批或独立核验的会话目录授权。
 // Effects 必须来自可信注册代码，不能使用模型提供的类别或风险描述。
 func Evaluate(p ApprovalPolicy, effects []tool.Effect, outsideWorkspace bool) Decision {
 	if !p.Valid() {

@@ -1,6 +1,6 @@
 # 对话、执行与上下文设计
 
-本文记录已确认的目标设计。已完成普通对话、支持可选工作区的文件读取及补丁工具循环与审批；已接通手动及自动压缩、摘要版本与来源追溯；补充输入仍为规划。实际完成情况以 README 和实现为准。
+本文记录已确认的目标设计。已完成普通对话、支持可选工作区的文件读取及补丁工具循环与审批；已接通手动及自动压缩、摘要版本与来源追溯；用户补充输入已通过模型提问工具、步骤持久化及 stdio 查询/提交接入。实际完成情况以 README 和实现为准。
 
 ## 交付范围
 
@@ -99,7 +99,7 @@ context_compression 编排下建立 model_call 子步骤保存生成摘要的模
 事件名位于 method，params 按事件携带 conversation_id、run_id、step_id、message_id、approval_id。
 message.delta 使用 block_index 和带 type 的 delta，标题、工具、摘要输出不混入回答正文。
 
-拟定事件：conversation.created、conversation.updated、run.started、run.updated、run.completed、run.failed、run.cancelled、message.created、message.delta、message.updated、step.created、step.updated、tool.output、approval.requested、approval.updated、user_input.requested、user_input.updated。
+当前事件：conversation.created、conversation.updated、run.started、run.updated、run.completed、run.failed、run.cancelled、message.created、message.delta、message.updated、step.created、step.updated、tool.output、approval.requested、approval.updated、user_input.requested、user_input.updated。
 
 压缩使用 type=context_compression 的步骤事件。步骤父子关系支持折叠、展开，折叠偏好由客户端保存。
 状态落库后通知；内容增量有界传输，终态前保存最终或部分结果。重新打开查询数据库状态，不承诺逐事件重放。
@@ -115,7 +115,7 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 
 创建、编辑和状态变更按业务动作定义事务，不在等待模型、工具、用户输入时占用事务。
 关闭时停止接收、取消并等待任务、结束待审批记录，再关闭通信、HTTP 连接池和数据库。恢复中断执行前确认数据目录实例所有权。
-建表文件为 000001_create_model_config.go、000002_create_conversation_core.go、000003_create_run_approvals.go、000004_create_app_settings.go、000005_create_context_versions.go；当前结构版本 5，版本 1、2、3、4 经校验后保留数据升级。独立压缩设置组直接初始化当前 Token 配置，revision 为 1；不提供旧条数、字节阈值及其执行快照的数据转换。
+建表文件为 000001_create_model_config.go、000002_create_conversation_core.go、000003_create_run_approvals.go、000004_create_app_settings.go、000005_create_context_versions.go、000006_create_directory_grants.go；当前结构版本 6，版本 1 至 5 经校验后保留数据升级。独立压缩设置组直接初始化当前 Token 配置，revision 为 1；不提供旧条数、字节阈值及其执行快照的数据转换。
 开发阶段不转换旧 model_type 功能标签；模型配置使用内容类型规则校验。
 版本判断同时验证实际结构，兼容当前版本 1 的 UUIDv7 配置库；迁移失败回滚，不重建用户数据库。
 验证包括迁移、约束、事务回滚、多会话隔离、取消、重发、标题竞争、流式异常、资源关闭及 usage 保存，并运行项目规定的完整检查。
@@ -127,7 +127,7 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 文件和命令工具共用 internal/tool/builtin/internal/arguments 的 JSON 结构解析：单个 UTF-8 对象、16 KiB 上限、字段名精确匹配、拒绝各层重复字段和 null、未知字段、类型错误、过深嵌套及尾随内容。各工具保留实际参数范围、默认值和业务校验，Validate 与 Prepare 共用同一业务解码函数。读取工具重复字段从保留最后值改为拒绝，合法参数的规范化及审批快照/指纹保持原义。
 普通对话及 Agent 默认向所有模型提供已注册工具，不依赖 model_type、capabilities.tools 或工作区绑定，模型自主选择是否调用。辅助标题与兼容 model.invoke 保持文本用途。每轮最多一个回答模型请求，同轮工具串行；
 model_type 是 text、image、audio、video 内容类型元数据，可多选，不作为执行开关；图片输入由 capabilities.image_input 明确声明，推理等级只作元数据。
-不限制模型调用轮次、累计工具次数及单次响应提出的工具调用数量。模型完成、取消、应用/连接退出或不可继续的错误结束执行；保留并发、单次请求超时、Token 预算及内容边界。每次提供最多 32 个工具定义，工具参数各不超过 16 KiB，调用 ID/名称/参数累计字段字节不超过 8 MiB。执行前验证整批最小结果结构可容纳，真实结果逐次检查累计上下文，已发生操作及结果照常审计。当前执行工具链不被拆分压缩，达到资源边界时明确失败。文件工具为 list_directory、read_file、search_text、apply_patch，支持绝对路径；相对路径需要工作区基准，不接受 .. 越界。无工作区的相对路径返回 path_base_required。
+不限制模型调用轮次、累计工具次数及单次响应提出的工具调用数量。模型完成、取消、应用/连接退出或不可继续的错误结束执行；保留并发、单次请求超时、Token 预算及内容边界。工具定义种类数不设本地固定上限，工具参数各不超过 16 KiB，调用 ID/名称/参数累计字段字节不超过 8 MiB。执行前验证整批最小结果结构可容纳，真实结果逐次检查累计上下文，已发生操作及结果照常审计。当前执行工具链不被拆分压缩，达到资源边界时明确失败。文件工具为 list_directory、read_file、search_text、apply_patch，支持绝对路径；相对路径需要工作区基准，不接受 .. 越界。无工作区的相对路径返回 path_base_required。
 工作区内绝对路径与相对路径遵守相同规则，符号链接按实际目标分类。单文件固定文件句柄，目录操作通过 os.Root 限定在单次目标目录内，目录搜索不跟随子项符号链接。
 准备阶段不读取正文或目录条目；执行前重新检查请求路径、目标身份及工作区。目标或链接在等待审批期间被替换时拒绝执行。
 模型调用与工具执行分别使用 call-timeout、tool-timeout，默认 5 分钟和 30 秒。审批没有过期时间或超时配置，等待用户决定或执行取消。
@@ -143,7 +143,7 @@ on-request 放行工作区读取和普通修改，无工作区或工作区外文
 工具 effects 由可信代码声明，可包含 read、write、destructive、external、unknown；缺少类别按未知操作处理，无效类别拒绝注册。
 混合类别采用需要审批的结果，读取声明不能抵消破坏性或外发影响；工具负责将影响较大的覆盖声明为 destructive。
 当前已提供三个读取工具、apply_patch 文件创建修改及 run_command 命令工具。独立删除和外发工具尚未接入；命令可产生这类影响，始终按 unknown 审批。
-参数、目标范围及工作区状态独立校验；批准只授权本次固定目标操作，不扩大到其他路径。策略拒绝和参数校验失败不生成用户审批记录。
+参数、目标范围及工作区状态独立校验；默认批准只授权本次固定目标操作；会话目录授权由用户明确选择并单独保存。策略拒绝和参数校验失败不生成用户审批记录。
 权限判定属于 Go，模型不能声明自己已获授权。旧 approval-mode、approval-policy、approvals-reviewer 启动参数移除，未加入操作系统沙箱或完全访问模式。
 工具步骤 input 保存 settings_revision、approval_policy、approvals_reviewer 和 authorization（action、reason），供审计查询；审批表结构和通信接口保持不变。
 request 保存服务端生成的工具完整定义、版本、可选工作区、实际目标及规范化参数，request_hash 为该快照的 SHA-256。无工作区时 workspace 为 null；target 保存 requested_path、path、kind 和 within_workspace，不能由模型参数覆盖。
@@ -211,3 +211,11 @@ approval.get/list 查询记录，approval.decide 只接受 approval_id、decisio
 单次命令沿用 tool-timeout，默认 30 秒，不计算审批等待。Unix 独立进程组覆盖未主动脱离的后代，主进程退出、取消和超时均终止组内残留；不承诺收回主动脱离进程组或经外部服务启动的进程；Unix 上 Callum 异常退出也不保证回收子进程，恢复仅记录未知而不重试。Windows 10+/Server 2016+ 在创建时通过 JOB_LIST 关联 Job，启用 KILL_ON_JOB_CLOSE，限制普通 breakaway；不具备操作系统沙箱。主进程和管道各最多 2 秒收尾，Windows Job 成员另有最多 2 秒确认，失败如实记录而不伪造清理成功。Close 取消并等待本次执行，再释放准备句柄，可重复调用。
 
 测试使用 testdata 中的受控进程及临时目录，验证审批前不启动、参数/工作目录/环境、双流实时输出、截断、退出码、取消/超时、子进程和应用关闭。平台原生 CI 与本地交叉编译分开记录，新增工具不增加数据库迁移或 Go 依赖。
+
+### 会话目录授权
+
+目录授权由服务端根据已固定的实际目标与影响类别推导（真实绝对目录 `root_path`、`access: read/read_write`），不改变原始操作快照与指纹，历史待核实操作继续匹配原身份；仅对 on-request 下因工作区外访问而询问的有效读写操作提供；审批对象顶层 `directory_scope` 存在时客户端才可展示选项。读取操作只提供 read，普通修改提供包含读取的 read_write；不隐式扩大为删除、外发、未知操作或命令执行权限。
+
+`approval.decide` 的可选 `scope` 默认 `once`；选择 `conversation_directory` 时，审批决定与 `conversation_directory_grants` 授权在同一事务保存。授权绑定当前 conversation_id，跨提问及重启保留，其他会话不继承。历史一次性审批不会自动升级。授权范围是实际目录路径，目录改名不会自动迁移授权；判断使用路径层级而非字符串前缀，并覆盖多文件计划及辅助路径，符号链接按实际目标校验。
+
+`approval.directory.list` 按 conversation_id 分页查询（limit 默认 100、最大 200，offset 默认 0），返回包含撤销记录的数组；记录包含 id、conversation_id、approval_id、scope、created_at、revoked_at。`approval.directory.revoke` 接收 conversation_id 和 id，重复撤销幂等，不改变来源审批。创建及撤销发布 `directory_grant.updated`，通知包含 conversation_id 与 directory_grant。工具步骤 input.directory_grant_ids 和 authorization.reason=conversation_directory_grant 记录继承来源，不伪造新的用户决定。工具认领事务再次核验撤销状态及范围；撤销不撤回已开始或已单独批准的操作，只使依赖该目录授权的后续操作重新判断。被拒绝或结果待核实的操作、always/never 策略继续执行各自的限制。
