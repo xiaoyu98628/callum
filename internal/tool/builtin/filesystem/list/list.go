@@ -18,7 +18,7 @@ type directoryTool struct{}
 func New() tool.Tool { return directoryTool{} }
 
 func (directoryTool) Definition() tool.Definition {
-	return tool.Definition{Name: "list_directory", Description: "查看目录中的文件和子目录。path 支持绝对路径；相对路径需要绑定工作区。工作区外访问需要审批", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["path"],"additionalProperties":false}`), Source: "builtin", Version: "2", Effects: []tool.Effect{tool.EffectRead}}
+	return tool.Definition{Name: "list_directory", Description: "查看目录中的文件和子目录。path 支持绝对路径；相对路径需要绑定工作区。只读访问不受工作区写入边界限制，审批由服务端策略判断", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["path"],"additionalProperties":false}`), Source: "builtin", Version: "3", Effects: []tool.Effect{tool.EffectRead}}
 }
 
 func (directoryTool) Validate(raw json.RawMessage) (json.RawMessage, error) {

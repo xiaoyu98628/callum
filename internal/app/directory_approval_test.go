@@ -72,23 +72,28 @@ func TestConversationDirectoryApprovalThroughStdio(t *testing.T) {
 		}
 		last := req.Messages[len(req.Messages)-1]
 		name, args, id := "read_file", map[string]any{"path": child}, "read-child"
-		if last.Role == "tool" && !(text == "grant" && last.CallID == "list-root") {
+		if last.Role == "tool" {
 			writeFileToolResponse(t, w, req.Stream, map[string]any{"content": "完成"}, "stop")
 			return
 		}
 		switch text {
-		case "grant":
-			if last.Role != "tool" {
-				name, args, id = "list_directory", map[string]any{"path": root}, "list-root"
-			}
 		case "sibling":
 			args["path"] = other
 		case "symlink":
 			args["path"] = filepath.Join(link, "outside.txt")
-		case "write", "write-child":
+		case "write", "write-child", "write-sibling", "write-symlink", "write-other-conversation", "write-revoked":
 			path := created
-			if text == "write-child" {
+			switch text {
+			case "write-child":
 				path = filepath.Join(root, "nested", "created.txt")
+			case "write-sibling":
+				path = filepath.Join(outside, "created.txt")
+			case "write-symlink":
+				path = filepath.Join(link, "created-via-link.txt")
+			case "write-other-conversation":
+				path = filepath.Join(root, "other-conversation.txt")
+			case "write-revoked":
+				path = filepath.Join(root, "revoked.txt")
 			}
 			name, args = "apply_patch", map[string]any{"patch": "*** Begin Patch\n*** Add File: " + path + "\n+created through directory approval\n*** End Patch", "base_versions": []any{}}
 		case "command":
@@ -159,13 +164,13 @@ func TestConversationDirectoryApprovalThroughStdio(t *testing.T) {
 			t.Fatalf("审批次数不符: want=%d actual=%s", want, frame.Result)
 		}
 	}
-	first := start("grant", false)
+	first := start("write", false)
 	a := decide(agent.ApprovalConversationDirectory, agent.ApprovalApproved, true)
-	if a.DirectoryScope.RootPath != root || a.DirectoryScope.Access != "read" {
+	if a.DirectoryScope.RootPath != root || a.DirectoryScope.Access != "read_write" {
 		t.Fatal("目录范围或影响类别错误")
 	}
 	p.event(t, "run.completed")
-	assertApprovals(first, 1) // 同轮的子目录读取继承授权。
+	assertApprovals(first, 1) // 写授权覆盖此会话的实际父目录及后代。
 	list := p.call(t, "approval.directory.list", map[string]any{"conversation_id": cid})
 	requireOK(t, list)
 	var grants []agent.DirectoryGrant
@@ -181,23 +186,26 @@ func TestConversationDirectoryApprovalThroughStdio(t *testing.T) {
 	read := start("read", false)
 	p.event(t, "run.completed")
 	assertApprovals(read, 0)
-	for _, text := range []string{"sibling", "symlink", "write", "command"} {
+	for _, text := range []string{"sibling", "symlink"} {
+		run := start(text, false)
+		p.event(t, "run.completed")
+		assertApprovals(run, 0) // 纯读取不再需要额外目录授权。
+	}
+	for _, text := range []string{"write-sibling", "write-symlink", "command"} {
 		run := start(text, false)
 		decide(agent.ApprovalOnce, agent.ApprovalRejected, text != "command")
 		p.event(t, "run.completed")
 		assertApprovals(run, 1)
 	}
-	if _, err := os.Stat(created); !os.IsNotExist(err) {
-		t.Fatal("读取授权扩大成了写权限")
+	for _, path := range []string{filepath.Join(outside, "created.txt"), filepath.Join(outside, "created-via-link.txt")} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("目录写授权越界")
+		}
 	}
-	otherRun := start("read", true)
+	otherRun := start("write-other-conversation", true)
 	decide(agent.ApprovalOnce, agent.ApprovalRejected, true)
 	p.event(t, "run.completed")
 	assertApprovals(otherRun, 1)
-	writeRun := start("write", false)
-	decide(agent.ApprovalConversationDirectory, agent.ApprovalApproved, true)
-	p.event(t, "run.completed")
-	assertApprovals(writeRun, 1)
 	if _, err := os.Stat(created); err != nil {
 		t.Fatalf("明确的目录写授权未生效: %v", err)
 	}
@@ -230,15 +238,18 @@ func TestConversationDirectoryApprovalThroughStdio(t *testing.T) {
 	setApprovalPolicy(t, p, "on-request")
 	frame := p.call(t, "approval.directory.list", map[string]any{"conversation_id": cid})
 	requireOK(t, frame)
-	if err := json.Unmarshal(frame.Result, &grants); err != nil || len(grants) != 2 {
+	if err := json.Unmarshal(frame.Result, &grants); err != nil || len(grants) != 1 {
 		t.Fatalf("写授权缺失: %s %v", frame.Result, err)
 	}
 	for _, g := range grants {
 		requireOK(t, p.call(t, "approval.directory.revoke", map[string]any{"conversation_id": cid, "id": g.ID}))
 	}
-	run := start("read", false)
+	run := start("write-revoked", false)
 	decide(agent.ApprovalOnce, agent.ApprovalRejected, true)
 	p.event(t, "run.completed")
 	assertApprovals(run, 1)
+	read = start("read", false)
+	p.event(t, "run.completed")
+	assertApprovals(read, 0) // 撤销额外写授权不改变默认只读策略。
 	p.stop(t)
 }

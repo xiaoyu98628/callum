@@ -23,22 +23,26 @@ func TestFileToolsIndependentOfWorkspaceThroughStdio(t *testing.T) {
 		capabilities                                      map[string]bool
 		modelTypes                                        []string
 	}{
-		{name: "unbound_approve_stream", decision: "approved", stream: true},
-		{name: "tools_false_does_not_disable_tools", decision: "approved", capabilities: map[string]bool{"tools": false}, modelTypes: []string{"text"}},
-		{name: "content_types_do_not_disable_tools", decision: "approved", capabilities: map[string]bool{"reasoning": true}, modelTypes: []string{"text", "image", "audio", "video"}},
-		{name: "unbound_reject", decision: "rejected", errorKind: "permission_denied"},
-		{name: "unbound_cancel", decision: "cancel"},
-		{name: "unbound_never", policy: "never", errorKind: "permission_denied"},
+		{name: "unbound_automatic_stream", stream: true},
+		{name: "tools_false_does_not_disable_tools", capabilities: map[string]bool{"tools": false}, modelTypes: []string{"text"}},
+		{name: "content_types_do_not_disable_tools", capabilities: map[string]bool{"reasoning": true}, modelTypes: []string{"text", "image", "audio", "video"}},
+		{name: "unbound_always_reject", policy: "always", decision: "rejected", errorKind: "permission_denied"},
+		{name: "unbound_always_cancel", policy: "always", decision: "cancel"},
+		{name: "unbound_never", policy: "never"},
 		{name: "unbound_relative", relative: true, errorKind: "path_base_required"},
 		{name: "workspace_absolute_inside", bound: true, inside: true},
 		{name: "workspace_absolute_inside_never", bound: true, inside: true, policy: "never"},
 		{name: "workspace_absolute_inside_always", bound: true, inside: true, policy: "always", decision: "approved"},
-		{name: "workspace_absolute_outside", bound: true, decision: "approved"},
-		{name: "workspace_outside_never", bound: true, policy: "never", errorKind: "permission_denied"},
-		{name: "workspace_symlink_outside", bound: true, symlink: true, relative: true, decision: "approved"},
-		{name: "unbound_directory", operation: "list_directory", decision: "approved"},
-		{name: "unbound_search", operation: "search_text", decision: "approved"},
-		{name: "unbound_target_replaced", decision: "approved", replace: true, errorKind: "permission_denied"},
+		{name: "workspace_absolute_outside", bound: true},
+		{name: "workspace_outside_never", bound: true, policy: "never"},
+		{name: "workspace_symlink_outside", bound: true, symlink: true, relative: true},
+		{name: "unbound_directory", operation: "list_directory"},
+		{name: "unbound_directory_never", operation: "list_directory", policy: "never"},
+		{name: "outside_directory", operation: "list_directory", bound: true},
+		{name: "unbound_search", operation: "search_text"},
+		{name: "unbound_search_never", operation: "search_text", policy: "never"},
+		{name: "outside_search", operation: "search_text", bound: true},
+		{name: "unbound_target_replaced", policy: "always", decision: "approved", replace: true, errorKind: "permission_denied"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workspaceRoot, outside := t.TempDir(), t.TempDir()

@@ -63,8 +63,8 @@ func TestWorkspaceToolsAndPermissionBoundary(t *testing.T) {
 	if _, err := e.Execute(t.Context(), p, "tampered"); !errors.Is(err, tool.ErrDenied) {
 		t.Fatal("未核对审批操作哈希")
 	}
-	if !p.OutsideWorkspace() || policy.Evaluate(policy.OnRequest, p.Definition().Effects, p.OutsideWorkspace()).Action != policy.Ask {
-		t.Fatal("符号链接实际指向工作区外，却未要求审批")
+	if !p.OutsideWorkspace() || policy.Evaluate(policy.OnRequest, p.Definition().Effects, p.OutsideWorkspace()).Action != policy.Allow {
+		t.Fatal("符号链接没有保持实际目标分类或纯读取被错误要求审批")
 	}
 }
 

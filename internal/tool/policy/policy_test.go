@@ -52,16 +52,35 @@ func TestInvalidPolicyAndOperationFailClosed(t *testing.T) {
 	}
 }
 
-func TestOutsideWorkspaceRequiresApproval(t *testing.T) {
+func TestOutsideWorkspaceWritesRequireApproval(t *testing.T) {
 	for _, test := range []struct {
 		policy policy.ApprovalPolicy
 		want   policy.Action
 	}{
 		{policy.OnRequest, policy.Ask}, {policy.Always, policy.Ask}, {policy.Never, policy.Deny},
 	} {
-		for _, effects := range [][]tool.Effect{{tool.EffectRead}, {tool.EffectWrite}, {tool.EffectRead, tool.EffectDestructive}} {
+		for _, effects := range [][]tool.Effect{{tool.EffectWrite}, {tool.EffectRead, tool.EffectWrite}, {tool.EffectRead, tool.EffectDestructive}, {tool.EffectRead, tool.EffectExternal}, {tool.EffectRead, tool.EffectUnknown}, nil} {
 			if got := policy.Evaluate(test.policy, effects, true); got.Action != test.want {
 				t.Fatalf("工作区外访问被错误放行: %s %+v", test.policy, got)
+			}
+		}
+	}
+}
+
+func TestReadOnlyAccessIndependentOfWorkspace(t *testing.T) {
+	for _, outside := range []bool{false, true} {
+		for _, choice := range []struct {
+			policy policy.ApprovalPolicy
+			want   policy.Action
+		}{
+			{policy.OnRequest, policy.Allow}, {policy.Never, policy.Allow}, {policy.Always, policy.Ask},
+		} {
+			got := policy.Evaluate(choice.policy, []tool.Effect{tool.EffectRead}, outside)
+			if got.Action != choice.want {
+				t.Fatalf("纯读取策略错误: outside=%v policy=%s got=%+v", outside, choice.policy, got)
+			}
+			if choice.want == policy.Allow && got.Reason != "read_only_operation" {
+				t.Fatalf("只读来源错误: %+v", got)
 			}
 		}
 	}

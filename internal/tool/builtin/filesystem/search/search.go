@@ -21,7 +21,7 @@ type searchTool struct{}
 func New() tool.Tool { return searchTool{} }
 
 func (searchTool) Definition() tool.Definition {
-	return tool.Definition{Name: "search_text", Description: "在目录或文件中搜索字面文本。path 支持绝对路径；相对路径需要绑定工作区。工作区外访问需要审批", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["path","query"],"additionalProperties":false}`), Source: "builtin", Version: "2", Effects: []tool.Effect{tool.EffectRead}}
+	return tool.Definition{Name: "search_text", Description: "在目录或文件中搜索字面文本。path 支持绝对路径；相对路径需要绑定工作区。只读访问不受工作区写入边界限制，审批由服务端策略判断", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["path","query"],"additionalProperties":false}`), Source: "builtin", Version: "3", Effects: []tool.Effect{tool.EffectRead}}
 }
 
 func (searchTool) Validate(raw json.RawMessage) (json.RawMessage, error) {

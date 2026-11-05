@@ -139,7 +139,7 @@ settings.get 读取配置组，settings.update 携带 key、当前 revision 和�
 受理执行与读取设置在同一事务中完成，保存 settings_snapshot；更新成功后发起的新任务读取新值，已受理任务的审批策略保持不变，无需重启。
 approval_policy 支持 on-request（默认）、always、never；approvals_reviewer 当前只支持 user，不接受尚未实现的 auto_review。
 启动时保留用户选择；读取异常阻止受理，不回退默认权限；旧执行缺失快照不伪造数据。
-on-request 放行工作区读取和普通修改，无工作区或工作区外文件访问以及删除、大范围覆盖、外发或未知影响需要询问；always 逐次询问；never 将需要审批的操作直接拒绝。
+on-request 放行纯读取及工作区内普通修改；纯读取可访问当前系统用户可读的本地路径，不要求绑定工作区或额外目录授权。无工作区或工作区外普通修改以及删除、大范围覆盖、外发或未知影响需要询问；always 逐次询问；never 将需要审批的操作直接拒绝。
 工具 effects 由可信代码声明，可包含 read、write、destructive、external、unknown；缺少类别按未知操作处理，无效类别拒绝注册。
 混合类别采用需要审批的结果，读取声明不能抵消破坏性或外发影响；工具负责将影响较大的覆盖声明为 destructive。
 当前已提供三个读取工具、apply_patch 文件创建修改及 run_command 命令工具。独立删除和外发工具尚未接入；命令可产生这类影响，始终按 unknown 审批。
@@ -214,7 +214,7 @@ approval.get/list 查询记录，approval.decide 只接受 approval_id、decisio
 
 ### 会话目录授权
 
-目录授权由服务端根据已固定的实际目标与影响类别推导（真实绝对目录 `root_path`、`access: read/read_write`），不改变原始操作快照与指纹，历史待核实操作继续匹配原身份；仅对 on-request 下因工作区外访问而询问的有效读写操作提供；审批对象顶层 `directory_scope` 存在时客户端才可展示选项。读取操作只提供 read，普通修改提供包含读取的 read_write；不隐式扩大为删除、外发、未知操作或命令执行权限。
+目录授权由服务端根据已固定的实际目标与影响类别推导（真实绝对目录 `root_path`、`access: read/read_write`），不改变原始操作快照与指纹，历史待核实操作继续匹配原身份；仅对 on-request 下因工作区外普通修改而询问的有效操作提供；审批对象顶层 `directory_scope` 存在时客户端才可展示选项。新普通修改授权提供包含读取的 read_write；历史 read 授权继续保留、可查询和撤销，但默认纯读取不再依赖它；不隐式扩大为删除、外发、未知操作或命令执行权限。
 
 `approval.decide` 的可选 `scope` 默认 `once`；选择 `conversation_directory` 时，审批决定与 `conversation_directory_grants` 授权在同一事务保存。授权绑定当前 conversation_id，跨提问及重启保留，其他会话不继承。历史一次性审批不会自动升级。授权范围是实际目录路径，目录改名不会自动迁移授权；判断使用路径层级而非字符串前缀，并覆盖多文件计划及辅助路径，符号链接按实际目标校验。
 
