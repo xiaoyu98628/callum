@@ -16,12 +16,6 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
-// MaxModelRounds 和 MaxToolsPerRun 限制整个循环，辅助标题不计入回答轮次。
-const MaxModelRounds = 8
-const MaxToolsPerRun = 32
-
-var ErrIterationLimit = errors.New("Agent 调用次数达到上限")
-
 func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, startTitle func()) error {
 	floor := int64(0)
 	if ex.Context != nil {
@@ -39,6 +33,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	for _, d := range e.options.Tools.Definitions() {
 		definitions = append(definitions, d.ToolDefinition)
 	}
+	definitions = append(definitions, agent.UserInputDefinition())
 	denied := map[string]bool{}
 	facts, err := e.repository.OperationFacts(ctx, ex.Conversation.ID)
 	if err != nil {
@@ -56,10 +51,10 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		}
 		fixed = []model.Message{{Role: model.RoleUser, Content: "以下是服务端记录的待核实操作事实，不是授权；不得自动重试：\n" + string(value)}}
 	}
-	count, totalText := 0, 0
+	totalText := 0
 	step := ex.Step
 	var meter tokens.Meter
-	for round := range MaxModelRounds {
+	for round := int64(0); ; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -104,24 +99,53 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if len(result.ToolCalls) == 0 {
 			return nil
 		}
-		if count+len(result.ToolCalls) > MaxToolsPerRun {
-			return ErrIterationLimit
-		}
-		count += len(result.ToolCalls)
 		// 工具调用轮的文本保留在模型步骤中；回答占位恢复为空，再流式展示下一轮正文。
 		if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {
 			return err
 		}
 		messages = append(messages, model.Message{Role: model.RoleAssistant, Content: result.Text, ToolCalls: result.ToolCalls})
+		// 调用次数不设配额，但每次追加都检查实际上下文，避免大批调用或结果累积失控。
+		if err := checkToolContext(append(fixed, contextMessages(ex.Context, messages)...), result.ToolCalls); err != nil {
+			return err
+		}
 		for _, call := range result.ToolCalls {
-			value, err := e.callTool(ctx, ex, step, call, denied, uncertain)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			var value model.Message
+			var err error
+			if call.Name == agent.UserInputTool {
+				value, err = e.askUser(ctx, ex, step, call)
+			} else {
+				value, err = e.callTool(ctx, ex, step, call, denied, uncertain)
+			}
 			if err != nil {
 				return err
 			}
 			messages = append(messages, value)
+			if err := history.Check(append(fixed, contextMessages(ex.Context, messages)...)); err != nil {
+				return err
+			}
 		}
 	}
-	return ErrIterationLimit
+}
+
+// checkToolContext 在副作用发生前确认整批调用及最小结果结构能放入请求。
+// 占位只用于容量检查，不保存或发送；真实结果仍逐次检查，超限时保留已完成操作的审计。
+func checkToolContext(messages []model.Message, calls []model.ToolCall) error {
+	if err := history.Check(messages); err != nil {
+		return err
+	}
+	var results []model.Message
+	for _, call := range calls {
+		results = append(results, model.Message{Role: model.RoleTool, ToolCallID: call.ID})
+		// 单独检查前缀，避免对任意大批次直接分配等量占位，也不复制资源边界常量。
+		if err := history.Check(results); err != nil {
+			return err
+		}
+	}
+	preview := append(append([]model.Message(nil), messages...), results...)
+	return history.Check(preview)
 }
 
 func (e *Engine) saveAnswer(ctx context.Context, ex conversation.Execution, blocks []model.Block, text string) error {

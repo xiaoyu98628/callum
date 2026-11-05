@@ -58,6 +58,9 @@ func EmitPersistent(notify func(string, any) error, event agent.Event) error {
 		params["step"] = value
 	case agent.ToolOutput:
 		params["output"] = value
+	case agent.UserInput:
+		params["input_id"] = value.ID
+		params["user_input"] = value
 	case agent.Approval:
 		params["approval_id"] = value.ID
 		params["approval"] = value

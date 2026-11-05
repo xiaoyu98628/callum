@@ -82,7 +82,7 @@ model_call.input 保存参数、上下文来源及内容指纹；output 保存�
 保留来源原文及工具调用、结果的配对关系；摘要验证保存成功后才事务切换。失败保留旧有效版本。
 size_stats 保存实际 JSON 字节数、消息数及估算的前后 Token 数和方法，不是模型计费 usage。context_compaction 默认 enabled=true、token_budget=0、output_reserve=4096、safety_margin=1024、image_token_estimate=8192、retain_turns=4。已知窗口扣除输出预留及安全余量，正的 token_budget 只收紧预算；未知窗口要求显式正预算。自动压缩计入工具定义、操作事实和当前工具链，摘要批次也按预算选择完整轮次；压缩后重新计算，无法满足预算时明确失败，原文保留。数量及字节限制只约束资源。unicode-v1 是启发式估算，实际 prompt_tokens 仅可参考同一执行的相同前缀及工具定义，不累加历次用量、不混入 usage。
 触发方式记录在压缩步骤 input.trigger.type（manual、automatic）及 reason。
-context_compression 编排下建立 model_call 子步骤保存生成摘要的模型结果与 usage。生成时不持有事务和工具，复用模型调用槽位与超时；激活时原子核对来源、切换唯一有效版本并完成父步骤。失败与中断不激活半成品，已提交版本保留。单次最多 8 批完整轮次；来源清单仅记录新增覆盖范围，旧摘要沿 base_version_id 追溯。
+context_compression 编排下建立 model_call 子步骤保存生成摘要的模型结果与 usage。生成时不持有事务和工具，复用模型调用槽位与超时；激活时原子核对来源、切换唯一有效版本并完成父步骤。失败与中断不激活半成品，已提交版本保留。不设固定批次上限，每批必须推进来源范围并减少摘要 Token 估算；准备窗口和单次请求仍有资源边界，循环检查取消，无进展明确失败；来源清单仅记录新增覆盖范围，旧摘要沿 base_version_id 追溯。
 
 待核实工具操作独立从服务端审计读取，不依赖摘要措辞；摘要不能清除重新确认要求。摘要作为有来源的用户级历史数据，不提升为系统指令。摘要质量属于有损生成，结构与指纹校验不能证明语义完全保真，原文和图片引用保留。
 
@@ -115,7 +115,7 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 
 创建、编辑和状态变更按业务动作定义事务，不在等待模型、工具、用户输入时占用事务。
 关闭时停止接收、取消并等待任务、结束待审批记录，再关闭通信、HTTP 连接池和数据库。恢复中断执行前确认数据目录实例所有权。
-迁移为 000001_create_model_config.go、000002_create_conversation_core.go、000003_create_run_approvals.go、000004_create_app_settings.go、000005_create_context_versions.go、000006_token_compaction.go；当前结构版本 6，版本 1、2、3、4、5 经校验后保留数据升级。版本 5 的旧阈值不可换算为 Token，升级只保留启用与保留轮次并递增设置 revision，历史执行快照及既有摘要不改写。
+建表文件为 000001_create_model_config.go、000002_create_conversation_core.go、000003_create_run_approvals.go、000004_create_app_settings.go、000005_create_context_versions.go；当前结构版本 5，版本 1、2、3、4 经校验后保留数据升级。独立压缩设置组直接初始化当前 Token 配置，revision 为 1；不提供旧条数、字节阈值及其执行快照的数据转换。
 开发阶段不转换旧 model_type 功能标签；模型配置使用内容类型规则校验。
 版本判断同时验证实际结构，兼容当前版本 1 的 UUIDv7 配置库；迁移失败回滚，不重建用户数据库。
 验证包括迁移、约束、事务回滚、多会话隔离、取消、重发、标题竞争、流式异常、资源关闭及 usage 保存，并运行项目规定的完整检查。
@@ -127,7 +127,7 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 文件和命令工具共用 internal/tool/builtin/internal/arguments 的 JSON 结构解析：单个 UTF-8 对象、16 KiB 上限、字段名精确匹配、拒绝各层重复字段和 null、未知字段、类型错误、过深嵌套及尾随内容。各工具保留实际参数范围、默认值和业务校验，Validate 与 Prepare 共用同一业务解码函数。读取工具重复字段从保留最后值改为拒绝，合法参数的规范化及审批快照/指纹保持原义。
 普通对话及 Agent 默认向所有模型提供已注册工具，不依赖 model_type、capabilities.tools 或工作区绑定，模型自主选择是否调用。辅助标题与兼容 model.invoke 保持文本用途。每轮最多一个回答模型请求，同轮工具串行；
 model_type 是 text、image、audio、video 内容类型元数据，可多选，不作为执行开关；图片输入由 capabilities.image_input 明确声明，推理等级只作元数据。
-回答最多 8 轮模型调用、32 次工具调用。文件工具为 list_directory、read_file、search_text、apply_patch，支持绝对路径；相对路径需要工作区基准，不接受 .. 越界。无工作区的相对路径返回 path_base_required。
+不限制模型调用轮次、累计工具次数及单次响应提出的工具调用数量。模型完成、取消、应用/连接退出或不可继续的错误结束执行；保留并发、单次请求超时、Token 预算及内容边界。每次提供最多 32 个工具定义，工具参数各不超过 16 KiB，调用 ID/名称/参数累计字段字节不超过 8 MiB。执行前验证整批最小结果结构可容纳，真实结果逐次检查累计上下文，已发生操作及结果照常审计。当前执行工具链不被拆分压缩，达到资源边界时明确失败。文件工具为 list_directory、read_file、search_text、apply_patch，支持绝对路径；相对路径需要工作区基准，不接受 .. 越界。无工作区的相对路径返回 path_base_required。
 工作区内绝对路径与相对路径遵守相同规则，符号链接按实际目标分类。单文件固定文件句柄，目录操作通过 os.Root 限定在单次目标目录内，目录搜索不跟随子项符号链接。
 准备阶段不读取正文或目录条目；执行前重新检查请求路径、目标身份及工作区。目标或链接在等待审批期间被替换时拒绝执行。
 模型调用与工具执行分别使用 call-timeout、tool-timeout，默认 5 分钟和 30 秒。审批没有过期时间或超时配置，等待用户决定或执行取消。

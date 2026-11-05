@@ -111,7 +111,7 @@ func TestUpgradeConversationPreservesConfigAndRollsBack(t *testing.T) {
 	if err := upgraded.DB.Raw("PRAGMA user_version").Scan(&version).Error; err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 {
+	if version != 5 {
 		t.Fatalf("升级版本错误: %d", version)
 	}
 }

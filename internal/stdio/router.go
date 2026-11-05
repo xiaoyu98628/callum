@@ -34,6 +34,10 @@ func (s *Server) handle(c *transport.Connection, line []byte) (bool, error) {
 		value, err := s.approvals.Handle(ctx, req)
 		return false, reply(value, err)
 	}
+	if strings.HasPrefix(req.Method, "user_input.") && s.inputs != nil {
+		value, err := s.inputs.Handle(ctx, req)
+		return false, reply(value, err)
+	}
 	if strings.HasPrefix(req.Method, "settings.") && s.settings != nil {
 		value, err := s.settings.Handle(ctx, req)
 		return false, reply(value, err)

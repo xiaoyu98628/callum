@@ -111,31 +111,6 @@ func Run(ctx context.Context, db *gorm.DB, models ...any) (err error) {
 		}
 		fallthrough
 	case contextVersion:
-		if version == contextVersion {
-			if err := validateModelConfig(tx, models[:2]); err != nil {
-				return err
-			}
-			if err := validateConversationCore(tx, models[2:7]); err != nil {
-				return err
-			}
-			if err := validateRunApprovals(tx, models[6], models[7]); err != nil {
-				return err
-			}
-			if err := validateAppSettings(tx, models[4], models[8]); err != nil {
-				return err
-			}
-			if err := validateContextVersions(tx, models[9]); err != nil {
-				return err
-			}
-		}
-		if err := migrateTokenCompaction(tx); err != nil {
-			return err
-		}
-		if err := tx.Exec("PRAGMA user_version = 6").Error; err != nil {
-			return err
-		}
-		fallthrough
-	case tokenCompactionVersion:
 		if err := validateModelConfig(tx, models[:2]); err != nil {
 			return err
 		}
@@ -149,9 +124,6 @@ func Run(ctx context.Context, db *gorm.DB, models ...any) (err error) {
 			return err
 		}
 		if err := validateContextVersions(tx, models[9]); err != nil {
-			return err
-		}
-		if err := validateTokenCompaction(tx); err != nil {
 			return err
 		}
 	default:

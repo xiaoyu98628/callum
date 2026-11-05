@@ -20,6 +20,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
 	settingshandler "github.com/xiaoyu98628/callum/internal/stdio/settings"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
+	userinputhandler "github.com/xiaoyu98628/callum/internal/stdio/userinput"
 	workspacehandler "github.com/xiaoyu98628/callum/internal/stdio/workspace"
 	workspaceservice "github.com/xiaoyu98628/callum/internal/workspace/service"
 )
@@ -34,6 +35,7 @@ type Server struct {
 	logger       *slog.Logger
 	approvals    *approvalhandler.Handler
 	settings     *settingshandler.Handler
+	inputs       *userinputhandler.Handler
 }
 
 // NewWithConversations 装配普通对话接口；所有服务和资源仍由 app 持有。
@@ -47,6 +49,7 @@ func NewWithConversations(providers *providerservice.Service, runs *executor.Man
 	}
 	s.approvals = approvalhandler.New(approvals)
 	s.settings = settingshandler.New(settings)
+	s.inputs = userinputhandler.New(persistent)
 	s.workspace = workspacehandler.New(workspaces)
 	s.conversation = conversationhandler.New(conversations, accepted)
 	s.execution = execution.NewPersistent(runs, persistent, accepted)

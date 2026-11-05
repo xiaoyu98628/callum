@@ -49,8 +49,6 @@ func failure(err error) (status, kind, message string) {
 		return status, "token_budget_exceeded", "保留上下文或单个完整轮次超过 Token 预算，请调整预算或保留轮次"
 	case errors.Is(err, compaction.ErrNoReduction):
 		return status, "compaction_not_reduced", "摘要未能缩小上下文，原有效版本已保留"
-	case errors.Is(err, ErrIterationLimit):
-		return status, "iteration_limit", "Agent 调用次数达到上限"
 	case errors.Is(err, agent.ErrStorage):
 		return status, "internal", "保存执行数据失败"
 	case errors.Is(err, context.Canceled):

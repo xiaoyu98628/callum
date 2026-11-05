@@ -58,18 +58,22 @@ func (e *Engine) ExecuteCompaction(ctx context.Context, lease *executor.Lease, e
 	_ = e.event(ex, "run."+ex.Run.Status, "", "", ex.Run)
 }
 
-// manualCompaction 按完整轮次分批，每批生成独立可追溯版本；准备窗口和模型调用次数都有界。
+// manualCompaction 按完整轮次持续推进，每批生成可追溯版本；资源有界，不限制调用批次。
 func (e *Engine) manualCompaction(ctx context.Context, ex *conversation.Execution, resolved agent.Resolved, traces map[string][]model.Message) error {
 	step := ex.Step
-	for pass := range 8 {
+	first := true
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		plan, err := compressionPlan(*ex, resolved, traces, ex.Run.SettingsSnapshot.Compaction.RetainTurns)
 		if err != nil {
 			return err
 		}
-		if len(plan.Sources) == 0 && pass > 0 {
+		if len(plan.Sources) == 0 && !first {
 			return nil
 		}
-		if pass > 0 {
+		if !first {
 			id, err := uuid.NewV7()
 			if err != nil {
 				return err
@@ -90,6 +94,7 @@ func (e *Engine) manualCompaction(ctx context.Context, ex *conversation.Executio
 		if len(plan.Sources) == 0 {
 			return nil
 		}
+		first = false
 		ex.Context = version
 		kept := make([]conversation.Message, 0, len(ex.History))
 		for _, row := range ex.History {
@@ -99,14 +104,6 @@ func (e *Engine) manualCompaction(ctx context.Context, ex *conversation.Executio
 		}
 		ex.History = kept
 	}
-	plan, err := compressionPlan(*ex, resolved, traces, ex.Run.SettingsSnapshot.Compaction.RetainTurns)
-	if err != nil {
-		return err
-	}
-	if len(plan.Sources) == 0 {
-		return nil
-	}
-	return ErrIterationLimit
 }
 
 func contextMessages(version *conversation.ContextVersion, messages []model.Message) []model.Message {
@@ -127,7 +124,10 @@ func (e *Engine) automaticContext(ctx context.Context, ex *conversation.Executio
 	if err != nil {
 		return nil, model.ErrTokenBudget
 	}
-	for range 8 {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		effective := append(fixed, contextMessages(ex.Context, messages)...)
 		estimate := meter.Estimate(effective, definitions, cfg.ImageTokenEstimate)
 		if estimate.Tokens <= budget {
@@ -171,10 +171,6 @@ func (e *Engine) automaticContext(ctx context.Context, ex *conversation.Executio
 		ex.History = kept
 		messages = messages[len(plan.Messages):]
 	}
-	if meter.Estimate(append(fixed, contextMessages(ex.Context, messages)...), definitions, cfg.ImageTokenEstimate).Tokens <= budget {
-		return messages, nil
-	}
-	return nil, ErrIterationLimit
 }
 
 func summaryInput(version *conversation.ContextVersion, messages []model.Message) []model.Message {
@@ -190,6 +186,16 @@ func compressionPlan(ex conversation.Execution, resolved agent.Resolved, traces 
 	})
 	if budgetErr != nil && err != nil {
 		return compaction.Plan{}, model.ErrTokenBudget
+	}
+	// 每次成功必须消费新的源范围；无进展直接失败，不通过固定次数掩盖循环问题。
+	if err == nil && len(plan.Sources) > 0 {
+		floor := int64(0)
+		if ex.Context != nil {
+			floor = ex.Context.ThroughSequence
+		}
+		if len(plan.Messages) == 0 || plan.Through <= floor || len(ex.History) == 0 || plan.Through < ex.History[0].Sequence {
+			return compaction.Plan{}, compaction.ErrNoReduction
+		}
 	}
 	return plan, err
 }

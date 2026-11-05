@@ -8,6 +8,7 @@ import (
 
 // Repository 保存执行及步骤；恢复只能在取得应用数据目录独占运行权后调用。
 type Repository interface {
+	UserInputRepository
 	Get(context.Context, string) (Run, error)
 	List(context.Context, string, int, int) ([]Run, error)
 	GetStep(context.Context, string) (Step, error)

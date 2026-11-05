@@ -86,7 +86,7 @@ func TestFileToolsIndependentOfWorkspaceThroughStdio(t *testing.T) {
 					w.WriteHeader(400)
 					return
 				}
-				if len(request.Tools) != 5 {
+				if len(request.Tools) != 6 {
 					t.Errorf("未绑定工作区时丢失工具定义: %d", len(request.Tools))
 				}
 				last := request.Messages[len(request.Messages)-1]

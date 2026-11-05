@@ -51,7 +51,8 @@ func (m *Manager) ReserveContext(ctx context.Context, id, key string) (*Lease, e
 	return m.reserveContext(ctx, id, key, false)
 }
 
-// ReserveAgentContext 的生命周期由有界调用循环和审批超时控制，审批等待不消耗模型超时。
+// ReserveAgentContext 持续到业务完成、取消或错误；不设总调用次数和审批等待超时。
+// 每次模型和工具请求分别控制超时，等待审批不消耗模型超时。
 func (m *Manager) ReserveAgentContext(ctx context.Context, id, key string) (*Lease, error) {
 	return m.reserveContext(ctx, id, key, true)
 }

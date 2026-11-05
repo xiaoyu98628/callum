@@ -1,6 +1,6 @@
 # JSON-RPC 通信与手工测试
 
-本文按当前代码整理已实现的 stdio JSON-RPC 接口，共 42 个方法。协议版本为 `1`，数据库结构版本为 `6`，两者含义不同。
+本文按当前代码整理已实现的 stdio JSON-RPC 接口，共 42 个方法。协议版本为 `1`，数据库结构版本为 `5`，两者含义不同。
 
 ## 1. 启动及输入约定
 
@@ -386,7 +386,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 ### 9.1 上下文压缩
 
-压缩设置通过现有设置接口读写，`value` 必须完整提供四个字段。revision 必须使用实际读取值：
+压缩设置通过现有设置接口读写，`value` 必须完整提供六个字段。revision 必须使用实际读取值：
 
 ```json
 {"jsonrpc":"2.0","id":"context-settings","method":"settings.get","params":{"key":"context_compaction"}}
@@ -399,7 +399,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 每次回答模型请求前，将摘要、有效消息、图片估算、工具定义、调用与结果及服务端操作事实计入本地 Token 估算；超过预算才触发压缩。保留指定已结束轮次、当前问题及完整当前工具链，压缩后重新计算；摘要模型的源批次也必须满足预算。没有可安全压缩的完整旧轮次时明确失败，不静默丢弃内容。消息数量和 JSON 字节仅作为 256 条、8 MiB 等资源安全边界，不触发压缩。
 
-估算方法 unicode-v1 按有效文本字符、代码标点和封装开销计算，图片使用可配置单图估算；不是厂商 tokenizer。仅在同一执行的请求前缀和工具定义未变时，可参考上一轮实际 prompt_tokens 并估算增量；不以累计 usage 判断当前上下文，估算不写入 usage。无效预算使异步执行以 token_budget_unconfigured 失败；必须保留的输入或单个源轮次超预算时为 token_budget_exceeded。远端仍负责最终容量校验，失败不自动重发。旧设置升级保留开关与轮次、递增 revision；旧执行快照和既有摘要原样保留。
+估算方法 unicode-v1 按有效文本字符、代码标点和封装开销计算，图片使用可配置单图估算；不是厂商 tokenizer。仅在同一执行的请求前缀和工具定义未变时，可参考上一轮实际 prompt_tokens 并估算增量；不以累计 usage 判断当前上下文，估算不写入 usage。无效预算使异步执行以 token_budget_unconfigured 失败；必须保留的输入或单个源轮次超预算时为 token_budget_exceeded。远端仍负责最终容量校验，失败不自动重发。context_compaction 直接初始化当前 Token 配置，revision 为 1；旧条数/字节设置及相应执行快照不做自动转换，版本 6 数据库不受支持。拒绝时保留已有数据和版本，不删除或重建数据库。
 
 #### conversation.compact
 
@@ -409,6 +409,8 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 ```
 
 可选 `model_id` 指定摘要模型，省略时使用会话当前模型；不改变会话的模型选择。关闭自动压缩后仍可手动调用；需要生成摘要时仍必须具备有效 Token 预算，没有较早完整轮次的无操作请求不调用模型。受理后保持 stdin 打开，通过 `run.cancel` 取消；同一会话已有执行时拒绝并发受理。使用 `run.started`、`step.created`、`step.updated` 及执行终态通知，不创建新的用户或回答消息，也不把摘要发送为 `message.delta`。没有较早完整轮次时正常完成，编排步骤 output 为 `{"compressed":false,"reason":"no_earlier_complete_turns"}`。
+
+压缩不设固定批次上限：手动压缩直到没有可压缩的较早轮次，自动压缩直到请求回到预算内。每批必须推进来源范围并减少摘要 Token 估算；循环检查取消，无法满足预算或资源边界时明确失败。
 
 每批创建 `context_compression` 步骤，其 `input.trigger` 保存 type（manual/automatic）和 reason；自动触发另含 token_budget 和 estimate（input_tokens、method、可选 reference_input_tokens），另保存压缩设置版本、来源数量和覆盖顺序；子 `model_call` 的 purpose 为 `context_summary`，只由该子步骤保存实际 usage。摘要模型不获得工具。成功父步骤 output 包含 `compressed:true`、`context_version_id`、`size_stats`；摘要正文通过版本详情查询。回答模型步骤 input.context_version_id 指向实际使用的有效摘要；摘要模型步骤的 generated_context_version_id 指向它正在生成的版本，可另带实际输入的 context_version_id。
 
@@ -479,6 +481,10 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 工作区软删除不删除磁盘上的目录和文件。恢复仅清除删除状态；归档状态如需清除，另发 `workspace.update`。
 
 ## 11. 工具调用及审批
+
+Agent 不设固定模型轮次、累计工具次数或单次响应工具调用数量上限，也不再因调用次数产生 iteration_limit。执行持续到模型完成、用户取消、连接/应用退出或不可继续的错误。历史执行中已有的错误记录保留原值。并发、单次模型/工具超时、审批、Token 预算及内容边界继续生效。
+
+单次请求最多提供 32 个工具定义；每个工具参数不超过 16 KiB，响应中调用 ID、名称和参数的累计字段字节不超过 8 MiB，原始上游响应不超过 16 MiB。工具调用参数完整后才执行；执行前检查整批调用及最小结果结构容量，实际结果逐次检查累计上下文。触及资源边界停止并保留已发生操作及结果，不自动重试；当前问题和整个当前执行工具链仍保留原文。
 
 ### 11.1 默认工具调用
 

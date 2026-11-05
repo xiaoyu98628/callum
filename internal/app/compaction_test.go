@@ -21,11 +21,12 @@ import (
 )
 
 type compactModel struct {
-	mode      atomic.Int32
-	summaries atomic.Int32
-	mu        sync.Mutex
-	answers   map[string]string
-	started   chan struct{}
+	mode       atomic.Int32
+	summaries  atomic.Int32
+	blockAfter atomic.Int32
+	mu         sync.Mutex
+	answers    map[string]string
+	started    chan struct{}
 }
 
 func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
@@ -60,6 +61,9 @@ func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
 				}
 				text = string(content)
 			case 2:
+				if after := m.blockAfter.Load(); after > 0 && m.summaries.Load() < after {
+					break
+				}
 				select {
 				case m.started <- struct{}{}:
 				default:
@@ -234,6 +238,7 @@ func TestCompactionManualFailureCancelAndRestartThroughStdio(t *testing.T) {
 }
 
 func TestAutomaticCompactionSurvivesLongHistoryAndKeepsConversationsIsolated(t *testing.T) {
+	t.Parallel()
 	upstream, server := compactionEndpoint(t)
 	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
 	if err != nil {
@@ -245,7 +250,8 @@ func TestAutomaticCompactionSurvivesLongHistoryAndKeepsConversationsIsolated(t *
 	compression.TokenBudget, compression.RetainTurns = 25000, 1
 	compactionSetting(t, p, compression)
 	cid := ""
-	for i := range 135 {
+	// 129 轮产生 258 条消息，跨过原 256 条边界；数据库与模型端点均由本用例独占。
+	for i := range 129 {
 		cid = compactSend(t, p, mid, cid, fmt.Sprintf("长对话-%03d-", i)+strings.Repeat("必须保留目标。", 40))
 	}
 	versions := contextVersions(t, p, cid)
@@ -258,7 +264,7 @@ func TestAutomaticCompactionSurvivesLongHistoryAndKeepsConversationsIsolated(t *
 	if err := json.Unmarshal(page.Result, &messages); err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 200 || messages[len(messages)-1].Sequence != 270 {
+	if len(messages) != 200 || messages[len(messages)-1].Sequence != 258 {
 		t.Fatal("长对话丢失原文或超过旧上限后未继续")
 	}
 	other := compactSend(t, p, mid, "", "独立会话问题")
@@ -355,4 +361,145 @@ func TestManualCompactionWithoutEarlierHistoryIsAnExplicitNoop(t *testing.T) {
 	if !strings.Contains(string(output.Result), "no_earlier_complete_turns") {
 		t.Fatal("缺少无操作说明")
 	}
+}
+
+func manyBatchHistory(t *testing.T, p *appPeer, modelID string) string {
+	t.Helper()
+	compression := settings.DefaultCompaction()
+	compression.Enabled, compression.RetainTurns = false, 1
+	compactionSetting(t, p, compression)
+	cid := ""
+	for i := range 11 {
+		cid = compactSend(t, p, modelID, cid, fmt.Sprintf("历史问题%d-", i)+strings.Repeat("历史内容", 300))
+	}
+	return compactSend(t, p, modelID, cid, "最近轮次必须保留")
+}
+
+func TestCompactionContinuesBeyondPreviousBatchLimit(t *testing.T) {
+	t.Parallel()
+	for _, automatic := range []bool{false, true} {
+		t.Run(fmt.Sprint(automatic), func(t *testing.T) {
+			t.Parallel()
+			upstream, server := compactionEndpoint(t)
+			cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.MaxConcurrentRuns = 1
+			p := startApp(t, cfg, io.Discard)
+			mid := setupConversationModel(t, p, server.URL)
+			cid := manyBatchHistory(t, p, mid)
+			compression := settings.DefaultCompaction()
+			compression.Enabled, compression.TokenBudget, compression.RetainTurns = automatic, 5000, 1
+			compactionSetting(t, p, compression)
+			method := "conversation.compact"
+			params := map[string]any{"conversation_id": cid}
+			if automatic {
+				method = "conversation.send"
+				params["stream"] = false
+				params["content"] = messageBlocks("当前问题必须保留")
+			}
+			runID := resultString(t, p.call(t, method, params), "run_id")
+			p.event(t, "run.completed")
+			versions := contextVersions(t, p, cid)
+			if len(versions) != 11 || versions[0].Status != "active" || versions[0].ThroughSequence != 22 || upstream.summaries.Load() != 11 {
+				t.Fatalf("超过八批后未继续或范围错误: %+v calls=%d", versions, upstream.summaries.Load())
+			}
+			for i, version := range versions {
+				if i > 0 && version.Status != "superseded" {
+					t.Fatalf("摘要版本未原子切换: %+v", version)
+				}
+			}
+			frame := p.call(t, "step.list", map[string]any{"run_id": runID, "limit": 200})
+			requireOK(t, frame)
+			var steps []agent.StepSummary
+			if err := json.Unmarshal(frame.Result, &steps); err != nil {
+				t.Fatal(err)
+			}
+			parents, children := 0, 0
+			for _, step := range steps {
+				if step.Status != agent.Completed {
+					t.Fatalf("压缩步骤未完成: %+v", step)
+				}
+				if step.Type == "context_compression" {
+					parents++
+				}
+				if step.Name == "生成历史摘要" {
+					children++
+					if step.ParentStepID == nil || step.UsageBytes == 0 {
+						t.Fatal("摘要子步骤或实际 usage 丢失")
+					}
+				}
+			}
+			if parents != 11 || children != 11 {
+				t.Fatalf("批次步骤未完整保存: %d %d", parents, children)
+			}
+			wantMessages := 24
+			if automatic {
+				wantMessages = 26
+			}
+			if len(readMessages(t, p, cid)) != wantMessages {
+				t.Fatal("多批压缩删除了原文或创建了额外消息")
+			}
+			p.stop(t)
+		})
+	}
+}
+
+func TestCompactionCanCancelBeyondPreviousBatchLimit(t *testing.T) {
+	t.Parallel()
+	upstream, server := compactionEndpoint(t)
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.MaxConcurrentRuns = 1
+	p := startApp(t, cfg, io.Discard)
+	mid := setupConversationModel(t, p, server.URL)
+	cid := manyBatchHistory(t, p, mid)
+	compression := settings.DefaultCompaction()
+	compression.Enabled, compression.TokenBudget, compression.RetainTurns = false, 5000, 1
+	compactionSetting(t, p, compression)
+	upstream.mode.Store(2)
+	upstream.blockAfter.Store(10)
+	runID := resultString(t, p.call(t, "conversation.compact", map[string]any{"conversation_id": cid}), "run_id")
+	children := 0
+	for children < 10 {
+		frame := p.read(t)
+		p.pending = append(p.pending, frame)
+		if frame.Method == "run.failed" || frame.Method == "run.completed" {
+			t.Fatalf("压缩提前结束: %s", frame.Params)
+		}
+		if frame.Method == "step.created" {
+			var value struct {
+				Step agent.StepSummary `json:"step"`
+			}
+			if err := json.Unmarshal(frame.Params, &value); err != nil {
+				t.Fatal(err)
+			}
+			if value.Step.Name == "生成历史摘要" {
+				children++
+			}
+		}
+	}
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-upstream.started:
+	case <-timer.C:
+		t.Fatal("第十批摘要没有开始")
+	}
+	requireOK(t, p.call(t, "run.cancel", map[string]any{"run_id": runID}))
+	p.event(t, "run.cancelled")
+	versions := contextVersions(t, p, cid)
+	if len(versions) != 10 || versions[0].Status != "failed" || versions[1].Status != "active" || versions[1].ThroughSequence != 18 {
+		t.Fatalf("取消损坏已提交批次: %+v", versions)
+	}
+	upstream.mode.Store(0)
+	resultString(t, p.call(t, "conversation.compact", map[string]any{"conversation_id": cid}), "run_id")
+	p.event(t, "run.completed")
+	if versions := contextVersions(t, p, cid); len(versions) != 12 || versions[0].Status != "active" || versions[0].ThroughSequence != 22 {
+		t.Fatalf("取消后不能继续压缩: %+v", versions)
+	}
+	p.stop(t)
 }

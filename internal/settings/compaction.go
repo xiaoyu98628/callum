@@ -57,7 +57,7 @@ func (c Compaction) InputBudget(window, maxOutput int64) (int64, error) {
 	return budget, nil
 }
 
-// DecodeCompaction 拒绝缺失、重复、未知字段及尾随 JSON；旧阈值只在历史快照中读取。
+// DecodeCompaction 拒绝缺失、重复、未知字段及尾随 JSON。
 func DecodeCompaction(raw json.RawMessage) (Compaction, error) {
 	var out Compaction
 	fields, err := compactionFields(raw)

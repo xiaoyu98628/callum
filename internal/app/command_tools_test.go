@@ -129,7 +129,7 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 					writeFileToolResponse(t, w, input.Stream, map[string]any{"content": "命令测试"}, "stop")
 					return
 				}
-				if len(input.Tools) != 5 {
+				if len(input.Tools) != 6 {
 					t.Errorf("工具数量不符: %d", len(input.Tools))
 				}
 				last := input.Messages[len(input.Messages)-1]

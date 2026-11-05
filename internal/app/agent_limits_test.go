@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/config"
@@ -25,10 +26,14 @@ func setupToolWorkspace(t *testing.T, p *appPeer) string {
 	return resultString(t, p.call(t, "workspace.create", map[string]any{"name": "工作区", "root_path": root}), "id")
 }
 
-func TestAgentRejectsRepeatedOperationAndLimitsLoop(t *testing.T) {
+func TestAgentContinuesAfterRejectedRepeatedOperation(t *testing.T) {
+	t.Parallel()
 	var requests atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
+		if requests.Add(1) == 12 {
+			writeFileToolResponse(t, w, false, map[string]any{"content": "已停止重复操作"}, "stop")
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"call","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"total_tokens":1}}`)
 	}))
@@ -52,15 +57,15 @@ func TestAgentRejectsRepeatedOperationAndLimitsLoop(t *testing.T) {
 		t.Fatal(err)
 	}
 	requireOK(t, p.call(t, "approval.decide", map[string]any{"approval_id": payload.ID, "decision": "rejected"}))
-	failed := p.event(t, "run.failed")
+	completed := p.event(t, "run.completed")
 	var result struct {
 		Run agent.Run `json:"run"`
 	}
-	if err := json.Unmarshal(failed.Params, &result); err != nil {
+	if err := json.Unmarshal(completed.Params, &result); err != nil {
 		t.Fatal(err)
 	}
-	if requests.Load() != 8 || result.Run.ErrorKind == nil || *result.Run.ErrorKind != "iteration_limit" {
-		t.Fatalf("未限制模型循环: %d %+v", requests.Load(), result.Run)
+	if requests.Load() != 12 || result.Run.Status != agent.Completed || result.Run.ErrorKind != nil {
+		t.Fatalf("超过原轮次限制后未完成: %d %+v", requests.Load(), result.Run)
 	}
 	records := p.call(t, "approval.list", map[string]any{"run_id": runID})
 	requireOK(t, records)
@@ -69,6 +74,95 @@ func TestAgentRejectsRepeatedOperationAndLimitsLoop(t *testing.T) {
 		t.Fatalf("相同拒绝操作重新申请审批: %s %v", records.Result, err)
 	}
 	p.stop(t)
+}
+
+func TestContinuousAgentCanCancelOrShutdownBeyondPreviousLimit(t *testing.T) {
+	t.Parallel()
+	for _, action := range []string{"cancel", "shutdown"} {
+		t.Run(action, func(t *testing.T) {
+			var requests atomic.Int32
+			started := make(chan struct{}, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				// 读完请求体后 HTTP 服务才能可靠感知客户端断连；测试结束也必须释放等待。
+				if _, err := io.Copy(io.Discard, r.Body); err != nil {
+					t.Error(err)
+					return
+				}
+				if requests.Add(1) == 10 {
+					started <- struct{}{}
+					select {
+					case <-r.Context().Done():
+					case <-t.Context().Done():
+					}
+					return
+				}
+				writeFileToolResponse(t, w, false, map[string]any{"tool_calls": []any{map[string]any{"id": "call", "type": "function", "function": map[string]string{"name": "missing_tool", "arguments": `{}`}}}}, "tool_calls")
+			}))
+			t.Cleanup(upstream.Close)
+			cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.MaxConcurrentRuns = 1
+			p := startApp(t, cfg, io.Discard)
+			mid := setupConversationModel(t, p, upstream.URL)
+			response := p.call(t, "conversation.send", map[string]any{"model_id": mid, "stream": false, "content": messageBlocks("持续调用")})
+			runID := resultString(t, response, "run_id")
+			// 持续消费事件，不能让未读取的 stdio 输出阻塞服务而使取消测试失真。
+			for {
+				frame := p.read(t)
+				p.pending = append(p.pending, frame)
+				if frame.Method == "run.failed" || frame.Method == "run.completed" {
+					t.Fatalf("持续执行提前结束: %s", frame.Params)
+				}
+				if frame.Method == "step.updated" && strings.Contains(string(frame.Params), `"round":10`) {
+					break
+				}
+			}
+			timer := time.NewTimer(3 * time.Second)
+			defer timer.Stop()
+			select {
+			case <-started:
+			case <-timer.C:
+				t.Fatal("未进入第十轮模型请求")
+			}
+			if action == "cancel" {
+				requireOK(t, p.call(t, "run.cancel", map[string]any{"run_id": runID}))
+				p.event(t, "run.cancelled")
+				frame := p.call(t, "step.list", map[string]any{"run_id": runID})
+				requireOK(t, frame)
+				var steps []agent.StepSummary
+				if err := json.Unmarshal(frame.Result, &steps); err != nil {
+					t.Fatal(err)
+				}
+				tools := 0
+				for _, step := range steps {
+					if step.Type == "tool_call" {
+						tools++
+						if step.OutputBytes == 0 {
+							t.Fatal("取消清除了已发生工具结果")
+						}
+					}
+				}
+				if tools != 9 {
+					t.Fatalf("工具审计不完整: %d", tools)
+				}
+				p.stop(t)
+			} else {
+				p.stop(t)
+				cancelled := false
+				for _, frame := range p.pending {
+					cancelled = cancelled || frame.Method == "run.cancelled"
+				}
+				if !cancelled {
+					t.Fatal("关闭应用未取消持续执行")
+				}
+			}
+			if requests.Load() != 10 {
+				t.Fatalf("取消或关闭后仍发起请求: %d", requests.Load())
+			}
+		})
+	}
 }
 
 func TestPausedAgentIsolationAndShutdown(t *testing.T) {

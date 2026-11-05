@@ -2,6 +2,7 @@ package settings_test
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/xiaoyu98628/callum/internal/settings"
@@ -18,12 +19,11 @@ func TestCompactionSettingsAreExplicitAndSnapshotIsIndependent(t *testing.T) {
 		t.Fatalf("默认配置无效: %+v %v", parsed, err)
 	}
 	for _, invalid := range []string{
-		`{}`, `null`, `{"enabled":null,"message_threshold":128,"byte_threshold":4194304,"retain_turns":4}`,
-		`{"enabled":true,"enabled":false,"message_threshold":128,"byte_threshold":4194304,"retain_turns":4}`,
-		`{"enabled":true,"message_threshold":257,"byte_threshold":4194304,"retain_turns":4}`,
-		`{"enabled":true,"message_threshold":128,"byte_threshold":1023,"retain_turns":4}`,
-		`{"enabled":true,"message_threshold":128,"byte_threshold":4194304,"retain_turns":0}`,
-		`{"enabled":true,"message_threshold":128,"byte_threshold":4194304,"retain_turns":4,"model_id":"override"}`,
+		`{}`, `null`,
+		strings.Replace(string(raw), `"enabled":true`, `"enabled":null`, 1),
+		strings.Replace(string(raw), `"enabled":true`, `"enabled":true,"enabled":false`, 1),
+		strings.Replace(string(raw), `"retain_turns":4`, `"retain_turns":0`, 1),
+		strings.Replace(string(raw), `"retain_turns":4`, `"retain_turns":4,"model_id":"override"`, 1),
 		string(raw) + " {}",
 		`{"enabled":true,"token_budget":-1,"output_reserve":4096,"safety_margin":1024,"image_token_estimate":8192,"retain_turns":4}`,
 		`{"enabled":true,"token_budget":0,"output_reserve":0,"safety_margin":1024,"image_token_estimate":8192,"retain_turns":4}`,
@@ -65,25 +65,35 @@ func TestTokenBudgetUsesConfiguredCapacityAndExplicitFallback(t *testing.T) {
 	}
 }
 
-func TestLegacyCompactionSnapshotRemainsHistorical(t *testing.T) {
-	raw := []byte(`{"revision":7,"enabled":true,"message_threshold":64,"byte_threshold":2000,"retain_turns":2}`)
-	var old settings.CompactionSnapshot
-	if err := json.Unmarshal(raw, &old); err != nil || !old.Valid() {
-		t.Fatalf("旧快照不可读取: %v", err)
+func TestCompactionSnapshotRoundTripAndValidation(t *testing.T) {
+	original := settings.CompactionSnapshot{Revision: 7, Compaction: settings.DefaultCompaction()}
+	original.Enabled, original.TokenBudget, original.RetainTurns = false, 3000, 2
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
 	}
-	encoded, err := json.Marshal(old)
-	if err != nil || string(encoded) != string(raw) {
-		t.Fatalf("历史策略被改写: %s %v", encoded, err)
+	var parsed settings.CompactionSnapshot
+	if err := json.Unmarshal(raw, &parsed); err != nil || !parsed.Valid() || parsed != original {
+		t.Fatalf("执行快照未完整保存: %+v %v", parsed, err)
 	}
-	if _, err := settings.DecodeCompaction(raw); err == nil {
-		t.Fatal("旧阈值进入当前设置接口")
-	}
-	upgraded, changed, err := settings.UpgradeCompaction(nil)
-	if err == nil || changed {
-		t.Fatal("非法迁移输入使用默认设置")
-	}
-	upgraded, changed, err = settings.UpgradeCompaction([]byte(`{"enabled":false,"message_threshold":64,"byte_threshold":2000,"retain_turns":2}`))
-	if err != nil || !changed || upgraded.Enabled || upgraded.RetainTurns != 2 || upgraded.TokenBudget != 0 {
-		t.Fatal("旧策略升级丢失开关或虚构 Token 预算")
+	for _, invalid := range []string{
+		`{}`, `null`, `{"revision":7}`,
+		`{"revision":7,"enabled":true,"message_threshold":64,"byte_threshold":2000,"retain_turns":2}`,
+		strings.Replace(string(raw), `"revision":7,`, "", 1),
+		strings.Replace(string(raw), `"revision":7`, `"revision":0`, 1),
+		strings.Replace(string(raw), `"revision":7`, `"revision":null`, 1),
+		strings.Replace(string(raw), `"revision":7`, `"revision":7,"revision":8`, 1),
+		strings.Replace(string(raw), `"token_budget":3000`, `"token_budget":null`, 1),
+		strings.Replace(string(raw), `"output_reserve":4096,`, "", 1),
+		strings.Replace(string(raw), `"retain_turns":2`, `"retain_turns":0`, 1),
+		strings.Replace(string(raw), `"retain_turns":2`, `"retain_turns":2,"unknown":true`, 1),
+		string(raw) + " {}",
+	} {
+		if err := json.Unmarshal([]byte(invalid), &parsed); err == nil {
+			t.Fatalf("接受无效执行快照: %s", invalid)
+		}
+		if parsed != original {
+			t.Fatalf("解码失败改写了已有快照: %+v", parsed)
+		}
 	}
 }

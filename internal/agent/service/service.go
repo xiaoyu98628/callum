@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
@@ -21,6 +22,8 @@ type Engine struct {
 	emit          func(agent.Event) error
 	logger        *slog.Logger
 	options       Options
+	inputMu       sync.Mutex
+	inputSignals  map[string]chan struct{}
 }
 
 // Options 保存运行时依赖；审批设置来自每次执行受理时持久化的快照。
@@ -35,7 +38,12 @@ func New(repository agent.Repository, conversations conversation.Repository, man
 	if repository == nil || conversations == nil || manager == nil || emit == nil || logger == nil || options.CallTimeout <= 0 || options.Tools == nil || options.Approvals == nil || options.Workspace == nil {
 		return nil, agent.ErrInvalid
 	}
-	return &Engine{repository: repository, conversations: conversations, manager: manager, emit: emit, logger: logger, options: options}, nil
+	for _, definition := range options.Tools.Definitions() {
+		if definition.Name == agent.UserInputTool {
+			return nil, agent.ErrInvalid
+		}
+	}
+	return &Engine{repository: repository, conversations: conversations, manager: manager, emit: emit, logger: logger, options: options, inputSignals: make(map[string]chan struct{})}, nil
 }
 
 func (e *Engine) event(ex conversation.Execution, name, stepID, messageID string, data any) error {

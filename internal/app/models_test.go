@@ -49,7 +49,7 @@ func TestImageInputUsesCapabilityRatherThanContentType(t *testing.T) {
 					w.WriteHeader(400)
 					return
 				}
-				if len(request.Tools) != 5 || len(request.Messages) != 1 || len(request.Messages[0].Content) != 2 || !strings.HasPrefix(request.Messages[0].Content[1].ImageURL.URL, "data:image/png;base64,") {
+				if len(request.Tools) != 6 || len(request.Messages) != 1 || len(request.Messages[0].Content) != 2 || !strings.HasPrefix(request.Messages[0].Content[1].ImageURL.URL, "data:image/png;base64,") {
 					t.Error("图片转换或默认工具定义丢失")
 				}
 				w.Header().Set("Content-Type", "application/json")

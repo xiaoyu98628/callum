@@ -86,59 +86,63 @@ func TestMigrationRollback(t *testing.T) {
 	if err := pool.QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_schema WHERE name IN ('model_providers', 'models')").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 || tables != 2 {
+	if version != 5 || tables != 2 {
 		t.Fatalf("具体迁移未完整提交: version=%d tables=%d", version, tables)
 	}
 }
 
 func TestFutureVersionPreserved(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "data", "callum.db")
-	db, err := sqlite.Open(t.Context(), path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := db.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	var initializedVersion int
-	if err := db.DB.Raw("PRAGMA user_version").Scan(&initializedVersion).Error; err != nil {
-		t.Fatal(err)
-	}
-	if initializedVersion != 6 {
-		t.Fatalf("新库结构版本错误: %d", initializedVersion)
-	}
-	if err := db.DB.WithContext(t.Context()).Exec("PRAGMA user_version = 99").Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	opened, openErr := sqlite.Open(t.Context(), path)
-	if opened != nil {
-		if err := opened.Close(); err != nil {
-			t.Error(err)
-		}
-	}
-	if openErr == nil || !strings.Contains(openErr.Error(), "不支持数据库结构版本 99") {
-		t.Fatalf("未明确拒绝未来版本: %v", openErr)
-	}
-	pool, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := pool.Close(); err != nil {
-			t.Error(err)
-		}
-	}()
-	var version int
-	if err := pool.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if version != 99 {
-		t.Fatal("更高版本被修改")
+	for _, rejectedVersion := range []int{6, 99} {
+		t.Run(fmt.Sprintf("version_%d", rejectedVersion), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "data", "callum.db")
+			db, err := sqlite.Open(t.Context(), path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := db.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			var initializedVersion int
+			if err := db.DB.Raw("PRAGMA user_version").Scan(&initializedVersion).Error; err != nil {
+				t.Fatal(err)
+			}
+			if initializedVersion != 5 {
+				t.Fatalf("新库结构版本错误: %d", initializedVersion)
+			}
+			if err := db.DB.WithContext(t.Context()).Exec(fmt.Sprintf("PRAGMA user_version = %d", rejectedVersion)).Error; err != nil {
+				t.Fatal(err)
+			}
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			opened, openErr := sqlite.Open(t.Context(), path)
+			if opened != nil {
+				if err := opened.Close(); err != nil {
+					t.Error(err)
+				}
+			}
+			if openErr == nil || !strings.Contains(openErr.Error(), fmt.Sprintf("不支持数据库结构版本 %d", rejectedVersion)) {
+				t.Fatalf("未明确拒绝未来版本: %v", openErr)
+			}
+			pool, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := pool.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			var version int
+			if err := pool.QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil {
+				t.Fatal(err)
+			}
+			if version != rejectedVersion {
+				t.Fatal("更高版本被修改")
+			}
+		})
 	}
 }
 

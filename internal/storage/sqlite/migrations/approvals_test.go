@@ -57,7 +57,7 @@ func TestApprovalUpgradeRollbackAndPreserve(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	if err := upgraded.DB.Raw("PRAGMA user_version").Scan(&version).Error; err != nil || version != 6 {
+	if err := upgraded.DB.Raw("PRAGMA user_version").Scan(&version).Error; err != nil || version != 5 {
 		t.Fatalf("迁移未完成: %d %v", version, err)
 	}
 	if upgraded.DB.Migrator().HasColumn("conversation_run_approvals", "expires_at") {

@@ -1,6 +1,7 @@
 package migrations
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -25,10 +26,12 @@ func createContextVersions(tx *gorm.DB, mapping any) error {
 	if err != nil {
 		return err
 	}
-	// 固定版本 5 的原始配置结构；后续 Token 策略必须经版本 6 显式迁移。
-	const value = `{"enabled":true,"message_threshold":128,"byte_threshold":4194304,"retain_turns":4}`
+	value, err := json.Marshal(settings.DefaultCompaction())
+	if err != nil {
+		return err
+	}
 	now := time.Now().UnixMilli()
-	return tx.Table("app_settings").Create(map[string]any{"id": id.String(), "key": settings.CompactionKey, "value": value, "revision": 1, "created_at": now, "updated_at": now}).Error
+	return tx.Table("app_settings").Create(map[string]any{"id": id.String(), "key": settings.CompactionKey, "value": string(value), "revision": 1, "created_at": now, "updated_at": now}).Error
 }
 
 func validateContextVersions(tx *gorm.DB, mapping any) error {
@@ -45,5 +48,13 @@ func validateContextVersions(tx *gorm.DB, mapping any) error {
 	if !strings.Contains(ddl, "UNIQUE INDEX") || !strings.HasSuffix(ddl, "(`conversation_id`) WHERE status = 'active'") {
 		return errors.New("有效上下文唯一索引不匹配")
 	}
-	return nil
+	var row struct {
+		Value    string
+		Revision int64
+	}
+	if err := tx.Table("app_settings").Where("key=?", settings.CompactionKey).Take(&row).Error; err != nil {
+		return err
+	}
+	_, err := settings.DecodeCompactionSnapshot(settings.Record{Key: settings.CompactionKey, Value: json.RawMessage(row.Value), Revision: row.Revision})
+	return err
 }
