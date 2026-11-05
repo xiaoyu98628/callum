@@ -142,7 +142,7 @@ func TestFileToolsIndependentOfWorkspaceThroughStdio(t *testing.T) {
 				if err := json.Unmarshal(frame.Result, &existing); err != nil {
 					t.Fatal(err)
 				}
-				requireOK(t, p.call(t, "model.update", map[string]any{"id": mid, "provider_id": existing.ProviderID, "display_name": "类型元数据", "remote_model_id": "remote-model", "enabled": true, "capabilities": test.capabilities, "model_type": test.modelTypes}))
+				requireOK(t, p.call(t, "model.update", map[string]any{"id": mid, "provider_id": existing.ProviderID, "display_name": "类型元数据", "remote_model_id": "remote-model", "enabled": true, "context_window": 1000000, "capabilities": test.capabilities, "model_type": test.modelTypes}))
 			}
 			params := map[string]any{"model_id": mid, "stream": test.stream, "content": messageBlocks("读取指定目标")}
 			if test.bound {

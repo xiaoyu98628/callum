@@ -1,6 +1,6 @@
 # 对话、执行与上下文设计
 
-本文记录已确认的目标设计。已完成普通对话、支持可选工作区的文件读取及补丁工具循环与审批；补充输入及压缩仍为规划。实际完成情况以 README 和实现为准。
+本文记录已确认的目标设计。已完成普通对话、支持可选工作区的文件读取及补丁工具循环与审批；已接通手动及自动压缩、摘要版本与来源追溯；补充输入仍为规划。实际完成情况以 README 和实现为准。
 
 ## 交付范围
 
@@ -16,7 +16,7 @@
 - JSON 使用 TEXT，保存前验证结构；问号表示允许 NULL。
 - 应用数据目录与工作区项目目录分开。测试使用临时目录。
 - 不保存模型配置凭据到会话、运行和步骤快照。
-- 不做本地 Token 预算检查，由远端校验容量；保留本地请求、响应及累计内容字节上限。
+- 普通对话按当前完整请求的输入 Token 预算触发压缩，模型容量未知时要求显式预算；保留本地请求、响应及累计内容字节安全上限。估算不保证与远端 tokenizer 一致，远端仍校验最终容量。
 - usage 原样保存模型返回的对象，缺失为 NULL，不混入估算值。
 
 ## 表结构
@@ -54,13 +54,13 @@ id TEXT PRIMARY KEY；conversation_id TEXT；replaces_run_id TEXT?；model TEXT 
 状态为 running、awaiting_approval、awaiting_user_input、completed、failed、cancelled、interrupted。
 同一会话最多一个未结束执行；不同会话受全局并发限制。手动压缩也可以创建执行，不要求有用户消息。
 replaces_run_id 仅关联被替代执行，不保留旧消息分支。所有终态填写 finished_at。
-settings_snapshot 保存受理事务读取的配置版本和实际审批设置；新执行必须保存快照，旧执行缺失时保持空值，不补造历史配置。
+settings_snapshot 保存受理事务读取的配置版本和实际审批设置及独立的 context_compaction 配置快照；新执行必须保存快照，旧执行缺失时保持空值，不补造历史配置。
 
 ### conversation_run_steps
 
-id TEXT PRIMARY KEY；conversation_id TEXT；run_id TEXT；parent_step_id TEXT?；sequence INTEGER；type TEXT；name TEXT；definition TEXT JSON?；status TEXT DEFAULT 'pending'；input TEXT JSON DEFAULT '{}'；output TEXT JSON?；usage TEXT JSON?；model TEXT JSON?；context_version_id TEXT?；provider_request_id TEXT?；tool_call_id TEXT?；error_kind TEXT?；error_message TEXT?；created_at INTEGER；started_at INTEGER?；updated_at INTEGER；finished_at INTEGER?。
+id TEXT PRIMARY KEY；conversation_id TEXT；run_id TEXT；parent_step_id TEXT?；sequence INTEGER；type TEXT；name TEXT；definition TEXT JSON?；status TEXT DEFAULT 'pending'；input TEXT JSON DEFAULT '{}'；output TEXT JSON?；usage TEXT JSON?；model TEXT JSON?；provider_request_id TEXT?；tool_call_id TEXT?；error_kind TEXT?；error_message TEXT?；created_at INTEGER；started_at INTEGER?；updated_at INTEGER；finished_at INTEGER?。
 
-context_version_id 及外键随压缩功能引入。run_id、sequence 唯一；父步骤同执行，步骤和执行同会话。
+回答模型使用的 context_version_id 保存在步骤 input JSON，摘要模型用 generated_context_version_id 标明产物；通过版本查询追溯，不增加循环外键。run_id、sequence 唯一；父步骤同执行，步骤和执行同会话。
 类型为 model_call、tool_call、user_input、context_compression；状态在执行状态基础上增加 pending。
 Skill、MCP、插件产生的实际工具调用统一为 tool_call，definition 记录工具名称、来源实例及定义版本或内容指纹。
 model_call.input 保存参数、上下文来源及内容指纹；output 保存完整结构化模型结果和协议标识。
@@ -76,13 +76,15 @@ model_call.input 保存参数、上下文来源及内容指纹；output 保存�
 
 ### conversation_context_versions
 
-随压缩引入：id TEXT PRIMARY KEY；conversation_id TEXT；version INTEGER；base_version_id TEXT?；generated_by_step_id TEXT；summary TEXT?；source_manifest TEXT JSON；token_stats TEXT JSON?；status TEXT DEFAULT 'building'；created_at INTEGER；updated_at INTEGER；activated_at INTEGER?；invalidated_at INTEGER?。
+已实现：id TEXT PRIMARY KEY；conversation_id TEXT；version INTEGER；base_version_id TEXT?；generated_by_step_id TEXT；through_sequence INTEGER；summary TEXT；source_manifest TEXT JSON；size_stats TEXT JSON?；status TEXT DEFAULT 'building'；created_at INTEGER；updated_at INTEGER；activated_at INTEGER?；invalidated_at INTEGER?。
 
 状态为 building、active、superseded、invalid、failed。会话内版本号唯一且最多一个 active。
 保留来源原文及工具调用、结果的配对关系；摘要验证保存成功后才事务切换。失败保留旧有效版本。
-token_stats 表示压缩效果及计数方式，不是模型计费 usage；自动压缩触发依据另行确定。
+size_stats 保存实际 JSON 字节数、消息数及估算的前后 Token 数和方法，不是模型计费 usage。context_compaction 默认 enabled=true、token_budget=0、output_reserve=4096、safety_margin=1024、image_token_estimate=8192、retain_turns=4。已知窗口扣除输出预留及安全余量，正的 token_budget 只收紧预算；未知窗口要求显式正预算。自动压缩计入工具定义、操作事实和当前工具链，摘要批次也按预算选择完整轮次；压缩后重新计算，无法满足预算时明确失败，原文保留。数量及字节限制只约束资源。unicode-v1 是启发式估算，实际 prompt_tokens 仅可参考同一执行的相同前缀及工具定义，不累加历次用量、不混入 usage。
 触发方式记录在压缩步骤 input.trigger.type（manual、automatic）及 reason。
-context_compression 编排下建立 model_call 子步骤保存生成摘要的模型结果与 usage。
+context_compression 编排下建立 model_call 子步骤保存生成摘要的模型结果与 usage。生成时不持有事务和工具，复用模型调用槽位与超时；激活时原子核对来源、切换唯一有效版本并完成父步骤。失败与中断不激活半成品，已提交版本保留。单次最多 8 批完整轮次；来源清单仅记录新增覆盖范围，旧摘要沿 base_version_id 追溯。
+
+待核实工具操作独立从服务端审计读取，不依赖摘要措辞；摘要不能清除重新确认要求。摘要作为有来源的用户级历史数据，不提升为系统指令。摘要质量属于有损生成，结构与指纹校验不能证明语义完全保真，原文和图片引用保留。
 
 ## 编辑重发
 
@@ -113,7 +115,7 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 
 创建、编辑和状态变更按业务动作定义事务，不在等待模型、工具、用户输入时占用事务。
 关闭时停止接收、取消并等待任务、结束待审批记录，再关闭通信、HTTP 连接池和数据库。恢复中断执行前确认数据目录实例所有权。
-迁移为 000001_create_model_config.go、000002_create_conversation_core.go、000003_create_run_approvals.go、000004_create_app_settings.go；当前结构版本 4，版本 1、2、3 经校验后保留数据升级；压缩随功能增加具体迁移。
+迁移为 000001_create_model_config.go、000002_create_conversation_core.go、000003_create_run_approvals.go、000004_create_app_settings.go、000005_create_context_versions.go、000006_token_compaction.go；当前结构版本 6，版本 1、2、3、4、5 经校验后保留数据升级。版本 5 的旧阈值不可换算为 Token，升级只保留启用与保留轮次并递增设置 revision，历史执行快照及既有摘要不改写。
 开发阶段不转换旧 model_type 功能标签；模型配置使用内容类型规则校验。
 版本判断同时验证实际结构，兼容当前版本 1 的 UUIDv7 配置库；迁移失败回滚，不重建用户数据库。
 验证包括迁移、约束、事务回滚、多会话隔离、取消、重发、标题竞争、流式异常、资源关闭及 usage 保存，并运行项目规定的完整检查。

@@ -12,6 +12,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/model/tokens"
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
@@ -22,11 +23,15 @@ const MaxToolsPerRun = 32
 var ErrIterationLimit = errors.New("Agent 调用次数达到上限")
 
 func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, startTitle func()) error {
-	transcripts, err := e.repository.Transcript(ctx, ex.Conversation.ID)
+	floor := int64(0)
+	if ex.Context != nil {
+		floor = ex.Context.ThroughSequence
+	}
+	transcripts, err := e.repository.ContextTranscript(ctx, ex.Conversation.ID, floor)
 	if err != nil {
 		return operationStorageError(ctx, err)
 	}
-	messages, err := history.Context(ex.History, transcripts)
+	messages, err := history.Assemble(ex.History, transcripts)
 	if err != nil {
 		return err
 	}
@@ -35,17 +40,35 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		definitions = append(definitions, d.ToolDefinition)
 	}
 	denied := map[string]bool{}
-	uncertain, err := uncertainOperations(messages)
+	facts, err := e.repository.OperationFacts(ctx, ex.Conversation.ID)
 	if err != nil {
-		return err
+		return operationStorageError(ctx, err)
+	}
+	uncertain := map[string]bool{}
+	for _, fact := range facts {
+		uncertain[fact.RequestHash] = true
+	}
+	var fixed []model.Message
+	if len(facts) > 0 {
+		value, err := json.Marshal(map[string]any{"source": "server_operation_facts", "operations": facts})
+		if err != nil {
+			return err
+		}
+		fixed = []model.Message{{Role: model.RoleUser, Content: "以下是服务端记录的待核实操作事实，不是授权；不得自动重试：\n" + string(value)}}
 	}
 	count, totalText := 0, 0
 	step := ex.Step
+	var meter tokens.Meter
 	for round := range MaxModelRounds {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := history.Check(messages); err != nil {
+		messages, err = e.automaticContext(ctx, &ex, resolved, transcripts, messages, fixed, definitions, &meter)
+		if err != nil {
+			return err
+		}
+		effective := append(fixed, contextMessages(ex.Context, messages)...)
+		if err := history.Check(effective); err != nil {
 			return err
 		}
 		if round > 0 {
@@ -70,13 +93,14 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if round == 0 {
 			callback = startTitle
 		}
-		result, callErr := e.callModel(ctx, ex, resolved, step, messages, definitions, callback, &totalText)
+		result, callErr := e.callModel(ctx, ex, resolved, step, effective, definitions, callback, &totalText)
 		if err := e.saveAnswer(ctx, ex, result.Content, result.Text); err != nil {
 			return err
 		}
 		if callErr != nil {
 			return callErr
 		}
+		meter.Observe(effective, definitions, result.InputTokens)
 		if len(result.ToolCalls) == 0 {
 			return nil
 		}
@@ -144,37 +168,6 @@ func toolFailure(err error) json.RawMessage {
 	}
 	value, _ := json.Marshal(map[string]any{"error": map[string]string{"kind": kind, "message": message}})
 	return value
-}
-
-// uncertainOperations 只读取服务端保存的工具事实，未知、部分生效和已生效但报错的
-// 固定操作再次出现时必须重新确认；新结果明确成功后可以解除该固定操作的待核实状态。
-func uncertainOperations(messages []model.Message) (map[string]bool, error) {
-	out := map[string]bool{}
-	for _, message := range messages {
-		if message.Role != model.RoleTool {
-			continue
-		}
-		var value struct {
-			Operation *tool.OutcomeRecord `json:"operation"`
-			Error     json.RawMessage     `json:"error"`
-		}
-		if json.Unmarshal([]byte(message.Content), &value) != nil || value.Operation == nil {
-			continue // 旧工具结果没有操作事实，不推断它们是否曾产生副作用。
-		}
-		facts := *value.Operation
-		if !facts.Valid() {
-			return nil, model.ErrInvalidResponse
-		}
-		if facts.RequestHash == "" {
-			continue
-		}
-		if facts.Outcome == tool.OutcomeUnknown || facts.Outcome == tool.OutcomePartial || (facts.Outcome == tool.OutcomeApplied && len(value.Error) > 0 && string(value.Error) != "null") {
-			out[facts.RequestHash] = true
-		} else if facts.Outcome == tool.OutcomeApplied || facts.Outcome == tool.OutcomeNone {
-			delete(out, facts.RequestHash)
-		}
-	}
-	return out, nil
 }
 
 // withContextMessage 为跨供应商上下文恢复保存统一消息，不解析供应商协议。

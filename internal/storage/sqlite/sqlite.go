@@ -62,7 +62,7 @@ func Open(ctx context.Context, path string) (*Database, error) {
 	if err != nil {
 		return nil, errors.Join(err, pool.Close())
 	}
-	if err := migrations.Run(ctx, db, &schema.Provider{}, &schema.Model{}, &schema.Workspace{}, &schema.Conversation{}, &schema.Run{}, &schema.Message{}, &schema.Step{}, &schema.Approval{}, &schema.Settings{}); err != nil {
+	if err := migrations.Run(ctx, db, &schema.Provider{}, &schema.Model{}, &schema.Workspace{}, &schema.Conversation{}, &schema.Run{}, &schema.Message{}, &schema.Step{}, &schema.Approval{}, &schema.Settings{}, &schema.ContextVersion{}); err != nil {
 		return nil, errors.Join(err, pool.Close())
 	}
 	// 不将初始化上下文绑定在返回的 GORM 实例上。

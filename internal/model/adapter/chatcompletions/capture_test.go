@@ -35,6 +35,17 @@ func TestCaptureOriginalUsageAndProviderFields(t *testing.T) {
 	}
 }
 
+func TestInputTokensOnlyUsesActualPromptTokens(t *testing.T) {
+	for _, raw := range []string{`{}`, `{"total_tokens":7}`, `{"prompt_tokens":null}`, `{"prompt_tokens":-1}`, `{"prompt_tokens":1.5}`, `{"prompt_tokens":"100"}`} {
+		if got := inputTokens([]byte(raw)); got != nil {
+			t.Fatalf("推测或接受了无效输入用量: %s %d", raw, *got)
+		}
+	}
+	if got := inputTokens([]byte(`{"prompt_tokens":12,"total_tokens":999}`)); got == nil || *got != 12 {
+		t.Fatal("实际 prompt_tokens 丢失或使用了累计值")
+	}
+}
+
 func TestCaptureStreamCompletionAndInterruption(t *testing.T) {
 	for _, complete := range []bool{true, false} {
 		t.Run(map[bool]string{true: "正常", false: "异常中断"}[complete], func(t *testing.T) {

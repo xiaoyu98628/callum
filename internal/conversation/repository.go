@@ -5,6 +5,7 @@ import "context"
 // Repository 按业务动作保证跨会话、消息、执行和步骤的事务一致性。
 // Begin 返回后不得占用连接；生成标题只允许条件更新未被用户修改的默认标题。
 type Repository interface {
+	ContextRepository
 	Get(context.Context, string) (Conversation, error)
 	List(context.Context, Filter) ([]Conversation, error)
 	Update(context.Context, string, Change) (Conversation, error)

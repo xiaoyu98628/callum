@@ -58,6 +58,7 @@ func (c *Client) Generate(ctx context.Context, req model.Request) (result model.
 		if err != nil {
 			return result, wrapError("decode usage", httpResponse, err)
 		}
+		result.InputTokens = inputTokens(result.Usage)
 	}
 
 	if completion == nil || len(completion.Choices) != 1 {

@@ -212,8 +212,12 @@ func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(
 	acceptedValue := ex
 	if ex.Run.SettingsSnapshot != nil {
 		// 受理回调借用独立快照，不能通过指针修改即将执行的权限设置。
-		snapshot := *ex.Run.SettingsSnapshot
+		snapshot := ex.Run.SettingsSnapshot.Clone()
 		acceptedValue.Run.SettingsSnapshot = &snapshot
+	}
+	if ex.Context != nil {
+		value := ex.Context.Clone()
+		acceptedValue.Context = &value
 	}
 	if err := accepted(acceptedValue); err != nil {
 		s.engine.Abandon(lease.Context(), ex, context.Canceled)

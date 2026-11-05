@@ -37,7 +37,7 @@ func resultString(t *testing.T, f wireFrame, key string) string {
 func setupConversationModel(t *testing.T, p *appPeer, url string) string {
 	t.Helper()
 	pid := resultID(t, p.call(t, "provider.create", map[string]any{"name": "测试厂商", "protocol": "chatcompletions", "base_url": url + "/v1", "api_key": "fake-dialogue-key"}), "id")
-	return resultID(t, p.call(t, "model.create", map[string]any{"provider_id": pid, "display_name": "测试模型", "remote_model_id": "remote-model", "enabled": true}), "id")
+	return resultID(t, p.call(t, "model.create", map[string]any{"provider_id": pid, "display_name": "测试模型", "remote_model_id": "remote-model", "enabled": true, "context_window": 1000000}), "id")
 }
 
 func messageBlocks(text string) []map[string]string {

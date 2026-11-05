@@ -1,6 +1,6 @@
 # JSON-RPC 通信与手工测试
 
-本文按当前代码整理已实现的 stdio JSON-RPC 接口，共 39 个方法。协议版本为 `1`，数据库结构版本为 `4`，两者含义不同。
+本文按当前代码整理已实现的 stdio JSON-RPC 接口，共 42 个方法。协议版本为 `1`，数据库结构版本为 `6`，两者含义不同。
 
 ## 1. 启动及输入约定
 
@@ -68,6 +68,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | 无历史调用 | `model.invoke` |
 | 工作区 | `workspace.create`、`workspace.update`、`workspace.get`、`workspace.list`、`workspace.delete`、`workspace.restore` |
 | 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.messages`、`conversation.delete`、`conversation.restore` |
+| 上下文压缩 | `conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
 | 执行 | `run.get`、`run.list`、`run.cancel` |
 | 步骤 | `step.get`、`step.list`、`step.data` |
 | 审批 | `approval.get`、`approval.list`、`approval.decide` |
@@ -81,7 +82,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | 1 | 启动并发送 `system.info` | 收到 `system.ready` 和查询响应 |
 | 2 | `settings.get` | 保存当前 `revision` |
 | 3 | `provider.create` | 保存 `result.id` 为 `<provider_id>` |
-| 4 | `model.create` | 保存 `result.id` 为 `<model_id>`，初始不选择扩展功能 |
+| 4 | `model.create` | 保存 `result.id` 为 `<model_id>`，填写已核实的 context_window；未知时在 context_compaction 显式设置 token_budget |
 | 5 | `conversation.send`，`stream:false` | 保存会话、执行、用户消息及回答消息 ID；等待终态 |
 | 6 | 同会话 `conversation.send`，`stream:true` | 验证历史上下文和文本增量 |
 | 7 | 查询消息、执行、步骤和 usage | 记录用户消息 ID、步骤 ID；验证持久化 |
@@ -117,7 +118,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 ## 5. 应用设置
 
-当前仅注册 `execution` 配置组，其中两个字段分别控制审批策略和审批人。
+当前注册 `execution` 和 `context_compaction` 两个配置组。以下两个字段属于 `execution`，分别控制审批策略和审批人；压缩设置见 9.1 节。
 
 | 字段 | 支持值 | 默认值 |
 | --- | --- | --- |
@@ -140,7 +141,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 ### settings.update
 
-下例中的 `revision:1` 必须换成上一次 `settings.get` 返回的版本。`value` 是整个配置组，两个字段都要提供。
+下例中的 `revision:1` 必须换成上一次 `settings.get` 返回的版本。`value` 是整个配置组，必须提供该组的全部字段。
 
 ```json
 {"jsonrpc":"2.0","id":"settings-update","method":"settings.update","params":{"key":"execution","revision":1,"value":{"approval_policy":"always","approvals_reviewer":"user"}}}
@@ -233,7 +234,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 `reasoning` 和推理等级仅作元数据，不自动传入推理参数，也不阻止文本请求。图片输入需 `capabilities.image_input:true`；标注 `model_type:["image"]` 不自动声明图片输入或输出。图片输出及音视频输入输出尚未接入，类型字段只保存元数据。
 模型响应或流式分片含非 NULL 的 `audio` 字段时，执行明确失败，错误类型为 `unsupported`；`audio:null` 和未知厂商元数据可以保留。合法空文本响应仍可成功，音频内容不会被当作空文本成功处理。
 
-上下文窗口、最大输出 Token 和推理等级属于配置元数据，不会自动变成每次请求的 `max_tokens` 或推理参数，也不用于本地 Token 预算检查。
+上下文窗口和最大输出 Token 用于解析会话压缩预算；它们不会自动变成每次请求的 max_tokens 或其他输出参数。推理等级仍为元数据。自动压缩启用且窗口未知时，必须在 context_compaction 设置显式 token_budget；model.update 完整替换时需保留所需容量字段。model.invoke 不应用会话压缩预算。
 
 ### model.get / model.list
 
@@ -382,6 +383,59 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 ```
 
 会话删除是软删除，返回更新后的会话对象。恢复清除删除状态，原有归档状态不会自动清除；如仍已归档，应执行 `conversation.update`，设置 `archived:false` 后继续对话。
+
+### 9.1 上下文压缩
+
+压缩设置通过现有设置接口读写，`value` 必须完整提供四个字段。revision 必须使用实际读取值：
+
+```json
+{"jsonrpc":"2.0","id":"context-settings","method":"settings.get","params":{"key":"context_compaction"}}
+{"jsonrpc":"2.0","id":"context-settings-save","method":"settings.update","params":{"key":"context_compaction","revision":1,"value":{"enabled":true,"token_budget":0,"output_reserve":4096,"safety_margin":1024,"image_token_estimate":8192,"retain_turns":4}}}
+```
+
+默认 enabled=true、token_budget=0、output_reserve=4096、safety_margin=1024、image_token_estimate=8192、retain_turns=4。六个字段全部必填；旧 message_threshold、byte_threshold 不再接受。token_budget 范围 0 至 1000000000，三个预留/估算字段范围 1 至 1000000000，retain_turns 范围 1 至 32。
+
+窗口已知时，输入预算为 context_window 减 output_reserve（若声明 max_output_tokens 则取较小者）再减 safety_margin；正的 token_budget 进一步收紧预算。窗口未知时 token_budget 必须为正数，直接表示已扣除预留的输入预算；不推测厂商容量。这些设置不自动发送供应商输出参数。
+
+每次回答模型请求前，将摘要、有效消息、图片估算、工具定义、调用与结果及服务端操作事实计入本地 Token 估算；超过预算才触发压缩。保留指定已结束轮次、当前问题及完整当前工具链，压缩后重新计算；摘要模型的源批次也必须满足预算。没有可安全压缩的完整旧轮次时明确失败，不静默丢弃内容。消息数量和 JSON 字节仅作为 256 条、8 MiB 等资源安全边界，不触发压缩。
+
+估算方法 unicode-v1 按有效文本字符、代码标点和封装开销计算，图片使用可配置单图估算；不是厂商 tokenizer。仅在同一执行的请求前缀和工具定义未变时，可参考上一轮实际 prompt_tokens 并估算增量；不以累计 usage 判断当前上下文，估算不写入 usage。无效预算使异步执行以 token_budget_unconfigured 失败；必须保留的输入或单个源轮次超预算时为 token_budget_exceeded。远端仍负责最终容量校验，失败不自动重发。旧设置升级保留开关与轮次、递增 revision；旧执行快照和既有摘要原样保留。
+
+#### conversation.compact
+
+```json
+{"jsonrpc":"2.0","id":"context-compact","method":"conversation.compact","params":{"conversation_id":"<conversation_id>"}}
+{"jsonrpc":"2.0","id":"context-compact","result":{"conversation_id":"<conversation_id>","run_id":"<run_id>"}}
+```
+
+可选 `model_id` 指定摘要模型，省略时使用会话当前模型；不改变会话的模型选择。关闭自动压缩后仍可手动调用；需要生成摘要时仍必须具备有效 Token 预算，没有较早完整轮次的无操作请求不调用模型。受理后保持 stdin 打开，通过 `run.cancel` 取消；同一会话已有执行时拒绝并发受理。使用 `run.started`、`step.created`、`step.updated` 及执行终态通知，不创建新的用户或回答消息，也不把摘要发送为 `message.delta`。没有较早完整轮次时正常完成，编排步骤 output 为 `{"compressed":false,"reason":"no_earlier_complete_turns"}`。
+
+每批创建 `context_compression` 步骤，其 `input.trigger` 保存 type（manual/automatic）和 reason；自动触发另含 token_budget 和 estimate（input_tokens、method、可选 reference_input_tokens），另保存压缩设置版本、来源数量和覆盖顺序；子 `model_call` 的 purpose 为 `context_summary`，只由该子步骤保存实际 usage。摘要模型不获得工具。成功父步骤 output 包含 `compressed:true`、`context_version_id`、`size_stats`；摘要正文通过版本详情查询。回答模型步骤 input.context_version_id 指向实际使用的有效摘要；摘要模型步骤的 generated_context_version_id 指向它正在生成的版本，可另带实际输入的 context_version_id。
+
+摘要结构、大小、压缩收益及来源验证失败均保留旧有效版本，本次执行明确失败，不自动重试模型或工具。重启将未结束压缩执行标记为 interrupted、building 版本标记为 failed，不重放旧通知。已经事务提交的有效版本不会因随后取消或退出被回滚。
+
+#### conversation.context_versions / conversation.context_version
+
+```json
+{"jsonrpc":"2.0","id":"context-versions","method":"conversation.context_versions","params":{"conversation_id":"<conversation_id>","limit":50,"offset":0}}
+{"jsonrpc":"2.0","id":"context-version","method":"conversation.context_version","params":{"conversation_id":"<conversation_id>","id":"<context_version_id>"}}
+```
+
+列表返回版本元数据数组，按 version 降序；limit 默认 50，范围 1 至 200，offset 非负。列表省略 summary、source_manifest、size_stats，详情返回这些字段（尚未生成的字段省略）。字段如下：
+
+| 字段 | 含义 |
+| --- | --- |
+| `id`、`conversation_id`、`version` | UUIDv7 标识、所属会话、会话内递增版本 |
+| `base_version_id` | 被合并的旧摘要版本，可沿此追溯完整来源 |
+| `generated_by_step_id` | 生成该版本的 context_compression 步骤 |
+| `through_sequence` | 本版本累计覆盖到的消息顺序号 |
+| `summary` | 五个字符串数组组成的 JSON 文本，最多 64 KiB |
+| `source_manifest` | 本批新增覆盖消息的 message_id、run_id、sequence、fingerprint；指纹涵盖消息内容及对应统一工具轨迹 |
+| `size_stats` | before_messages、after_messages、before_bytes、after_bytes，以及新版本的 estimated_before_tokens、estimated_after_tokens、estimation_method（被摘要替换的历史部分）；估算不是 usage，旧版本可缺少估算字段 |
+| `status` | building、active、superseded、invalid、failed；同会话最多一个 active |
+| 时间字段 | created_at、updated_at、activated_at、invalidated_at，毫秒时间戳，可空时间为 null |
+
+原始消息和步骤不因压缩删除。编辑重发使覆盖被编辑消息的摘要失效，并清除摘要正文及对应模型结果副本；仍有效摘要的模型结果保留，旧分支审计不进入新上下文。待核实操作独立从当前分支审计恢复，摘要不能解除重新审批要求。结构校验不保证语义完全无损，实际输出可追溯原文核对。
 
 ## 10. 工作区
 
@@ -592,7 +646,9 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 通知、列表和 `step.get` 均将大型 `output`、`usage`、`definition` 置为 `null`，这不代表数据库中没有数据。通过下面的 `step.data` 获取原始字段。
 
-当前实际创建 `model_call`、`tool_call` 步骤；辅助标题也是单独的 `model_call`。工具步骤通过 `parent_step_id` 关联产生调用的模型步骤，适合客户端按层级折叠和展开。
+模型步骤 input.token_budget 保存按受理策略解析的规划 input_limit、context_window、max_output_tokens、estimated_input_tokens、estimation_method，估算和模型身份/设置快照分开于实际 usage。关闭自动压缩时普通回答不强制执行该规划预算，且无法解析预算时不附加此字段。
+
+当前实际创建 `model_call`、`tool_call`、`context_compression` 步骤；辅助标题也是单独的 `model_call`。工具步骤通过 `parent_step_id` 关联产生调用的模型步骤，适合客户端按层级折叠和展开。
 
 ### step.data
 
@@ -704,7 +760,7 @@ usage 片段响应示例：
 
 `model.invoke` 使用 `run.text_delta`、`run.completed`、`run.failed`、`run.cancelled`，其 `params` 不包含持久化 `run` 对象或 `conversation_id`。
 
-当前不发送 `step.output_delta`、`user_input.requested`、`user_input.updated`、`run.interrupted` 或上下文压缩专用通知。重启恢复中断状态及新工具步骤的保守操作事实，客户端查询执行记录获取结果，不承诺重放旧事件。
+当前不发送 `step.output_delta`、`user_input.requested`、`user_input.updated`、`run.interrupted` 或独立的上下文压缩通知。压缩复用 step.created/step.updated 与执行事件。重启恢复中断状态及新工具步骤的保守操作事实，客户端查询执行记录获取结果，不承诺重放旧事件。
 
 ## 17. 错误码与负向测试
 

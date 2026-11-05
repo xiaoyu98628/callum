@@ -70,6 +70,7 @@ type Begin struct {
 
 // Execution 是提交后的执行快照，不持有数据库连接或事务。
 type Execution struct {
+	Context           *ContextVersion
 	RemovedMessageIDs []string
 	Created           bool
 	Conversation      Conversation

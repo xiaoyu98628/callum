@@ -20,12 +20,25 @@ type transcriptRow struct {
 
 // Transcript 在当前消息分支恢复成功轨迹及失败执行留下的副作用事实。
 // 查询前检查累计大小，只加载统一上下文，不加载大型原始模型结果。
-func (r *Repository) Transcript(ctx context.Context, id string) (map[string][]model.Message, error) {
+func (r *Repository) Transcript(ctx context.Context, id string, after ...int64) (map[string][]model.Message, error) {
+	floor := int64(0)
+	if len(after) > 0 {
+		floor = after[0]
+	}
+	return r.readTranscript(ctx, id, floor, 8<<20, 256)
+}
+
+// ContextTranscript 为压缩准备读取有界的未覆盖轨迹，最终模型请求仍遵守原上限。
+func (r *Repository) ContextTranscript(ctx context.Context, id string, floor int64) (map[string][]model.Message, error) {
+	return r.readTranscript(ctx, id, floor, 16<<20, 512)
+}
+
+func (r *Repository) readTranscript(ctx context.Context, id string, floor int64, maxBytes int64, maxMessages int) (map[string][]model.Message, error) {
 	base := func() *gorm.DB {
 		return r.db.WithContext(ctx).Model(&schema.Step{}).
 			Joins("JOIN conversation_runs r ON r.id=conversation_run_steps.run_id AND r.status IN ('completed','failed','cancelled','interrupted')").
 			Joins("JOIN conversation_messages m ON m.run_id=r.id AND m.role='user'").
-			Where("conversation_run_steps.conversation_id=?", id)
+			Where("conversation_run_steps.conversation_id=? AND m.conversation_id=? AND m.sequence>?", id, id, floor)
 	}
 	// 新步骤缺失事实属于损坏记录，不能沿用旧契约而静默丢失操作。
 	var invalid int64
@@ -53,7 +66,7 @@ func (r *Repository) Transcript(ctx context.Context, id string) (map[string][]mo
 	if err := query().Select("COALESCE(SUM(length(CAST(json_extract(conversation_run_steps.output,'$.context_message') AS BLOB))),0) AS size,COUNT(*) AS count").Scan(&bounds).Error; err != nil {
 		return nil, err
 	}
-	if bounds.Size > 8<<20 || bounds.Count > 256 {
+	if bounds.Size > maxBytes || bounds.Count > int64(maxMessages) {
 		return nil, model.ErrInputLimit
 	}
 	var rows []transcriptRow
@@ -73,7 +86,7 @@ func (r *Repository) Transcript(ctx context.Context, id string) (map[string][]mo
 			return nil, err
 		}
 		count += len(messages)
-		if count > 256 {
+		if count > maxMessages {
 			return nil, model.ErrInputLimit
 		}
 		out[rows[start].RunID] = messages
@@ -83,7 +96,7 @@ func (r *Repository) Transcript(ctx context.Context, id string) (map[string][]mo
 	if err != nil {
 		return nil, err
 	}
-	if len(encoded) > 8<<20 {
+	if int64(len(encoded)) > maxBytes {
 		return nil, model.ErrInputLimit
 	}
 	return out, nil

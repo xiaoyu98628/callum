@@ -13,10 +13,26 @@ import (
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/model/tokens"
 )
 
 func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, step agent.Step, messages []model.Message, tools []model.ToolDefinition, onAcquired func(), totalText *int) (result model.Response, retErr error) {
+	if ex.Context != nil {
+		var input map[string]any
+		if err := json.Unmarshal(step.Input, &input); err != nil {
+			return result, err
+		}
+		input["context_version_id"] = ex.Context.ID
+		var err error
+		step.Input, err = json.Marshal(input)
+		if err != nil {
+			return result, err
+		}
+	}
 	if err := modelMetadata(&step, messages, tools, resolved, ex.Run.Stream); err != nil {
+		return result, err
+	}
+	if err := tokenMetadata(&step, ex, resolved, messages, tools); err != nil {
 		return result, err
 	}
 	now := time.Now().UnixMilli()
@@ -145,5 +161,27 @@ func modelMetadata(step *agent.Step, messages []model.Message, tools []model.Too
 	if len(tools) > 0 {
 		step.Definition, err = json.Marshal(map[string]any{"tools": tools})
 	}
+	return err
+}
+
+// tokenMetadata 与实际 usage 分开记录；预算取自本次受理的模型配置及设置快照。
+func tokenMetadata(step *agent.Step, ex conversation.Execution, resolved agent.Resolved, messages []model.Message, tools []model.ToolDefinition) error {
+	if ex.Run.SettingsSnapshot == nil || ex.Run.SettingsSnapshot.Compaction == nil {
+		return nil
+	}
+	cfg := ex.Run.SettingsSnapshot.Compaction
+	var input map[string]any
+	if err := json.Unmarshal(step.Input, &input); err != nil {
+		return err
+	}
+	budget, err := cfg.InputBudget(resolved.ContextWindow, resolved.MaxOutputTokens)
+	if err != nil {
+		if cfg.Enabled {
+			return model.ErrTokenBudget
+		}
+		return nil
+	}
+	input["token_budget"] = map[string]any{"input_limit": budget, "context_window": resolved.ContextWindow, "max_output_tokens": resolved.MaxOutputTokens, "estimated_input_tokens": tokens.Estimate(messages, tools, cfg.ImageTokenEstimate), "estimation_method": tokens.Method}
+	step.Input, err = json.Marshal(input)
 	return err
 }

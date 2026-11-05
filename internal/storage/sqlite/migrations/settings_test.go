@@ -21,6 +21,9 @@ func TestSettingsMigrationPreservesOldRunAndRollsBack(t *testing.T) {
 	}
 	defer db.Close()
 	// 从当前映射去掉第四次迁移新增结构，得到真实的版本 3 表结构。
+	if err := db.DB.Migrator().DropTable(&schema.ContextVersion{}); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.DB.Migrator().DropTable(&schema.Settings{}); err != nil {
 		t.Fatal(err)
 	}

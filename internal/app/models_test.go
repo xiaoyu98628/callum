@@ -65,7 +65,7 @@ func TestImageInputUsesCapabilityRatherThanContentType(t *testing.T) {
 			cfg.MaxConcurrentRuns = 1
 			p := startApp(t, cfg, io.Discard)
 			pid := resultString(t, p.call(t, "provider.create", map[string]any{"name": "图片厂商", "protocol": "chatcompletions", "base_url": upstream.URL + "/v1"}), "id")
-			mid := resultString(t, p.call(t, "model.create", map[string]any{"provider_id": pid, "display_name": "图片模型", "remote_model_id": "vision", "enabled": true, "capabilities": test.capabilities, "model_type": test.types}), "id")
+			mid := resultString(t, p.call(t, "model.create", map[string]any{"provider_id": pid, "display_name": "图片模型", "remote_model_id": "vision", "enabled": true, "context_window": 1000000, "capabilities": test.capabilities, "model_type": test.types}), "id")
 			var data bytes.Buffer
 			if err := png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 1, 1))); err != nil {
 				t.Fatal(err)

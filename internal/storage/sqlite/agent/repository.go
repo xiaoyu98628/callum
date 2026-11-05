@@ -147,6 +147,9 @@ func (r *Repository) Finish(ctx context.Context, in domain.Run) error {
 		if result.RowsAffected != 1 {
 			return domain.ErrNotFound
 		}
+		if err := tx.Model(&schema.ContextVersion{}).Where("status='building' AND generated_by_step_id IN (SELECT id FROM conversation_run_steps WHERE run_id=?)", in.ID).Updates(map[string]any{"status": "failed", "updated_at": in.UpdatedAt}).Error; err != nil {
+			return err
+		}
 		if err := cancelApprovals(tx, in.ID, in.UpdatedAt); err != nil {
 			return err
 		}
@@ -173,6 +176,9 @@ func (r *Repository) Finish(ctx context.Context, in domain.Run) error {
 func (r *Repository) Recover(ctx context.Context) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UnixMilli()
+		if err := tx.Model(&schema.ContextVersion{}).Where("status='building'").Updates(map[string]any{"status": "failed", "updated_at": now}).Error; err != nil {
+			return err
+		}
 		if err := cancelApprovals(tx, "", now); err != nil {
 			return err
 		}

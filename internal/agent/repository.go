@@ -22,5 +22,8 @@ type Repository interface {
 	Resume(context.Context, string) error
 	// Transcript 读取当前分支的已完成轨迹及未完成执行中的副作用事实，保证调用结果配对。
 	// 不包含辅助标题、失败的最终回答或重发旧分支，不推断旧记录的操作结果。
-	Transcript(context.Context, string) (map[string][]model.Message, error)
+	Transcript(context.Context, string, ...int64) (map[string][]model.Message, error)
+	ContextTranscript(context.Context, string, int64) (map[string][]model.Message, error)
+	// OperationFacts 独立于摘要读取待核实操作，不允许模型摘要解除安全约束。
+	OperationFacts(context.Context, string) ([]OperationFact, error)
 }

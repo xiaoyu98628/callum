@@ -72,10 +72,12 @@ type Event struct {
 
 // Resolved 是单次执行的配置快照，Client 的 HTTP 资源仍由装配层管理。
 type Resolved struct {
-	Client     model.Client
-	Snapshot   model.Snapshot
-	Protocol   string
-	ImageInput bool
+	Client          model.Client
+	Snapshot        model.Snapshot
+	Protocol        string
+	ImageInput      bool
+	ContextWindow   int64
+	MaxOutputTokens int64
 }
 
 type Resolver func(context.Context, string) (Resolved, error)

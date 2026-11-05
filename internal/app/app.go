@@ -96,8 +96,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	if err != nil {
 		return nil, err
 	}
-	if _, err := r.settings.Get(initCtx, settings.ExecutionKey); err != nil {
-		return nil, err
+	for _, key := range []string{settings.ExecutionKey, settings.CompactionKey} {
+		if _, err := r.settings.Get(initCtx, key); err != nil {
+			return nil, err
+		}
 	}
 	conversationRepository, err := conversationstore.NewRepository(r.db.DB)
 	if err != nil {

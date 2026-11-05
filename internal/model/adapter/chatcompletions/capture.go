@@ -19,6 +19,17 @@ func captureUsage(raw json.RawMessage) (json.RawMessage, error) {
 	return append(json.RawMessage(nil), raw...), nil
 }
 
+// inputTokens 只读取厂商实际 prompt_tokens，字段不合法或缺失时不推算；原始 usage 保留。
+func inputTokens(raw json.RawMessage) *int64 {
+	var usage struct {
+		PromptTokens *int64 `json:"prompt_tokens"`
+	}
+	if json.Unmarshal(raw, &usage) != nil || usage.PromptTokens == nil || *usage.PromptTokens < 0 {
+		return nil
+	}
+	return usage.PromptTokens
+}
+
 func capturedOutput(format string, response json.RawMessage, extensions ...map[string][]json.RawMessage) (json.RawMessage, error) {
 	var extra map[string][]json.RawMessage
 	if len(extensions) > 0 {
@@ -129,7 +140,7 @@ func (c *streamCapture) add(raw string) error {
 }
 
 func (c *streamCapture) result(requestID string) (model.Response, error) {
-	result := model.Response{RequestID: requestID, Usage: c.usage}
+	result := model.Response{RequestID: requestID, Usage: c.usage, InputTokens: inputTokens(c.usage)}
 	if c.root == nil {
 		return result, nil
 	}

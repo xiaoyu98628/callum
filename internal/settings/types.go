@@ -47,11 +47,22 @@ func DefaultExecution() Execution {
 type Snapshot struct {
 	Revision int64 `json:"revision"`
 	Execution
+	Compaction *CompactionSnapshot `json:"context_compaction,omitempty"`
 }
 
 // Valid 判断快照是否具有有效版本和当前服务支持的独立配置值。
 func (s Snapshot) Valid() bool {
-	return s.Revision > 0 && s.ApprovalPolicy.Valid() && s.ApprovalsReviewer.Valid()
+	return s.Revision > 0 && s.ApprovalPolicy.Valid() && s.ApprovalsReviewer.Valid() &&
+		(s.Compaction == nil || s.Compaction.Valid())
+}
+
+// Clone 复制可变嵌套快照，受理回调不得修改即将执行的配置。
+func (s Snapshot) Clone() Snapshot {
+	if s.Compaction != nil {
+		value := *s.Compaction
+		s.Compaction = &value
+	}
+	return s
 }
 
 // DecodeExecution 严格校验客户端或存储中的 JSON；不接受重复键、未知字段或尾随内容。

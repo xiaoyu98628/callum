@@ -21,14 +21,18 @@ func New(repository settings.Repository) (*Service, error) {
 }
 
 func (s *Service) Get(ctx context.Context, key string) (settings.Record, error) {
-	if key != settings.ExecutionKey {
+	if key != settings.ExecutionKey && key != settings.CompactionKey {
 		return settings.Record{}, settings.ErrInvalid
 	}
 	value, err := s.repository.Get(ctx, key)
 	if err != nil {
 		return value, err
 	}
-	if _, err := settings.ExecutionSnapshot(value); err != nil {
+	if key == settings.ExecutionKey {
+		if _, err := settings.ExecutionSnapshot(value); err != nil {
+			return settings.Record{}, err
+		}
+	} else if _, err := settings.DecodeCompactionSnapshot(value); err != nil {
 		return settings.Record{}, err
 	}
 	return value, nil
@@ -37,10 +41,16 @@ func (s *Service) Get(ctx context.Context, key string) (settings.Record, error) 
 // Update 完整替换一个已注册配置组；调用方提交其读取到的 revision，冲突后重新读取。
 // 值在写入前完成校验，返回成功表示事务已经提交，后续受理执行即可读取新值。
 func (s *Service) Update(ctx context.Context, key string, revision int64, raw json.RawMessage) (settings.Record, error) {
-	if key != settings.ExecutionKey || revision < 1 || revision == math.MaxInt64 {
+	if (key != settings.ExecutionKey && key != settings.CompactionKey) || revision < 1 || revision == math.MaxInt64 {
 		return settings.Record{}, settings.ErrInvalid
 	}
-	value, err := settings.DecodeExecution(raw)
+	var value any
+	var err error
+	if key == settings.ExecutionKey {
+		value, err = settings.DecodeExecution(raw)
+	} else {
+		value, err = settings.DecodeCompaction(raw)
+	}
 	if err != nil {
 		return settings.Record{}, err
 	}
