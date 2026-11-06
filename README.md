@@ -110,6 +110,8 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 因此新增这些依赖。官方方言接收显式创建的 modernc 连接池，支持 `CGO_ENABLED=0`；
 `mattn/go-sqlite3` 是方言的间接依赖，本模块不使用它建立连接。
 
+业务仓储通过 GORM 组合计数、关联查询、`IN` / `EXISTS` 子查询和窗口查询，JSON 提取及 `ROW_NUMBER()` 等 SQLite 表达式在数据库内执行。待核实操作先按固定操作取最新结果，再筛选需要确认的状态；最新检查点仍逐行读取并检查累计容量。迁移中的 `PRAGMA`、结构元数据检查和带约束的 `ALTER TABLE` 保留专用 SQL；底层连接池及流式结果由存储层管理生命周期。
+
 配置存储的装配顺序为 `config.LoadArgs(args)` / `config.Load(dataDir)` →
 `sqlite.Open(ctx, cfg.DatabasePath)` → `catalog.NewRepository(db.DB)` → `providerservice.New(repository)`。
 这里的 `catalog` 为 `internal/storage/sqlite/catalog`，`providerservice` 为 `internal/model/provider/service` 的导入别名。

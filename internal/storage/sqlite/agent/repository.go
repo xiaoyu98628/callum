@@ -150,7 +150,8 @@ func (r *Repository) Finish(ctx context.Context, in domain.Run) error {
 		if result.RowsAffected != 1 {
 			return domain.ErrNotFound
 		}
-		if err := tx.Model(&schema.ContextVersion{}).Where("status='building' AND generated_by_step_id IN (SELECT id FROM conversation_run_steps WHERE run_id=?)", in.ID).Updates(map[string]any{"status": "failed", "updated_at": in.UpdatedAt}).Error; err != nil {
+		steps := tx.Model(&schema.Step{}).Select("id").Where("run_id=?", in.ID)
+		if err := tx.Model(&schema.ContextVersion{}).Where("status=? AND generated_by_step_id IN (?)", "building", steps).Updates(map[string]any{"status": "failed", "updated_at": in.UpdatedAt}).Error; err != nil {
 			return err
 		}
 		if err := cancelApprovals(tx, in.ID, in.UpdatedAt); err != nil {

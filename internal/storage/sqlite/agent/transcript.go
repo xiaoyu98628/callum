@@ -62,10 +62,11 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 		return nil, model.ErrInvalidResponse
 	}
 	visible := func() *gorm.DB {
-		return base().Where(`r.status='completed' OR EXISTS (
- SELECT 1 FROM conversation_run_steps t WHERE t.run_id=r.id AND t.type='tool_call'
- AND json_extract(t.input,'$.operation_version')=1 AND json_extract(t.output,'$.operation.version')=1
- AND json_extract(t.output,'$.operation.outcome') IN ('applied','partially_applied','unknown'))`)
+		effects := r.db.WithContext(ctx).Model(&schema.Step{}).Table("conversation_run_steps AS t").Select("1").
+			Where("t.run_id=r.id AND t.type=?", "tool_call").
+			Where("json_extract(t.input,'$.operation_version')=1 AND json_extract(t.output,'$.operation.version')=1").
+			Where("json_extract(t.output,'$.operation.outcome') IN ?", []string{"applied", "partially_applied", "unknown"})
+		return base().Where("(r.status=? OR EXISTS (?))", "completed", effects)
 	}
 	var runIDs []string
 	if err := visible().Distinct("r.id").Limit(maxMessages+1).Pluck("r.id", &runIDs).Error; err != nil {
