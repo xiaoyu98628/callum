@@ -63,18 +63,17 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 		if req.Method == "conversation.get" {
 			value, err = h.service.Get(ctx, p.ID)
 		} else {
-			value, err = h.service.Update(ctx, p.ID, domain.Change{Deleted: new(req.Method == "conversation.delete")}, "")
+			value, err = h.service.Update(ctx, p.ID, domain.Update{Deleted: new(req.Method == "conversation.delete")})
 		}
 	case "conversation.update":
 		var p struct {
-			ID      string `json:"id"`
-			ModelID string `json:"model_id,omitempty"`
-			domain.Change
+			ID string `json:"id"`
+			domain.Update
 		}
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
 			return reply(nil, rpcErr)
 		}
-		value, err = h.service.Update(ctx, p.ID, p.Change, p.ModelID)
+		value, err = h.service.Update(ctx, p.ID, p.Update)
 	case "conversation.messages":
 		var p struct {
 			ConversationID string `json:"conversation_id"`

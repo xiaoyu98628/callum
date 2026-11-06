@@ -63,9 +63,9 @@
 - internal/storage/sqlite：数据库连接、文件权限及服务实例锁；schema 保存表映射，catalog、workspace、conversation、agent、settings 实现对应仓储，migrations 管理具体迁移、事务与版本检查。
 - internal/settings：应用设置组、值校验和执行快照契约；service 负责注册设置组校验及版本更新，不持有运行时配置缓存。
 - internal/workspace：工作区契约；service 负责路径、状态和标识校验。
-- internal/conversation：会话、消息契约；service 负责受理、会话管理和重发，history 负责标题截取及历史组装，compaction 负责压缩边界、来源指纹和摘要结构校验。
-- internal/agent：持久化运行、步骤、事件与存储契约；executor 统一管理并发、超时、取消和关闭，service 编排模型与工具循环、辅助标题及状态保存，approval 管理确定操作的审批及等待，events 提供与协议无关的有界订阅。
-- internal/tool：工具契约；registry 管理注册，executor 固定操作及权限边界，policy 独立判断是否需要审批，builtin/filesystem 提供固定目标范围的读取及文件补丁工具，工作区作为可选路径基准。
+- internal/conversation：会话、消息契约；service 负责受理、会话管理和重发，通过 Update 接收业务更新输入并生成含服务端模型快照的 Change 仓储参数；history 负责标题截取及历史组装，compaction 负责压缩边界、来源指纹和摘要结构校验。
+- internal/agent：持久化运行、步骤、事件与存储契约；executor 统一管理并发、超时、取消和关闭，service 编排模型与工具循环、辅助标题及状态保存，approval 管理确定操作的审批及等待，transcript 负责执行轨迹配对、失败回答过滤及中断工具输出恢复，events 提供与协议无关的有界订阅。SQLite 保留有界查询和事务，历史读取及压缩检查点共用 transcript 规则。
+- internal/tool：工具契约；registry 管理注册，executor 固定操作及权限边界，policy 根据可信操作事实、历史拒绝、未知结果、沙箱及目录授权独立计算审批决定，不依赖设置或执行器实现；builtin/filesystem 提供固定目标范围的读取及文件补丁工具，工作区作为可选路径基准，builtin/command/run 管理固定命令及其进程资源和系统沙箱边界。
 - internal/inference：兼容的无历史模型调用契约；executor 借用统一运行调度器执行 model.invoke。
 - internal/stdio：服务入口与路由；protocol 定义和解析协议，transport 管理标准流，catalog、workspace、conversation、execution、approval、settings 分别转换对应接口和事件。
 - internal/app：New 创建不依赖通信连接的 Runtime，持有数据库、实例锁、HTTP 连接池、调度器及事件发布器；ServeStdio 接入并清理单个连接，Run 负责独立 stdio 进程的完整生命周期。
@@ -132,9 +132,9 @@ stdio 的 protocol、transport 不依赖业务模块；业务错误和执行事�
 - 等待审批不持有事务和模型请求槽位，仍受活动执行数量和会话互斥限制，不设置审批过期时间；等待由用户决定或执行取消结束；取消及恢复时结束待审批状态，结果未知的操作不自动重试。
 - 审批策略 ApprovalPolicy 与审批人 ApprovalsReviewer 分别配置，存入 app_settings 的 execution JSON 配置组，通过设置接口更新，不允许模型覆盖。审批与工具业务不依赖通信协议。
 - 设置更新携带 revision 进行并发校验，成功后递增；受理事务读取最新设置并保存 conversation_runs.settings_snapshot，已受理任务不跟随全局设置变化。读取或校验失败阻止受理，不回退默认权限；旧执行快照缺失时保持空值。启动参数不覆盖数据库设置。
-- ApprovalPolicy 默认 on-request，纯读取（含无工作区或工作区外绝对路径）及工作区内普通修改自动放行；无工作区或工作区外普通修改以及删除、大范围覆盖、外发或未知影响需要询问；always 逐次询问；never 不询问并拒绝需要审批的操作，不扩大权限范围。ApprovalsReviewer 当前只支持 user，不接受 auto_review。
+- ApprovalPolicy 默认 on-request，纯读取（含无工作区或工作区外绝对路径）及工作区内普通修改自动放行；无工作区或工作区外普通修改以及删除、大范围覆盖、外发或未知影响需要询问。命令保留 unknown 分类，并结合服务端固定的执行边界判定：macOS 常规系统沙箱命令可自动执行，已识别危险命令及本次沙箱外请求需要审批；Linux/Windows 命令仍逐次审批。always 逐次询问；never 不询问并拒绝需要审批的操作，不扩大权限范围。ApprovalsReviewer 当前只支持 user，不接受 auto_review。
 - 工具影响类别 effects 来自可信实现，支持 read、write、destructive、external、unknown，可声明多个；未分类按未知处理，无效类别拒绝注册。普通修改不包含需要声明为 destructive 的大范围覆盖，读取类别不能抵消其他需要审批的影响。
-- 参数、目标路径与工作区状态独立校验，批准不能绕过校验。工作区内绝对路径和相对路径采用相同规则，符号链接按实际目标分类；等待审批期间固定单文件或目录句柄，执行前重新检查目标身份及路径，目录搜索不跟随子项符号链接。步骤 input 保存设置版本、审批策略、审批人及 allow/ask/deny 判定和原因，不将自动放行或策略拒绝伪造为用户决定。操作系统沙箱和完全访问模式尚未接入。
+- 参数、目标路径与工作区状态独立校验，批准不能绕过校验。工作区内绝对路径和相对路径采用相同规则，符号链接按实际目标分类；等待审批期间固定单文件或目录句柄，执行前重新检查目标身份及路径，目录搜索不跟随子项符号链接。步骤 input 保存设置版本、审批策略、审批人及 allow/ask/deny 判定和原因，不将自动放行或策略拒绝伪造为用户决定。macOS 命令已接入 Seatbelt 系统沙箱，Linux/Windows 尚未接入文件及网络沙箱；永久完全访问模式尚未接入。
 - 每轮模型调用独立保存结果及 usage；后续上下文恢复工具调用与结果完整配对，重发旧分支审计不得重新进入上下文。
 - 上下文压缩生成带来源范围的摘要版本，保留历史原文；摘要验证并保存成功后再切换生效版本。
 - 压缩边界应保持工具调用与结果的完整关系，当前用户要求和必须保留的约束应明确处理。

@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -62,9 +61,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 		if err != nil {
 			return message, operationStorageError(ctx, err)
 		}
-		if len(directoryIDs) > 0 {
-			decision = policy.Decision{Action: policy.Allow, Reason: "conversation_directory_grant"}
-		}
+		decision = policy.ApplyDirectoryGrant(decision, len(directoryIDs) > 0)
 	}
 	step, err = e.createToolStep(ctx, ex, parent, call, prepared, decision, directoryIDs)
 	if err != nil {
@@ -136,22 +133,11 @@ func toolDecision(prepared *toolexecutor.Prepared, denied, uncertain map[string]
 	if prepared == nil {
 		return policy.Decision{Action: policy.Deny, Reason: "operation_validation_failed"}
 	}
-	if denied[prepared.Hash()] {
-		return policy.Decision{Action: policy.Deny, Reason: "previously_rejected"}
-	}
-	if uncertain[prepared.Hash()] {
-		if snapshot.ApprovalPolicy == policy.Never {
-			return policy.Decision{Action: policy.Deny, Reason: "previous_result_requires_confirmation"}
-		}
-		return policy.Decision{Action: policy.Ask, Reason: "previous_result_requires_confirmation"}
-	}
-	if boundary := prepared.CommandBoundary(); boundary != nil {
-		return policy.EvaluateCommand(snapshot.ApprovalPolicy, *boundary)
-	}
-	if snapshot.SandboxMode == tool.SandboxReadOnly && slices.Contains(prepared.Definition().Effects, tool.EffectWrite) {
-		return policy.RequiresApproval(snapshot.ApprovalPolicy, "read_only_mode")
-	}
-	return policy.Evaluate(snapshot.ApprovalPolicy, prepared.Definition().Effects, prepared.OutsideWorkspace())
+	return policy.EvaluateOperation(snapshot.ApprovalPolicy, policy.Operation{
+		Effects: prepared.Definition().Effects, OutsideWorkspace: prepared.OutsideWorkspace(),
+		SandboxMode: snapshot.SandboxMode, Command: prepared.CommandBoundary(),
+		PreviouslyRejected: denied[prepared.Hash()], ResultUnconfirmed: uncertain[prepared.Hash()],
+	})
 }
 
 func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, prepared *toolexecutor.Prepared, decision policy.Decision, directoryIDs []string) (agent.Step, error) {

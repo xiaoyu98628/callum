@@ -69,7 +69,9 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | `internal/conversation/service`、`history` | 会话管理、发送与重发、标题和来源指纹 | 已实现 |
 | `internal/agent/executor`、`service` | 统一调度、模型与工具循环、并行标题及终态保存 | 已实现 |
 | `internal/agent/approval` | 审批快照、决定及等待协调 | 已实现 |
+| `internal/agent/transcript` | 执行轨迹配对、失败回答过滤及中断工具输出恢复 | 已实现 |
 | `internal/tool/registry`、`executor` | 工具注册、规范化、权限边界及执行 | 已实现 |
+| `internal/tool/policy` | 根据可信操作事实、历史决定、沙箱边界及目录授权计算审批要求 | 已实现 |
 | `internal/tool/builtin/filesystem` | 文件工具统一装配入口 | 已实现 |
 | `internal/tool/builtin/filesystem/list`、`read`、`search`、`patch` | 独立的目录查看、按行读取、字面搜索及文件补丁工具 | 已实现 |
 | `internal/tool/builtin/filesystem/internal/fileaccess` | 文件工具内部共享的固定目标、身份检查、句柄及有界文本读取 | 已实现 |
@@ -82,6 +84,9 @@ Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
 | `internal/stdio/workspace`、`conversation` | 工作区和对话接口 | 已实现 |
 
 `internal/conversation/compaction` 负责完整轮次的压缩规划、来源指纹与摘要校验，执行编排位于 `internal/agent/service`。用户补充输入使用现有步骤持久化，支持选项、文字、跳过和取消。工具和审批业务不依赖 stdio，后续入口复用同一 Agent 与审批服务。
+会话更新通过 `conversation.Update` 接收模型 ID 及可更新字段，业务服务校验后生成仓储使用的 `conversation.Change`，模型快照由服务端解析；JSON-RPC 的请求、响应和通知字段保持兼容。
+`policy.Operation` 只保存可信的判定事实，不持有设置快照或工具资源；Agent 校验执行快照并查询授权，policy 统一计算历史拒绝、未知结果、沙箱及目录授权的最终判定，执行认领仍在事务内复核授权。
+`agent/transcript` 不依赖 ORM 或通信协议；SQLite 保留有界查询、分支筛选和事务写入，历史读取与压缩检查点共用轨迹恢复规则，`conversation/history` 负责将轨迹装配到对应用户消息后。
 其他协议和供应商兼容差异按实际需求接入。
 
 目录按业务与职责划分；契约保留在模块根包，具体业务、存储和通信实现进入职责明确的子包。
@@ -114,7 +119,7 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 迁移逻辑及其测试集中在独立目录，迁移包不反向导入 SQLite 存储包，也不重复定义表映射。
 `migrations/migrate.go` 负责版本判断、事务和回滚；
 `migrations/000001_create_model_config.go` 负责创建厂商表、模型表及其约束和索引，以及已有库的主键类型检查。
-`000002_create_conversation_core.go` 创建普通对话五张表。`000003_create_run_approvals.go` 增加审批表及步骤组合唯一索引。`000004_create_app_settings.go` 增加应用设置表、默认执行设置及运行配置快照。`000005_create_context_versions.go` 新增摘要版本表和独立压缩设置组，直接初始化当前 Token 配置，设置 revision 为 `1`。新库顺序执行五个迁移，在同一事务中记录版本 `5`；已有版本 `1`、`2`、`3`、`4` 的库通过检查后保留配置、对话和审批并升级。旧执行快照保持 NULL，不推断其历史权限。
+`000002_create_conversation_core.go` 创建普通对话五张表。`000003_create_run_approvals.go` 增加审批表及步骤组合唯一索引。`000004_create_app_settings.go` 增加应用设置表、默认执行设置及运行配置快照。`000005_create_context_versions.go` 新增摘要版本表和独立压缩设置组，直接初始化当前 Token 配置，设置 revision 为 `1`。`000006_create_directory_grants.go` 新增会话目录授权表。新库顺序执行六个迁移，在同一事务中记录版本 `6`；已有版本 `1` 至 `5` 的库通过检查后保留配置、对话、审批及摘要并升级。旧执行快照保持 NULL，不推断其历史权限。
 初始化失败会关闭此前创建的连接池；初始化上下文不绑定到运行时实例，
 每次配置操作都接收自己的 `context.Context`。
 
@@ -217,7 +222,7 @@ Token 容量未知时保存 SQL `NULL`，填写时必须大于零，不自动推
 
 数据库使用 STRICT 表、外键约束、联合唯一索引及字段检查约束。
 结构版本保存在 SQLite `user_version` 中，当前版本为 `5`，与建表文件编号一致。
-新库在同一写事务中建立配置、普通对话、审批、应用设置和上下文版本结构，记录版本 `5`，失败时回滚。
+新库在同一写事务中建立配置、普通对话、审批、应用设置、上下文版本和目录授权结构，记录版本 `6`，失败时回滚。
 已有版本 `1` 的数据库会检查两张配置表均使用单列 `TEXT` 类型的 `id` 主键，检查通过后继续使用，
 不会重新分配记录标识，随后增加普通对话表。曾使用相同版本号的整数主键结构会被拒绝，不提供自动升级。
 版本 `2` 升级时增加审批表及组合唯一索引；版本 `3` 升级时增加应用设置、初始化默认值并为执行表增加可空快照。版本 `4` 增加上下文版本并直接初始化 Token 压缩设置，不提供旧条数、字节阈值及其执行快照的数据转换。压缩预算从已配置模型窗口解析或显式设置。
@@ -465,6 +470,7 @@ CGO_ENABLED=0 go build -mod=readonly -tags release -o bin/callum ./cmd/callum
 
 构建产物写入 `bin/`，该目录已加入 `.gitignore`。
 `go fix -diff` 只预览当前 Go 版本可用的现代化建议，不写入源文件。
+有建议时命令返回非零退出码，CI 会将其作为检查失败；建议应逐项审查并落实，再确认预览无差异。`.gitattributes` 固定 Go 文件检出为 LF，保持 Windows、macOS 和 Linux 的 gofmt 检查一致。
 代码优先使用当前 Go 版本支持且能提高清晰度的写法，例如 `errors.AsType`、`slices` 和 `t.Context()`。
 
 适配器测试使用可控的 HTTP transport 模拟响应，不访问真实模型服务。

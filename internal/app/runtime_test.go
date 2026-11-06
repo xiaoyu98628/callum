@@ -130,7 +130,7 @@ func TestRuntimeWithoutProtocol(t *testing.T) {
 		t.Fatalf("完整结果无法查询: %+v %v", step, err)
 	}
 	title := "手动标题"
-	_, err = runtime.Conversations().Update(t.Context(), accepted.Conversation.ID, conversation.Change{Title: &title}, "")
+	_, err = runtime.Conversations().Update(t.Context(), accepted.Conversation.ID, conversation.Update{Title: &title})
 	if err != nil {
 		t.Fatal(err)
 	}

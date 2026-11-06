@@ -208,14 +208,14 @@ func (r *Repository) ContextBatch(ctx context.Context, conversationID, runID str
 			}
 		}
 	}
-	messages, err := runTranscript(projected)
+	messages, err := restoreTranscript(projected)
 	if err != nil {
 		return nil, err
 	}
 	if len(messages) > 248 {
 		return nil, &model.InputLimitError{Dimension: "单个工具批次消息数量", Actual: int64(len(messages)), Limit: 248}
 	}
-	return &domain.ContextBatch{BatchSource: domain.BatchSource{StepID: parent.ID, Through: through, Fingerprint: hex.EncodeToString(digest[:])}, Messages: messages}, nil
+	return &domain.ContextBatch{StepID: parent.ID, Through: through, Fingerprint: hex.EncodeToString(digest[:]), Messages: messages}, nil
 }
 
 func (r *Repository) SaveCheckpoint(ctx context.Context, c domain.ContextCheckpoint) error {

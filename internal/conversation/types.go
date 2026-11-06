@@ -33,6 +33,18 @@ type Message struct {
 	CompletedAt    *int64        `json:"completed_at"`
 }
 
+// Update 是业务更新输入；模型只接受本地标识，快照由服务端解析。
+type Update struct {
+	Title           *string `json:"title,omitempty"`
+	ModelID         string  `json:"model_id,omitempty"`
+	WorkspaceID     *string `json:"workspace_id,omitempty"`
+	DetachWorkspace bool    `json:"detach_workspace,omitempty"`
+	Pinned          *bool   `json:"pinned,omitempty"`
+	Archived        *bool   `json:"archived,omitempty"`
+	Deleted         *bool   `json:"-"`
+}
+
+// Change 是服务校验后的仓储写入参数；Model 仅使用服务端解析的快照。
 type Change struct {
 	Title           *string         `json:"title,omitempty"`
 	Model           *model.Snapshot `json:"-"`

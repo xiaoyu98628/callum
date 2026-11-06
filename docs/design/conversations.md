@@ -126,6 +126,8 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 ## 工具与审批实现约定
 
 业务编排位于 internal/agent，filesystem 与 command 根包分别通过 Tools()、Tools(environment) 汇总工具；具体文件工具位于 filesystem 子包，命令实现位于 internal/tool/builtin/command/run。根包不承载具体参数校验、执行或资源生命周期；具体工具通过 New() 实现统一工具契约，数据库表名和通信 run 标识保持兼容。
+会话更新的业务输入为 conversation.Update，只接受模型 ID；conversation/service 校验并解析快照后生成 conversation.Change 仓储参数。stdio 负责参数转换，现有 JSON-RPC 方法、字段和错误映射保持兼容。
+工具审批通过 tool/policy.Operation 接收可信事实，由 policy 统一计算历史拒绝、结果待核实、沙箱边界和目录授权后的决定。Agent 负责快照校验、授权查询、审批等待和工具编排，授权撤销与执行认领仍在同一数据库事务边界协调。
 文件和命令工具共用 internal/tool/builtin/internal/arguments 的 JSON 结构解析：单个 UTF-8 对象、16 KiB 上限、字段名精确匹配、拒绝各层重复字段和 null、未知字段、类型错误、过深嵌套及尾随内容。各工具保留实际参数范围、默认值和业务校验，Validate 与 Prepare 共用同一业务解码函数。读取工具重复字段从保留最后值改为拒绝，合法参数的规范化及审批快照/指纹保持原义。
 主对话由 internal/agent/service/prompt.go 定义固定的过程沟通提示，loop.go 在每轮主调用的 fixed 上下文首位加入 system 消息，随后追加待核实操作事实及有效历史。提示参与预算估算和请求指纹，不落为用户消息，不参与历史摘要；自动压缩后继续注入，既有工具轨迹与来源不改写。标题、摘要与 model.invoke 保持原用途。提示引导操作前概括目的、阶段之间报告真实发现与下一步，不对每个文件重复说明；实际文本由模型输出，不补造内容，也不为补写说明增加模型请求。审批和副作用判断独立于这些文字。
 
@@ -157,6 +159,8 @@ approval.get/list 查询记录，approval.decide 只接受 approval_id、decisio
 进程关闭或取消结束 pending 审批，已经作出的决定保留；重启保留审计、标记中断，不自动执行已批准但结果未知的操作。
 
 ## 操作事实与上下文恢复
+
+internal/agent/transcript 负责执行轨迹配对校验、失败回答过滤、未执行结果补齐及中断工具输出恢复；输入仅为业务类型，不依赖 GORM 或 SQLite 表映射。SQLite 仓储负责有界查询、当前分支筛选和恢复结果的原子保存，历史恢复与压缩检查点共用这些规则；conversation/history 负责会话消息与执行轨迹的整体装配。
 
 工具的 `Result` 分别报告有界 JSON `Output` 与 `Outcome`。事实由可信实现提供，与步骤成功、失败、取消及整个执行状态独立；关闭资源失败、超时或取消不得覆盖已生效操作的有效输出。缺失或无效事实按可信 `effects` 保守处理：纯读取为 `none`，其他为 `unknown`，并返回工具契约错误。
 
