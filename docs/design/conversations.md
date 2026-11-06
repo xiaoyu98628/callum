@@ -142,10 +142,10 @@ approval_policy 支持 on-request（默认）、always、never；approvals_revie
 on-request 放行纯读取及工作区内普通修改；纯读取可访问当前系统用户可读的本地路径，不要求绑定工作区或额外目录授权。无工作区或工作区外普通修改以及删除、大范围覆盖、外发或未知影响需要询问；always 逐次询问；never 将需要审批的操作直接拒绝。
 工具 effects 由可信代码声明，可包含 read、write、destructive、external、unknown；缺少类别按未知操作处理，无效类别拒绝注册。
 混合类别采用需要审批的结果，读取声明不能抵消破坏性或外发影响；工具负责将影响较大的覆盖声明为 destructive。
-当前已提供三个读取工具、apply_patch 文件创建修改及 run_command 命令工具。独立删除和外发工具尚未接入；命令可产生这类影响，始终按 unknown 审批。
+当前已提供三个读取工具、apply_patch 文件创建修改及 run_command 命令工具。独立删除和外发工具尚未接入；命令保持 unknown 分类，审批另结合服务端固定的执行边界。
 参数、目标范围及工作区状态独立校验；默认批准只授权本次固定目标操作；会话目录授权由用户明确选择并单独保存。策略拒绝和参数校验失败不生成用户审批记录。
-权限判定属于 Go，模型不能声明自己已获授权。旧 approval-mode、approval-policy、approvals-reviewer 启动参数移除，未加入操作系统沙箱或完全访问模式。
-工具步骤 input 保存 settings_revision、approval_policy、approvals_reviewer 和 authorization（action、reason），供审计查询；审批表结构和通信接口保持不变。
+权限判定属于 Go，模型不能声明自己已获授权。旧 approval-mode、approval-policy、approvals-reviewer 启动参数移除，macOS 命令已接入 Seatbelt，未提供永久完全访问模式。
+工具步骤 input 保存 settings_revision、approval_policy、approvals_reviewer、sandbox_mode 和 authorization（action、reason），供审计查询；审批表结构和通信接口保持不变。
 request 保存服务端生成的工具完整定义、版本、可选工作区、实际目标及规范化参数，request_hash 为该快照的 SHA-256。无工作区时 workspace 为 null；target 保存 requested_path、path、kind 和 within_workspace，不能由模型参数覆盖。
 approval.get/list 查询记录，approval.decide 只接受 approval_id、decision、decision_note；批准或拒绝身份由服务端填写为 local_user。
 相同决定幂等，冲突决定拒绝。批准与取消竞争时，仍需在执行前检查上下文、工作区及操作指纹，数据库原子认领保证同一步骤不会启动两次。
@@ -172,7 +172,7 @@ approval.get/list 查询记录，approval.decide 只接受 approval_id、decisio
 
 同一 `request_hash` 留下未知、部分生效或已生效但报错的结果后，模型再次请求该固定操作必须重新获得用户确认；`never` 策略拒绝，判定原因 `previous_result_requires_confirmation`。这一约束沿当前分支上下文恢复，不自动重试操作；明确成功才解除待核实状态。审批不改变操作事实，也不豁免参数、目标及工作区的执行前校验。
 
-已接入文件创建修改和非交互命令执行；操作系统沙箱尚未接入。macOS、Linux、Windows 的原生验证与交叉编译结果分别说明，不将编译通过视为原生运行通过。
+已接入文件创建修改和非交互命令执行；macOS 命令使用 Seatbelt 系统沙箱，Linux/Windows 仍逐次审批。macOS、Linux、Windows 的原生验证与交叉编译结果分别说明，不将编译通过视为原生运行通过。
 
 模型与工具结果保留统一 context_message 以重建跨协议上下文，标题不参与工具轨迹；步骤仍保存原始结果和 usage。
 工具调用轮中的暂存正文随 message.updated 清空，最终回答继续流式输出；完整中间文本可查询对应模型步骤。
@@ -200,7 +200,13 @@ approval.get/list 查询记录，approval.decide 只接受 approval_id、decisio
 
 `SnapshotInvocation` 是可选的工具契约，详情保存到审批 request.details，最多 16 KiB 非空 JSON 对象。命令准备仅固定句柄和元数据，详情记录实际可执行文件及身份、大小和修改时间、cwd 及身份、环境配置名单与摘要，不保存环境值；固定参数及可选工作区仍使用原字段。执行器复制快照并纳入 request_hash，执行前比较；命令再次核对请求路径、目标与工作区身份。未实现此接口的工具不新增字段，旧文件审批指纹保持原样。元数据校验不是依赖图锁定或原子执行保证。
 
-环境由 app 传入并按 base-v1 白名单筛选，只保留基础路径和语言变量，不允许模型覆盖，不继承模型 Key、令牌或任意代理配置。命令按当前用户权限运行且 effects 固定 unknown，on-request 与 always 均询问，never 拒绝；cwd 不作为文件或网络访问边界。
+环境由 app 传入并按 base-v1 白名单筛选，只保留基础路径和语言变量，不允许模型覆盖，不继承模型 Key、令牌或任意代理配置。命令 effects 固定 unknown；PermissionTool 接收服务端快照中的 SandboxMode，CommandInvocation 返回固定执行边界，执行器将其纳入快照并在执行前复核。命令 effects 仍为 unknown，不按 ls、cat 等命令文字伪装为读取。服务端另固定实际执行边界：macOS 的新任务默认通过 /usr/bin/sandbox-exec 使用 Seatbelt；命令及后代可读取当前用户可读的文件，网络关闭，workspace-write 仅开放真实项目及每次命令的私有临时目录写入，read-only 或未绑定项目仅开放该临时目录写入。项目路径下 .git、.codex、.agents、.aws 的直接写入被拒绝。常用 Go/npm 缓存定向到私有临时目录，结束后删除；未安装的依赖不能通过命令联网下载。模型客户端的网络请求不受命令沙箱限制。
+
+on-request 自动执行普通沙箱命令；已识别的删除、权限修改及敏感 Git 命令仍询问，批准后也保留原沙箱。该识别不保证分析任意脚本的业务影响。always 对有效调用逐次询问；never 执行允许的沙箱调用并拒绝仍需审批的操作。沙箱执行失败直接保留退出码及错误，不自动在沙箱外重试。系统沙箱无法启动时明确失败，不降级为无隔离执行。
+
+确需扩大权限时，模型必须提交 sandbox_permissions: "require_escalated" 及非空 justification。服务端生成本次沙箱外执行快照并请求独立审批；批准只允许本次固定命令使用当前系统用户的文件和网络权限，不保存命令前缀或目录授权。never 拒绝该请求。可选 sandbox_permissions: "use_default" 与省略一致。Linux/Windows 尚未接入系统沙箱，仍对每次命令请求审批，不宣称具有 macOS 的隔离能力。
+
+Seatbelt 是共享文件系统上的路径访问边界，不是容器或独立文件系统：项目内既有文件的其他硬链接会共享修改，项目内已可写的别名也不构成独立副本；新建硬链接被默认拒绝。路径固定及执行前复核不保证抵抗同时发生的外部重命名，也不锁定程序的完整依赖图。应将项目根目录设为实际任务目录，而非整个用户目录。
 
 `StreamingInvocation` 是可选的执行契约，普通工具保持最终 Result 接口。命令持续排空 stdout/stderr，业务服务发布 tool.output，stdio 转换为带 conversation_id、run_id、step_id 和 output 的通知；output 包含步骤内递增 sequence、stdout/stderr 的 stream、encoding=base64、data。片段最多 4 KiB，单次实时输出最多 64 KiB 与 128 片；不受模型 stream 开关控制，不混入模型正文，不逐片持久化。回调失败停止进程并等待读取任务退出；Hub 慢订阅仅断开对应消费者。两个流各自有序，不承诺跨流写入顺序。
 

@@ -118,12 +118,13 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 ## 5. 应用设置
 
-当前注册 `execution` 和 `context_compaction` 两个配置组。以下两个字段属于 `execution`，分别控制审批策略和审批人；压缩设置见 9.1 节。
+当前注册 `execution` 和 `context_compaction` 两个配置组。以下字段属于 `execution`，分别控制审批策略、审批人和沙箱范围；压缩设置见 9.1 节。
 
 | 字段 | 支持值 | 默认值 |
 | --- | --- | --- |
 | `approval_policy` | `on-request`、`always`、`never` | `on-request` |
 | `approvals_reviewer` | 当前仅 `user` | `user` |
+| `sandbox_mode` | `workspace-write`、`read-only` | `workspace-write` |
 
 `on-request` 按操作类别判断；`always` 逐次询问；`never` 不询问，并拒绝需要审批的操作。`never` 不扩大工作区或工具权限，不是完全访问模式。
 
@@ -136,7 +137,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 响应示例：
 
 ```json
-{"jsonrpc":"2.0","id":"settings-get","result":{"id":"<settings_id>","key":"execution","value":{"approval_policy":"on-request","approvals_reviewer":"user"},"revision":1,"created_at":1700000000000,"updated_at":1700000000000}}
+{"jsonrpc":"2.0","id":"settings-get","result":{"id":"<settings_id>","key":"execution","value":{"approval_policy":"on-request","approvals_reviewer":"user","sandbox_mode":"workspace-write"},"revision":1,"created_at":1700000000000,"updated_at":1700000000000}}
 ```
 
 ### settings.update
@@ -517,7 +518,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 | `read_file` | `path`，可选 `start_line`、`end_line` | 按行读取 UTF-8 文本，例如 `path:"note.txt"` |
 | `search_text` | `path`、`query`，可选 `limit` | 搜索字面文本 |
 | `apply_patch` | `patch`、`base_versions` | 创建或修改 UTF-8 文本文件；修改需提供原文件 SHA-256 |
-| `run_command` | `command` 数组，可选 `cwd` | 非交互命令执行，实时推送输出并保存最终结果；始终按未知影响审批 |
+| `run_command` | `command` 数组，可选 `cwd` | 非交互命令执行，实时推送输出并保存最终结果；根据服务端固定的沙箱边界和审批策略判定 |
 
 四个文件工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
 纯读取在 `on-request` 与 `never` 下自动执行，包括无工作区和工作区外路径，仍受当前系统用户访问权限及文件工具的校验约束；`always` 逐次询问。无工作区或工作区外普通修改在 `on-request` 下需要审批，`never` 拒绝仍需审批的操作。默认批准只授权该次固定目标；具备目录选项时，用户可明确选择当前会话的目录及子目录授权。
@@ -574,7 +575,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 | `always` | 每次有效调用都询问 | 询问用户 |
 | `never` | 自动执行 | 直接拒绝，不创建待审批记录 |
 
-`never` 下纯读取及工作区内普通补丁修改仍可执行，无工作区或工作区外普通修改、大范围覆盖及其他需要审批的操作直接拒绝。删除、外发类别使用受控工具测试验证，并不表示存在相应产品工具。
+默认 workspace-write 模式下，`never` 允许纯读取、工作区内普通补丁及普通沙箱命令；read-only 模式下补丁修改需要审批并被 never 拒绝。其他情况下，纯读取及工作区内普通补丁修改仍可执行，无工作区或工作区外普通修改、大范围覆盖及其他需要审批的操作直接拒绝。删除、外发类别使用受控工具测试验证，并不表示存在相应产品工具。
 
 ## 12. 图片输入
 
@@ -869,7 +870,15 @@ usage 片段响应示例：
 ```
 
 command 是 1 至 256 项字符串数组，整个参数 JSON 不超过 16 KiB。cwd 省略或相对时以绑定工作区为基准；无工作区必须提供绝对 cwd，不使用 Callum 进程目录。可执行文件解析为绝对路径并记录身份；Windows 直接启动 exe/com，脚本需显式指定解释器。stdin 为空，无 PTY、后续输入或后台会话。
-命令统一声明 unknown：on-request 和 always 请求审批，never 拒绝。它以当前用户权限运行，能够访问工作目录之外的资源；当前没有操作系统沙箱。审批 details 固定实际可执行文件、cwd、身份及非敏感环境配置摘要，执行前再次校验，不保证完整依赖图或原子启动隔离。
+命令 effects 仍为 `unknown`，不按 `ls`、`cat` 等命令文字伪装为读取。服务端另固定实际执行边界：macOS 的新任务默认通过 `/usr/bin/sandbox-exec` 使用 Seatbelt；命令及后代可读取当前用户可读的文件，网络关闭，`workspace-write` 仅开放真实项目及每次命令的私有临时目录写入，`read-only` 或未绑定项目仅开放该临时目录写入。项目路径下 `.git`、`.codex`、`.agents`、`.aws` 的直接写入被拒绝。常用 Go/npm 缓存定向到私有临时目录，结束后删除；未安装的依赖不能通过命令联网下载。模型客户端的网络请求不受命令沙箱限制。
+
+`on-request` 自动执行普通沙箱命令；已识别的删除、权限修改及敏感 Git 命令仍询问，批准后也保留原沙箱。该识别不保证分析任意脚本的业务影响。`always` 对有效调用逐次询问；`never` 执行允许的沙箱调用并拒绝仍需审批的操作。沙箱执行失败直接保留退出码及错误，不自动在沙箱外重试。系统沙箱无法启动时明确失败，不降级为无隔离执行。
+
+确需扩大权限时，模型必须提交 `sandbox_permissions: "require_escalated"` 及非空 `justification`。服务端生成本次沙箱外执行快照并请求独立审批；批准只允许本次固定命令使用当前系统用户的文件和网络权限，不保存命令前缀或目录授权。`never` 拒绝该请求。可选 `sandbox_permissions: "use_default"` 与省略一致。Linux/Windows 尚未接入系统沙箱，仍对每次命令请求审批，不宣称具有 macOS 的隔离能力。
+
+Seatbelt 是共享文件系统上的路径访问边界，不是容器或独立文件系统：项目内既有文件的其他硬链接会共享修改，项目内已可写的别名也不构成独立副本；新建硬链接被默认拒绝。路径固定及执行前复核不保证抵抗同时发生的外部重命名，也不锁定程序的完整依赖图。应将项目根目录设为实际任务目录，而非整个用户目录。
+
+审批 `details` 还保存 `execution_boundary`、`sandbox_backend`、`writable_roots`、`network_access`、临时目录规则和策略摘要；临时随机路径不改变操作指纹。工具定义版本为 2，历史快照及指纹不改写。全局旧设置缺少 sandbox_mode 时仅为新任务补足默认；历史任务快照保持缺失并延续旧审批语义，旧客户端更新两字段保留现有模式。
 
 客户端持续读取 JSONL，在命令结束前即可收到：
 
@@ -880,7 +889,7 @@ command 是 1 至 256 项字符串数组，整个参数 JSON 不超过 16 KiB。
 sequence 在单个步骤内递增，从 1 开始；按 step_id 分流后解码 base64 字节。两个流各自保持读取顺序，不承诺跨流原始写入顺序，也不能把每片视为完整 UTF-8 字符或成功信号。模型 stream=false 仍可收到命令输出；model.invoke 不提供此工具。
 每片最多 4 KiB，一次调用最多推送 64 KiB、128 片；最终分别保留 stdout/stderr 的前 16 KiB，按 utf-8 或 base64 编码，每流最多 24 KiB JSON，总结果不超过 64 KiB。超出后继续排空管道，用 truncated、stream_truncated 标记并保存实际读取字节数。
 
-命令结束后用 step.list 定位 name=run_command 的步骤，通过 step.data 查询 output。最终 result 含 started、pid、exit_code、可选 signal、timed_out、cancelled、cleanup_complete、stdout、stderr、stream_truncated。输出对象为 encoding、data、bytes、truncated。片段不逐片持久化，不承诺断线重放，最终有界结果可查询。
+命令结束后用 step.list 定位 name=run_command 的步骤，通过 step.data 查询 output。最终 result 含 execution_boundary、started、pid、exit_code、可选 signal、timed_out、cancelled、cleanup_complete、stdout、stderr、stream_truncated。输出对象为 encoding、data、bytes、truncated。片段不逐片持久化，不承诺断线重放，最终有界结果可查询。
 启动失败为 not_applied；正常退出并完成收尾为 applied，仅表示命令调用已执行至退出，业务成败仍看 exit_code，非零码原样返回。启动后取消、超时或结果不明为 unknown，保存部分输出且不自动重试；pid 仅供核实，不授权重启后按旧 PID 结束进程。
 
 沿用 --tool-timeout，默认 30 秒，不包含审批等待。run.cancel 与连接/应用关闭会取消并等待所属执行。Unix 清理独立进程组内的后代，不保证回收主动脱离进程组、由外部服务启动，或在 Callum 异常退出后继续运行的进程；Windows 10+/Server 2016+ 以 Job 管理普通子进程。主进程、管道各最多 2 秒收尾，Windows 另有最多 2 秒 Job 成员确认；清理失败如实报告，审批不等于沙箱隔离。平台原生验证与交叉编译结果分别说明。

@@ -13,16 +13,17 @@ import (
 const cleanupTimeout = 2 * time.Second
 
 type processReport struct {
-	Started         bool       `json:"started"`
-	PID             *int       `json:"pid"`
-	ExitCode        *int       `json:"exit_code"`
-	Signal          string     `json:"signal,omitempty"`
-	TimedOut        bool       `json:"timed_out"`
-	Cancelled       bool       `json:"cancelled"`
-	CleanupComplete bool       `json:"cleanup_complete"`
-	Stdout          outputData `json:"stdout"`
-	Stderr          outputData `json:"stderr"`
-	StreamTruncated bool       `json:"stream_truncated"`
+	Boundary        tool.CommandBoundary `json:"execution_boundary"`
+	Started         bool                 `json:"started"`
+	PID             *int                 `json:"pid"`
+	ExitCode        *int                 `json:"exit_code"`
+	Signal          string               `json:"signal,omitempty"`
+	TimedOut        bool                 `json:"timed_out"`
+	Cancelled       bool                 `json:"cancelled"`
+	CleanupComplete bool                 `json:"cleanup_complete"`
+	Stdout          outputData           `json:"stdout"`
+	Stderr          outputData           `json:"stderr"`
+	StreamTruncated bool                 `json:"stream_truncated"`
 }
 
 type processExit struct {
@@ -31,6 +32,7 @@ type processExit struct {
 }
 
 func runProcess(ctx context.Context, fixed *fixedCommand, emit func(tool.OutputChunk) error) (report processReport, retErr error) {
+	report.Boundary = fixed.boundary
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	output := &capture{emit: emit, cancel: cancel}

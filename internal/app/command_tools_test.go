@@ -76,6 +76,8 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 		name, policy, decision, mode string
 		bound, stream                bool
 	}{
+		{"sandbox_automatic", "on-request", "", "write", true, false},
+		{"sandbox_never_automatic", "never", "", "write", true, false},
 		{"workspace_approve", "on-request", "approved", "write", true, false},
 		{"absolute_cwd_stream", "on-request", "approved", "stream", false, true},
 		{"always_reject", "always", "rejected", "write", true, true},
@@ -87,6 +89,10 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 		{"shutdown_children", "on-request", "approved", "shutdown", true, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			automatic := strings.HasPrefix(test.name, "sandbox_")
+			if automatic && runtime.GOOS != "darwin" {
+				t.Skip("该平台尚未接入自动命令沙箱")
+			}
 			cwd := t.TempDir()
 			marker := filepath.Join(cwd, "marker")
 			release := filepath.Join(cwd, "release")
@@ -102,7 +108,12 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 			case "shutdown":
 				command = []string{helper, "spawn", heartbeat}
 			}
-			args := map[string]any{"command": command}
+			// 本组覆盖明确的沙箱外逐次审批；普通沙箱命令在独立用例验证自动执行。
+			args := map[string]any{"command": command, "sandbox_permissions": "require_escalated", "justification": "仅在受控临时目录验证本次审批和进程生命周期"}
+			if automatic {
+				delete(args, "sandbox_permissions")
+				delete(args, "justification")
+			}
 			if !test.bound {
 				args["cwd"] = cwd
 			}
@@ -142,7 +153,7 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 						t.Error(err)
 					}
 					want := tool.OutcomeApplied
-					if test.decision == "rejected" || test.policy == "never" {
+					if test.decision == "rejected" || test.policy == "never" && !automatic {
 						want = tool.OutcomeNotApplied
 					}
 					if test.mode == "timeout" {
@@ -278,6 +289,7 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 			var saved struct {
 				Operation tool.OutcomeRecord `json:"operation"`
 				Result    struct {
+					Boundary tool.CommandBoundary `json:"execution_boundary"`
 					Started  bool
 					ExitCode *int `json:"exit_code"`
 					TimedOut bool `json:"timed_out"`
@@ -288,7 +300,7 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 				t.Fatal(err)
 			}
 			want := tool.OutcomeApplied
-			if test.decision == "rejected" || test.decision == "cancel" || test.policy == "never" {
+			if test.decision == "rejected" || test.decision == "cancel" || test.policy == "never" && !automatic {
 				want = tool.OutcomeNotApplied
 			}
 			if test.mode == "cancel" || test.mode == "timeout" || test.mode == "shutdown" {
@@ -296,6 +308,9 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 			}
 			if saved.Operation.Outcome != want || saved.Operation.RequestHash == "" {
 				t.Fatalf("终态没有保存事实: %s", raw)
+			}
+			if automatic && (!saved.Result.Boundary.Sandboxed || saved.Result.Boundary.Escalated) {
+				t.Fatalf("自动命令没有使用沙箱: %s", raw)
 			}
 			if want == tool.OutcomeNotApplied {
 				if saved.Result.Started {

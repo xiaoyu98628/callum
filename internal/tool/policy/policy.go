@@ -91,3 +91,37 @@ func classify(effects []tool.Effect) Decision {
 	}
 	return Decision{Allow, "workspace_read_write_policy"}
 }
+
+// RequiresApproval 保持 always/never 的询问语义，不将拒绝伪装为用户决定。
+func RequiresApproval(p ApprovalPolicy, reason string) Decision {
+	if !p.Valid() {
+		return Decision{Deny, "invalid_approval_policy"}
+	}
+	if p == Never {
+		return Decision{Deny, "approval_required_but_disabled"}
+	}
+	if p == Always {
+		return Decision{Ask, "policy_always"}
+	}
+	return Decision{Ask, reason}
+}
+
+// EvaluateCommand 允许受系统边界约束的常规命令，不降低命令本身的 unknown 影响类别。
+func EvaluateCommand(p ApprovalPolicy, boundary tool.CommandBoundary) Decision {
+	if !p.Valid() {
+		return Decision{Deny, "invalid_approval_policy"}
+	}
+	if boundary.Escalated {
+		return RequiresApproval(p, "sandbox_escalation")
+	}
+	if boundary.Risk != "" {
+		return RequiresApproval(p, boundary.Risk)
+	}
+	if boundary.Sandboxed && boundary.Mode.Valid() {
+		if p == Always {
+			return Decision{Ask, "policy_always"}
+		}
+		return Decision{Allow, "sandboxed_command"}
+	}
+	return RequiresApproval(p, "unsandboxed_command")
+}

@@ -40,10 +40,17 @@ type Prepared struct {
 	hash       string
 	closeOnce  sync.Once
 	closeErr   error
+	boundary   *tool.CommandBoundary
 }
 
 func (p *Prepared) Request() json.RawMessage { return slices.Clone(p.request) }
 func (p *Prepared) Hash() string             { return p.hash }
+func (p *Prepared) CommandBoundary() *tool.CommandBoundary {
+	if p.boundary == nil {
+		return nil
+	}
+	return new(*p.boundary)
+}
 func (p *Prepared) Definition() tool.Definition {
 	d := p.definition
 	d.Parameters = slices.Clone(d.Parameters)
@@ -84,6 +91,10 @@ func New(r *registry.Registry, timeout time.Duration) (*Executor, error) {
 func (e *Executor) Definitions() []tool.Definition { return e.registry.Definitions() }
 
 func (e *Executor) Prepare(ctx context.Context, scope tool.Scope, name string, args json.RawMessage) (*Prepared, error) {
+	return e.PrepareWithPermissions(ctx, scope, name, args, tool.ExecutionPermissions{})
+}
+
+func (e *Executor) PrepareWithPermissions(ctx context.Context, scope tool.Scope, name string, args json.RawMessage, permissions tool.ExecutionPermissions) (*Prepared, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -101,7 +112,12 @@ func (e *Executor) Prepare(ctx context.Context, scope tool.Scope, name string, a
 	if err != nil {
 		return nil, err
 	}
-	invocation, err := t.Prepare(ctx, scope, normalized)
+	var invocation tool.Invocation
+	if aware, ok := t.(tool.PermissionTool); ok {
+		invocation, err = aware.PrepareWithPermissions(ctx, scope, normalized, permissions)
+	} else {
+		invocation, err = t.Prepare(ctx, scope, normalized)
+	}
 	if err != nil {
 		if invocation != nil {
 			err = errors.Join(err, invocation.Close())
@@ -152,7 +168,11 @@ func (e *Executor) Prepare(ctx context.Context, scope tool.Scope, name string, a
 		return nil, errors.Join(err, invocation.Close())
 	}
 	hash := sha256.Sum256(request)
-	return &Prepared{invocation: invocation, target: target, plan: plan, details: details, effects: effects, instance: t, definition: definition, request: request, hash: hex.EncodeToString(hash[:])}, nil
+	var boundary *tool.CommandBoundary
+	if command, ok := invocation.(tool.CommandInvocation); ok {
+		boundary = new(command.CommandBoundary())
+	}
+	return &Prepared{invocation: invocation, target: target, plan: plan, details: details, effects: effects, instance: t, definition: definition, request: request, hash: hex.EncodeToString(hash[:]), boundary: boundary}, nil
 }
 
 func invocationSnapshot(invocation tool.Invocation) (json.RawMessage, error) {
@@ -216,6 +236,12 @@ func (e *Executor) ExecuteStream(ctx context.Context, p *Prepared, approvedHash 
 	}
 	if !bytes.Equal(details, p.details) {
 		return notApplied, tool.ErrDenied
+	}
+	if p.boundary != nil {
+		command, ok := p.invocation.(tool.CommandInvocation)
+		if !ok || command.CommandBoundary() != *p.boundary {
+			return notApplied, tool.ErrDenied
+		}
 	}
 	definition := p.instance.Definition()
 	latest, err := json.Marshal(definition)

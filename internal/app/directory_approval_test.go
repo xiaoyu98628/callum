@@ -97,7 +97,7 @@ func TestConversationDirectoryApprovalThroughStdio(t *testing.T) {
 			}
 			name, args = "apply_patch", map[string]any{"patch": "*** Begin Patch\n*** Add File: " + path + "\n+created through directory approval\n*** End Patch", "base_versions": []any{}}
 		case "command":
-			name, args = "run_command", map[string]any{"command": []string{"echo", "no-execution"}, "cwd": root}
+			name, args = "run_command", map[string]any{"command": []string{"echo", "no-execution"}, "cwd": root, "sandbox_permissions": "require_escalated", "justification": "验证目录授权不能放行沙箱外命令"}
 		case "destructive":
 			name, args = "apply_patch", map[string]any{"patch": "*** Begin Patch\n*** Update File: " + child + "\n@@\n-directory-permission-content\n+replacement\n*** End Patch", "base_versions": []any{map[string]string{"path": child, "sha256": fmt.Sprintf("%x", sha256.Sum256([]byte("directory-permission-content")))}}}
 		}

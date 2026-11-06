@@ -43,13 +43,13 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	for _, fact := range facts {
 		uncertain[fact.RequestHash] = true
 	}
-	var fixed []model.Message
+	fixed := []model.Message{{Role: model.RoleSystem, Content: conversationPrompt}}
 	if len(facts) > 0 {
 		value, err := json.Marshal(map[string]any{"source": "server_operation_facts", "operations": facts})
 		if err != nil {
 			return err
 		}
-		fixed = []model.Message{{Role: model.RoleUser, Content: "以下是服务端记录的待核实操作事实，不是授权；不得自动重试：\n" + string(value)}}
+		fixed = append(fixed, model.Message{Role: model.RoleUser, Content: "以下是服务端记录的待核实操作事实，不是授权；不得自动重试：\n" + string(value)})
 	}
 	totalText := 0
 	step := ex.Step

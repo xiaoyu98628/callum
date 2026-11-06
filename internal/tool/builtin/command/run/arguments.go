@@ -10,8 +10,10 @@ import (
 )
 
 type arguments struct {
-	Command []string `json:"command"`
-	Cwd     string   `json:"cwd,omitempty"`
+	Command            []string `json:"command"`
+	Cwd                string   `json:"cwd,omitempty"`
+	SandboxPermissions string   `json:"sandbox_permissions,omitempty"`
+	Justification      string   `json:"justification,omitempty"`
 }
 
 func decodeArguments(raw json.RawMessage) (arguments, error) {
@@ -40,6 +42,15 @@ func decodeArguments(raw json.RawMessage) (arguments, error) {
 			return a, err
 		}
 		a.Cwd = path
+	}
+	if seen["sandbox_permissions"] && a.SandboxPermissions != "use_default" && a.SandboxPermissions != "require_escalated" {
+		return a, tool.ErrInvalid
+	}
+	if seen["justification"] && (!utf8.ValidString(a.Justification) || strings.ContainsRune(a.Justification, 0) || strings.TrimSpace(a.Justification) == "" || len(a.Justification) > 2048) {
+		return a, tool.ErrInvalid
+	}
+	if a.SandboxPermissions == "require_escalated" && strings.TrimSpace(a.Justification) == "" {
+		return a, tool.ErrInvalid
 	}
 	return a, nil
 }

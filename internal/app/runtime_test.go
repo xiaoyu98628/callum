@@ -146,6 +146,7 @@ func TestSharedRuntimeConnectionCleanup(t *testing.T) {
 	releaseOther := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
+			Tools    []json.RawMessage `json:"tools"`
 			Messages []struct {
 				Role    string `json:"role"`
 				Content string `json:"content"`
@@ -156,7 +157,7 @@ func TestSharedRuntimeConnectionCleanup(t *testing.T) {
 			return
 		}
 		text := input.Messages[len(input.Messages)-1].Content
-		if input.Messages[0].Role == "system" {
+		if len(input.Tools) == 0 {
 			text = "title"
 		}
 		switch text {

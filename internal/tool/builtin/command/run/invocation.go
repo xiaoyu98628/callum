@@ -20,8 +20,9 @@ type invocation struct {
 	closeErr        error
 }
 
-func (*invocation) Target() *tool.Target        { return nil }
-func (p *invocation) Snapshot() json.RawMessage { return slices.Clone(p.fixed.snapshot) }
+func (*invocation) Target() *tool.Target                    { return nil }
+func (p *invocation) Snapshot() json.RawMessage             { return slices.Clone(p.fixed.snapshot) }
+func (p *invocation) CommandBoundary() tool.CommandBoundary { return p.fixed.boundary }
 func (p *invocation) Execute(ctx context.Context) (tool.Result, error) {
 	return p.ExecuteStream(ctx, nil)
 }
@@ -40,7 +41,15 @@ func (p *invocation) ExecuteStream(ctx context.Context, emit func(tool.OutputChu
 	if err := p.fixed.check(runCtx); err != nil {
 		return tool.Result{Outcome: tool.OutcomeNotApplied}, err
 	}
+	cleanup, err := p.fixed.setupExecution()
+	if err != nil {
+		return tool.Result{Outcome: tool.OutcomeNotApplied}, err
+	}
 	report, err := runProcess(runCtx, p.fixed, emit)
+	if cleanupErr := cleanup(); cleanupErr != nil {
+		report.CleanupComplete = false
+		err = errors.Join(err, cleanupErr)
+	}
 	output, marshalErr := json.Marshal(report)
 	outcome := tool.OutcomeNotApplied
 	if report.Started {

@@ -36,12 +36,8 @@ func TestImageInputUsesCapabilityRatherThanContentType(t *testing.T) {
 				var request struct {
 					Tools    []json.RawMessage `json:"tools"`
 					Messages []struct {
-						Content []struct {
-							Type     string `json:"type"`
-							ImageURL struct {
-								URL string `json:"url"`
-							} `json:"image_url"`
-						} `json:"content"`
+						Role    string          `json:"role"`
+						Content json.RawMessage `json:"content"`
 					} `json:"messages"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -49,7 +45,18 @@ func TestImageInputUsesCapabilityRatherThanContentType(t *testing.T) {
 					w.WriteHeader(400)
 					return
 				}
-				if len(request.Tools) != 6 || len(request.Messages) != 1 || len(request.Messages[0].Content) != 2 || !strings.HasPrefix(request.Messages[0].Content[1].ImageURL.URL, "data:image/png;base64,") {
+				if len(request.Tools) != 6 || len(request.Messages) != 2 || request.Messages[0].Role != "system" || request.Messages[1].Role != "user" {
+					t.Error("图片请求缺少固定提示或用户消息")
+					w.WriteHeader(400)
+					return
+				}
+				var parts []struct {
+					Type     string `json:"type"`
+					ImageURL struct {
+						URL string `json:"url"`
+					} `json:"image_url"`
+				}
+				if err := json.Unmarshal(request.Messages[1].Content, &parts); err != nil || len(parts) != 2 || !strings.HasPrefix(parts[1].ImageURL.URL, "data:image/png;base64,") {
 					t.Error("图片转换或默认工具定义丢失")
 				}
 				w.Header().Set("Content-Type", "application/json")

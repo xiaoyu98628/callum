@@ -122,6 +122,38 @@ type Scope struct {
 	RootPath string `json:"root_path"`
 }
 
+// SandboxMode 与审批策略分开；空值仅保留旧执行快照的无沙箱语义。
+type SandboxMode string
+
+const (
+	SandboxReadOnly       SandboxMode = "read-only"
+	SandboxWorkspaceWrite SandboxMode = "workspace-write"
+)
+
+func (m SandboxMode) Valid() bool { return m == SandboxReadOnly || m == SandboxWorkspaceWrite }
+
+// ExecutionPermissions 由受理时的服务端设置快照提供，模型不能指定沙箱模式。
+type ExecutionPermissions struct{ SandboxMode SandboxMode }
+
+// PermissionTool 为需要运行权限的工具显式传入执行快照；普通文件工具沿用 Prepare。
+type PermissionTool interface {
+	Tool
+	PrepareWithPermissions(context.Context, Scope, json.RawMessage, ExecutionPermissions) (Invocation, error)
+}
+
+// CommandBoundary 记录固定命令实际使用的执行边界，不将未知命令伪装为只读。
+type CommandBoundary struct {
+	Sandboxed bool        `json:"sandboxed"`
+	Mode      SandboxMode `json:"sandbox_mode,omitempty"`
+	Escalated bool        `json:"escalated"`
+	Risk      string      `json:"risk,omitempty"`
+}
+
+type CommandInvocation interface {
+	Invocation
+	CommandBoundary() CommandBoundary
+}
+
 // Target 记录文件工具固定的实际目标，目录操作的范围限于该目录。
 // WithinWorkspace 由可信实现依据实际路径判断，不能由模型参数指定。
 type Target struct {

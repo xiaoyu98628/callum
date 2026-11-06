@@ -23,7 +23,8 @@ func TestManualTitleWinsAndIncompleteAnswerKeepsUsage(t *testing.T) {
 	t.Cleanup(releaseAnswer)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Stream   bool `json:"stream"`
+			Tools    []json.RawMessage `json:"tools"`
+			Stream   bool              `json:"stream"`
 			Messages []struct {
 				Role    string `json:"role"`
 				Content string `json:"content"`
@@ -33,7 +34,7 @@ func TestManualTitleWinsAndIncompleteAnswerKeepsUsage(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		if req.Messages[0].Role == "system" {
+		if len(req.Tools) == 0 {
 			select {
 			case <-allowTitle:
 			case <-r.Context().Done():

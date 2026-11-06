@@ -25,7 +25,11 @@ func openTargetPath(path string) (*os.File, error) {
 }
 
 func startProcess(fixed *fixedCommand, stdin, stdout, stderr *os.File) (*process, error) {
-	pid, err := syscall.ForkExec(fixed.executable.actual, fixed.command, &syscall.ProcAttr{Dir: fixed.directory.actual, Env: fixed.environment, Files: []uintptr{stdin.Fd(), stdout.Fd(), stderr.Fd()}, Sys: &syscall.SysProcAttr{Setpgid: true}})
+	executable, arguments := fixed.executable.actual, fixed.command
+	if fixed.boundary.Sandboxed {
+		executable, arguments = fixed.sandboxExecutable.actual, fixed.launchArguments
+	}
+	pid, err := syscall.ForkExec(executable, arguments, &syscall.ProcAttr{Dir: fixed.directory.actual, Env: fixed.environment, Files: []uintptr{stdin.Fd(), stdout.Fd(), stderr.Fd()}, Sys: &syscall.SysProcAttr{Setpgid: true}})
 	if err != nil {
 		return nil, err
 	}

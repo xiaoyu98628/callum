@@ -17,7 +17,11 @@ import (
 	"github.com/xiaoyu98628/callum/internal/config"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/compaction"
+	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/model/tokens"
 	"github.com/xiaoyu98628/callum/internal/settings"
+	"github.com/xiaoyu98628/callum/internal/tool/builtin/command"
+	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem"
 )
 
 type compactModel struct {
@@ -71,7 +75,7 @@ func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
 				<-r.Context().Done()
 				return
 			}
-		} else if input.Messages[0].Role == "system" {
+		} else if len(input.Tools) == 0 {
 			text = "会话标题"
 		} else {
 			last := input.Messages[len(input.Messages)-1].Content
@@ -285,7 +289,29 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 	p := startApp(t, cfg, io.Discard)
 	mid := setupConversationModel(t, p, server.URL)
 	compression := settings.DefaultCompaction()
-	compression.TokenBudget, compression.RetainTurns = 7500, 1
+	// 从独立会话的真实请求取得固定提示开销，历史预算仍在第三轮触发压缩。
+	compactSend(t, p, mid, "", "读取当前固定上下文")
+	upstream.mu.Lock()
+	probe := upstream.answers["读取当前固定上下文"]
+	upstream.mu.Unlock()
+	var requestMessages []model.Message
+	if err := json.Unmarshal([]byte(probe), &requestMessages); err != nil {
+		t.Fatal(err)
+	}
+	var fixed []model.Message
+	for _, message := range requestMessages {
+		if message.Role == model.RoleSystem {
+			fixed = append(fixed, message)
+		}
+	}
+	if len(fixed) != 1 || fixed[0].Content == "" {
+		t.Fatal("主对话缺少固定过程沟通提示")
+	}
+	definitions := []model.ToolDefinition{agent.UserInputDefinition()}
+	for _, instance := range append(filesystem.Tools(), command.Tools(nil)...) {
+		definitions = append(definitions, instance.Definition().ToolDefinition)
+	}
+	compression.TokenBudget, compression.RetainTurns = tokens.Estimate(fixed, definitions, compression.ImageTokenEstimate)+5700, 1
 	compactionSetting(t, p, compression)
 	cid := ""
 	for i := range 2 {
@@ -300,6 +326,10 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 	upstream.mu.Unlock()
 	if !strings.Contains(request, "当前问题必须保持原样") || !strings.Contains(request, "较早问题1") || strings.Contains(request, "较早问题0") {
 		t.Fatal("Token 触发压缩吞掉了保留轮次或当前问题")
+	}
+	var afterCompression []model.Message
+	if err := json.Unmarshal([]byte(request), &afterCompression); err != nil || len(afterCompression) == 0 || afterCompression[0].Role != model.RoleSystem || afterCompression[0].Content != fixed[0].Content {
+		t.Fatal("历史压缩移除了主对话的过程沟通规则")
 	}
 	rows := readMessages(t, p, cid)
 	user := rows[len(rows)-2]

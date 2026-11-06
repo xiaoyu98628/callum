@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -22,7 +23,11 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	scope, operationErr := e.toolScope(ctx, ex)
 	var prepared *toolexecutor.Prepared
 	if operationErr == nil {
-		prepared, operationErr = e.options.Tools.Prepare(ctx, scope, call.Name, call.Arguments)
+		permissions := tool.ExecutionPermissions{}
+		if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
+			permissions.SandboxMode = snapshot.SandboxMode
+		}
+		prepared, operationErr = e.options.Tools.PrepareWithPermissions(ctx, scope, call.Name, call.Arguments, permissions)
 	}
 	var step agent.Step
 	result := tool.Result{Outcome: tool.OutcomeNotApplied}
@@ -140,6 +145,12 @@ func toolDecision(prepared *toolexecutor.Prepared, denied, uncertain map[string]
 		}
 		return policy.Decision{Action: policy.Ask, Reason: "previous_result_requires_confirmation"}
 	}
+	if boundary := prepared.CommandBoundary(); boundary != nil {
+		return policy.EvaluateCommand(snapshot.ApprovalPolicy, *boundary)
+	}
+	if snapshot.SandboxMode == tool.SandboxReadOnly && slices.Contains(prepared.Definition().Effects, tool.EffectWrite) {
+		return policy.RequiresApproval(snapshot.ApprovalPolicy, "read_only_mode")
+	}
 	return policy.Evaluate(snapshot.ApprovalPolicy, prepared.Definition().Effects, prepared.OutsideWorkspace())
 }
 
@@ -150,6 +161,7 @@ func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, 
 	}
 	if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
 		input["approval_policy"], input["approvals_reviewer"], input["settings_revision"] = snapshot.ApprovalPolicy, snapshot.ApprovalsReviewer, snapshot.Revision
+		input["sandbox_mode"] = snapshot.SandboxMode
 	}
 	var definition json.RawMessage
 	if prepared != nil {

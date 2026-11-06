@@ -168,6 +168,7 @@ func TestContinuousAgentCanCancelOrShutdownBeyondPreviousLimit(t *testing.T) {
 func TestPausedAgentIsolationAndShutdown(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
+			Tools    []json.RawMessage                `json:"tools"`
 			Messages []struct{ Role, Content string } `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -175,7 +176,7 @@ func TestPausedAgentIsolationAndShutdown(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		if input.Messages[0].Role == "system" || input.Messages[len(input.Messages)-1].Content == "直接回答" {
+		if len(input.Tools) == 0 || input.Messages[len(input.Messages)-1].Content == "直接回答" {
 			_, _ = io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"回答"},"finish_reason":"stop"}]}`)
 			return
 		}

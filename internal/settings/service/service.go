@@ -29,8 +29,14 @@ func (s *Service) Get(ctx context.Context, key string) (settings.Record, error) 
 		return value, err
 	}
 	if key == settings.ExecutionKey {
-		if _, err := settings.ExecutionSnapshot(value); err != nil {
+		snapshot, err := settings.ExecutionSnapshot(value)
+		if err != nil {
 			return settings.Record{}, err
+		}
+		// 将旧配置的明确兼容默认值返回给客户端，不改写历史记录和 revision。
+		value.Value, err = json.Marshal(snapshot.Execution)
+		if err != nil {
+			return settings.Record{}, errors.Join(settings.ErrStorage, err)
 		}
 	} else if _, err := settings.DecodeCompactionSnapshot(value); err != nil {
 		return settings.Record{}, err
@@ -47,7 +53,25 @@ func (s *Service) Update(ctx context.Context, key string, revision int64, raw js
 	var value any
 	var err error
 	if key == settings.ExecutionKey {
-		value, err = settings.DecodeExecution(raw)
+		var execution settings.Execution
+		execution, err = settings.DecodeExecution(raw)
+		if err == nil {
+			var fields map[string]json.RawMessage
+			if err = json.Unmarshal(raw, &fields); err == nil && fields["sandbox_mode"] == nil {
+				// 旧客户端完整替换原有两字段时，保留用户已选的沙箱模式。
+				var current settings.Record
+				current, err = s.Get(ctx, key)
+				if err == nil && current.Revision != revision {
+					return settings.Record{}, settings.ErrConflict
+				}
+				if err == nil {
+					var snapshot settings.Snapshot
+					snapshot, err = settings.ExecutionSnapshot(current)
+					execution.SandboxMode = snapshot.SandboxMode
+				}
+			}
+		}
+		value = execution
 	} else {
 		value, err = settings.DecodeCompaction(raw)
 	}

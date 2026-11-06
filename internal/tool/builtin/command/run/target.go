@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -23,10 +24,14 @@ type fixedPath struct {
 }
 
 type fixedCommand struct {
-	command                          []string
-	environment                      []string
-	executable, directory, workspace *fixedPath
-	snapshot                         json.RawMessage
+	command                            []string
+	environment                        []string
+	executable, directory, workspace   *fixedPath
+	snapshot                           json.RawMessage
+	boundary                           tool.CommandBoundary
+	sandboxExecutable, temporaryParent *fixedPath
+	temporaryPath, profile             string
+	launchArguments                    []string
 }
 
 func cleanDirectory(path string) (string, error) {
@@ -91,14 +96,14 @@ func (p *fixedPath) check(executable bool) error {
 	return nil
 }
 
-func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []string) (_ tool.Invocation, retErr error) {
+func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []string, permissions tool.ExecutionPermissions) (_ tool.Invocation, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		return nil, tool.ErrUnavailable
 	}
-	fixed := &fixedCommand{command: a.Command, environment: environment}
+	fixed := &fixedCommand{command: a.Command, environment: slices.Clone(environment)}
 	defer func() {
 		if retErr != nil {
 			retErr = errors.Join(retErr, fixed.close())
@@ -142,26 +147,50 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 	}
 	fixed.command[0] = fixed.executable.actual
 	fixed.environment = append(fixed.environment, "PWD="+fixed.directory.actual)
+	if err := fixed.configureSandbox(a, permissions); err != nil {
+		return nil, err
+	}
 	digest := sha256.New()
 	keys := make([]string, 0, len(fixed.environment))
 	for _, entry := range fixed.environment {
 		key, _, _ := strings.Cut(entry, "=")
 		keys = append(keys, key)
+		// 私有临时目录的随机名称不扩大操作范围，不能改变同一命令的拒绝/未知结果身份。
+		if fixed.temporaryPath != "" {
+			entry = strings.ReplaceAll(entry, fixed.temporaryPath, ":command_temp")
+		}
 		digest.Write([]byte(entry))
 		digest.Write([]byte{0})
 	}
 	details := struct {
-		Executable         string   `json:"executable"`
-		ExecutableIdentity string   `json:"executable_identity"`
-		ExecutableSize     int64    `json:"executable_size"`
-		ExecutableModified int64    `json:"executable_modified_ns"`
-		Cwd                string   `json:"cwd"`
-		CwdIdentity        string   `json:"cwd_identity"`
-		EnvironmentProfile string   `json:"environment_profile"`
-		EnvironmentKeys    []string `json:"environment_keys"`
-		EnvironmentSHA256  string   `json:"environment_sha256"`
-		Sandboxed          bool     `json:"sandboxed"`
-	}{fixed.executable.actual, fixed.executable.identity, fixed.executable.info.Size(), fixed.executable.info.ModTime().UnixNano(), fixed.directory.actual, fixed.directory.identity, "base-v1", keys, hex.EncodeToString(digest.Sum(nil)), false}
+		Executable               string               `json:"executable"`
+		ExecutableIdentity       string               `json:"executable_identity"`
+		ExecutableSize           int64                `json:"executable_size"`
+		ExecutableModified       int64                `json:"executable_modified_ns"`
+		Cwd                      string               `json:"cwd"`
+		CwdIdentity              string               `json:"cwd_identity"`
+		EnvironmentProfile       string               `json:"environment_profile"`
+		EnvironmentKeys          []string             `json:"environment_keys"`
+		EnvironmentSHA256        string               `json:"environment_sha256"`
+		Boundary                 tool.CommandBoundary `json:"execution_boundary"`
+		Sandboxed                bool                 `json:"sandboxed"`
+		SandboxBackend           string               `json:"sandbox_backend,omitempty"`
+		WritableRoots            []string             `json:"writable_roots"`
+		TemporaryDirectoryPolicy string               `json:"temporary_directory_policy,omitempty"`
+		NetworkAccess            bool                 `json:"network_access"`
+		Justification            string               `json:"justification,omitempty"`
+		ProfileSHA256            string               `json:"profile_sha256,omitempty"`
+	}{Executable: fixed.executable.actual, ExecutableIdentity: fixed.executable.identity, ExecutableSize: fixed.executable.info.Size(), ExecutableModified: fixed.executable.info.ModTime().UnixNano(), Cwd: fixed.directory.actual, CwdIdentity: fixed.directory.identity, EnvironmentProfile: "base-v1", EnvironmentKeys: keys, EnvironmentSHA256: hex.EncodeToString(digest.Sum(nil)), Boundary: fixed.boundary, Sandboxed: fixed.boundary.Sandboxed, NetworkAccess: !fixed.boundary.Sandboxed, Justification: a.Justification, WritableRoots: []string{}}
+	if fixed.boundary.Sandboxed {
+		details.EnvironmentProfile = "base-v2-sandbox"
+		details.SandboxBackend = "macos-seatbelt"
+		details.TemporaryDirectoryPolicy = "private-per-command"
+		if fixed.workspace != nil && fixed.boundary.Mode == tool.SandboxWorkspaceWrite {
+			details.WritableRoots = append(details.WritableRoots, fixed.workspace.actual)
+		}
+		digest := sha256.Sum256([]byte(fixed.profile))
+		details.ProfileSHA256 = hex.EncodeToString(digest[:])
+	}
 	fixed.snapshot, err = json.Marshal(details)
 	if err != nil {
 		return nil, err
@@ -184,6 +213,13 @@ func (p *fixedCommand) check(ctx context.Context) error {
 			return err
 		}
 	}
+	for _, path := range []*fixedPath{p.sandboxExecutable, p.temporaryParent} {
+		if path != nil {
+			if err := path.check(path == p.sandboxExecutable); err != nil {
+				return err
+			}
+		}
+	}
 	if err := p.directory.check(false); err != nil {
 		return err
 	}
@@ -192,7 +228,7 @@ func (p *fixedCommand) check(ctx context.Context) error {
 
 func (p *fixedCommand) close() error {
 	var err error
-	for _, path := range []*fixedPath{p.executable, p.directory, p.workspace} {
+	for _, path := range []*fixedPath{p.executable, p.directory, p.workspace, p.sandboxExecutable, p.temporaryParent} {
 		if path != nil {
 			err = errors.Join(err, path.file.Close())
 		}

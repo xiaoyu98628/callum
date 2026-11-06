@@ -48,7 +48,7 @@ func testExecutor(t *testing.T, environment []string) *executor.Executor {
 
 func prepareTest(t *testing.T, e *executor.Executor, scope tool.Scope, command []string, cwd string) *executor.Prepared {
 	t.Helper()
-	raw, err := json.Marshal(arguments{command, cwd})
+	raw, err := json.Marshal(arguments{Command: command, Cwd: cwd})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,6 +95,29 @@ func TestCommandValidation(t *testing.T) {
 	}
 	if policy.Evaluate(policy.OnRequest, instance.Definition().Effects, false).Action != policy.Ask || policy.Evaluate(policy.Never, instance.Definition().Effects, false).Action != policy.Deny {
 		t.Fatal("命令未按未知影响处理")
+	}
+}
+
+func TestEscalationRequiresExplicitScopeAndReason(t *testing.T) {
+	instance := New(nil)
+	for _, raw := range []string{
+		`{"command":["pwd"],"sandbox_permissions":"full-access"}`,
+		`{"command":["pwd"],"sandbox_permissions":"require_escalated"}`,
+		`{"command":["pwd"],"sandbox_permissions":"require_escalated","justification":"  "}`,
+		`{"command":["pwd"],"sandbox_permissions":null}`,
+		`{"command":["pwd"],"justification":null}`,
+	} {
+		if _, err := instance.Validate(json.RawMessage(raw)); !errors.Is(err, tool.ErrInvalid) {
+			t.Fatalf("接受了不明确的越权请求: %s %v", raw, err)
+		}
+	}
+	for _, command := range [][]string{{"/bin/rm", "file"}, {"/bin/sh", "-c", "/usr/bin/git reset --hard"}, {"find", ".", "-delete"}} {
+		if commandRisk(command) == "" {
+			t.Fatalf("已识别的危险命令未保留审批: %v", command)
+		}
+	}
+	if commandRisk([]string{"/bin/pwd"}) != "" {
+		t.Fatal("pwd 仍需命令文字审批")
 	}
 }
 

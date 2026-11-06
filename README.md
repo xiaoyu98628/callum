@@ -580,10 +580,11 @@ Go 服务支持 `conversation.compact` 手动压缩，并在每次回答模型�
 `ApprovalPolicy` 与 `ApprovalsReviewer` 是独立设置，保存在 `app_settings` 的 `execution` 配置组中，客户端通过接口修改，无需重启 Go 服务。
 `approval_policy` 默认 `on-request`，按需询问；`always` 对每次有效工具调用询问；`never` 不询问，但需要审批的操作直接拒绝。
 `approvals_reviewer` 当前只支持 `user`，不接受 `auto_review`。模型不能覆盖这些设置。
+`sandbox_mode` 默认 `workspace-write`，也支持 `read-only`。只读模式下普通补丁修改另需审批，目录写授权不绕过此限制。旧全局配置缺少该字段时，新任务按 `workspace-write` 受理；查询返回明确默认值而不改写存储或 revision。历史执行快照保持缺失，命令延续逐次审批；旧客户端更新原有两字段时保留当前沙箱模式。无需新增数据库列或改写历史记录。
 `--approval-mode`、`--approval-policy`、`--approvals-reviewer` 已移除，启动参数不覆盖数据库中的用户选择。
 
 应用设置表 `app_settings` 的字段为 `id`（UUIDv7）、唯一 `key`、JSON 对象 `value`、正整数 `revision`、`created_at`、`updated_at`。
-当前注册 `execution`（`approval_policy`、`approvals_reviewer`）与 `context_compaction`（见上下文压缩章节）配置组；新增配置内容通过业务代码定义类型和校验，不为每个设置项增加数据库列。
+当前注册 `execution`（`approval_policy`、`approvals_reviewer`、`sandbox_mode`）与 `context_compaction`（见上下文压缩章节）配置组；新增配置内容通过业务代码定义类型和校验，不为每个设置项增加数据库列。
 迁移只初始化新设置组，重复启动保留用户配置。值上限 16 KiB；缺少必要字段、未知字段、重复键、错误类型和不支持的值均拒绝。
 `settings.get` 接收 `key` 并返回完整记录。`settings.update` 接收 `key`、读取到的 `revision` 和完整 `value`，成功后返回版本递增的记录。
 过期版本返回错误码 `1003`，客户端重新读取后保存；非法参数返回 `-32602`。写入失败不改变值或版本。
@@ -598,11 +599,11 @@ Go 服务支持 `conversation.compact` 手动压缩，并在每次回答模型�
 任何破坏性、外发或未知类别都不能被同时声明的读取类别抵消；未声明类别按未知操作处理，无效类别不允许注册。
 普通修改只适用于经工具实现确认的常规文件修改；影响较大的覆盖必须声明 `destructive`，不能仅声明 `write`。
 这些类别不能由模型参数声明，默认批准只授权固定目标的本次操作；用户明确选择会话目录授权时保存独立授权，后续操作仍须通过参数、路径及影响校验。
-当前提供三个读取工具、`apply_patch` 创建修改工具和 `run_command` 命令工具。独立的删除及外发工具尚未接入；命令可能产生这些影响，因此统一按 `unknown` 审批。
+当前提供三个读取工具、`apply_patch` 创建修改工具和 `run_command` 命令工具。独立的删除及外发工具尚未接入；命令保留 `unknown` 分类，审批另结合服务端固定的系统沙箱边界判断。
 
-每个工具步骤的 `input` 保存 `settings_revision`、`approval_policy`、`approvals_reviewer`，以及 `authorization.action`（`allow`、`ask`、`deny`）和规则标识 `authorization.reason`。
+每个工具步骤的 `input` 保存 `settings_revision`、`approval_policy`、`approvals_reviewer`、`sandbox_mode`，以及 `authorization.action`（`allow`、`ask`、`deny`）和规则标识 `authorization.reason`。
 判定是执行前的规则结果；`ask` 的实际用户决定通过关联审批记录查询。自动放行及策略拒绝不会伪造用户审批记录。
-文件目标由可信工具实现独立固定和校验，通用执行器不要求工具依赖工作区或文件系统；未加入 `sandbox_mode`，未实现操作系统沙箱或“完全访问”模式。
+文件目标由可信工具实现独立固定和校验，通用执行器不要求工具依赖工作区或文件系统；`sandbox_mode` 支持 `workspace-write`（默认）与 `read-only`，macOS 命令使用系统沙箱；未提供永久“完全访问”模式。
 模型请求及工具执行仍分别受 `--call-timeout`、`--tool-timeout` 限制；审批等待没有超时配置。
 审批状态为 `pending`、`approved`、`rejected`、`cancelled`。批准后再次校验权限与取消信号，并在事务中认领尚未执行的工具步骤。
 相同决定重复提交保持幂等，冲突决定返回错误；本机用户决定记录为 `local_user`，不是外部身份认证。
@@ -686,7 +687,13 @@ macOS 的文件读写、权限、ACL、取消、冲突、并发及 stdio 流式�
 审批 `request.details` 保存解析后的可执行文件、身份及大小/修改时间、实际 cwd 及身份、环境名单与配置摘要，不保存环境值；规范化参数保留在 `request.arguments`。详情不超过 16 KiB，参与 `request_hash`，执行前重新比较并检查原路径、句柄、工作区和可执行文件元数据。未实现补充快照的文件工具省略 details，原审批格式与指纹保持兼容。
 此检查不锁定整个软件依赖图，也不承诺执行前检查与路径启动之间的原子隔离。
 
-命令可信影响固定为 `unknown`，即使 cwd 在工作区内也需审批：on-request、always 询问，never 拒绝。命令以 Callum 当前用户权限运行；cwd 仅决定启动目录，不能限制文件访问或网络访问。当前没有操作系统沙箱，也不增加 sandbox_mode 设置。
+命令 effects 仍为 `unknown`，不按 `ls`、`cat` 等命令文字伪装为读取。服务端另固定实际执行边界：macOS 的新任务默认通过 `/usr/bin/sandbox-exec` 使用 Seatbelt；命令及后代可读取当前用户可读的文件，网络关闭，`workspace-write` 仅开放真实项目及每次命令的私有临时目录写入，`read-only` 或未绑定项目仅开放该临时目录写入。项目路径下 `.git`、`.codex`、`.agents`、`.aws` 的直接写入被拒绝。常用 Go/npm 缓存定向到私有临时目录，结束后删除；未安装的依赖不能通过命令联网下载。模型客户端的网络请求不受命令沙箱限制。
+
+`on-request` 自动执行普通沙箱命令；已识别的删除、权限修改及敏感 Git 命令仍询问，批准后也保留原沙箱。该识别不保证分析任意脚本的业务影响。`always` 对有效调用逐次询问；`never` 执行允许的沙箱调用并拒绝仍需审批的操作。沙箱执行失败直接保留退出码及错误，不自动在沙箱外重试。系统沙箱无法启动时明确失败，不降级为无隔离执行。
+
+确需扩大权限时，模型必须提交 `sandbox_permissions: "require_escalated"` 及非空 `justification`。服务端生成本次沙箱外执行快照并请求独立审批；批准只允许本次固定命令使用当前系统用户的文件和网络权限，不保存命令前缀或目录授权。`never` 拒绝该请求。可选 `sandbox_permissions: "use_default"` 与省略一致。Linux/Windows 尚未接入系统沙箱，仍对每次命令请求审批，不宣称具有 macOS 的隔离能力。
+
+Seatbelt 是共享文件系统上的路径访问边界，不是容器或独立文件系统：项目内既有文件的其他硬链接会共享修改，项目内已可写的别名也不构成独立副本；新建硬链接被默认拒绝。路径固定及执行前复核不保证抵抗同时发生的外部重命名，也不锁定程序的完整依赖图。应将项目根目录设为实际任务目录，而非整个用户目录。
 
 进程受现有 `--tool-timeout` 限制（默认 30 秒），审批等待不计入。macOS、Linux 创建独立进程组并在正常主进程退出、取消、超时时终止组内残留成员；主动 setsid/setpgid 脱离的进程、通过其他服务启动的工作不在回收保证内；Unix 上 Callum 被强制终止或崩溃也不保证回收仍运行的子进程，重启后需按未知结果核实。Windows 10+ / Server 2016+ 创建进程时加入 Job Object，禁用普通 breakaway 并启用最后句柄关闭终止成员；Job 只负责进程生命周期，不构成文件或网络沙箱。终止后主进程与管道各有最多 2 秒收尾等待，Windows 另有最多 2 秒 Job 成员确认；清理失败明确返回错误及不完整清理状态，不宣称强制终止一定成功。
 
@@ -699,7 +706,7 @@ macOS 的文件读写、权限、ACL、取消、冲突、并发及 stdio 流式�
 sequence 在单个步骤内从 1 递增；两个流各自保持读取顺序，不承诺还原跨 stdout/stderr 的原始写入顺序。客户端应持续读取 JSONL、按 step_id 分流并解码字节，不把片段当作完整 UTF-8 字符或最终成功信号。
 每片最多 4 KiB 原始字节，每次调用实时推送最多 64 KiB、128 片。保存 stdout/stderr 各自前 16 KiB 原始字节，编码后各不超过 24 KiB JSON，最终结果仍不超过 64 KiB。达到上限继续排空管道，分别设置 truncated 和 stream_truncated，并保留实际读取字节数；输出片段只即时发布，不逐片落库或承诺重放。慢订阅者沿用有界队列规则，断开对应消费者，不取消共享执行；最终结果通过 step.data 查询。
 
-结果包含 started、pid（未启动时为 null，仅供核实，不作为重启后的进程控制凭据）、exit_code（未获得时为 null）、可选 signal、timed_out、cancelled、cleanup_complete、stdout、stderr、stream_truncated。每个输出对象为 encoding（utf-8 或 base64）、data、bytes、truncated；二进制或不能构成完整 UTF-8 的保留前缀使用 base64；UTF-8 文本按实际 JSON 转义长度和字符边界截断。
+结果包含 execution_boundary（sandboxed、sandbox_mode、escalated 及可选 risk）、started、pid（未启动时为 null，仅供核实，不作为重启后的进程控制凭据）、exit_code（未获得时为 null）、可选 signal、timed_out、cancelled、cleanup_complete、stdout、stderr、stream_truncated。每个输出对象为 encoding（utf-8 或 base64）、data、bytes、truncated；二进制或不能构成完整 UTF-8 的保留前缀使用 base64；UTF-8 文本按实际 JSON 转义长度和字符边界截断。
 启动失败为 not_applied；正常退出且生命周期收尾成功为 applied，仅证明命令调用已经执行完毕，非零 exit_code 仍原样交给模型判断业务失败。启动后取消、超时、信号终止或结果不明为 unknown，并保留已经收到的输出。未记录结果的中断命令沿用持久化保守未知及重新审批规则，不自动重试。
 
 `.github/workflows/verify.yml` 配置 macOS、Linux、Windows 的原生竞态测试、静态检查和无 CGO 构建；Go 版本读取 go.mod。工作流配置存在不等于运行通过，平台原生结果以实际 CI 记录为准；本地交叉编译只证明对应目标可构建。
