@@ -10,44 +10,50 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/conversation"
-	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/model/tokens"
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
-// MaxModelRounds 和 MaxToolsPerRun 限制整个循环，辅助标题不计入回答轮次。
-const MaxModelRounds = 8
-const MaxToolsPerRun = 32
-
-var ErrIterationLimit = errors.New("Agent 调用次数达到上限")
-
 func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, startTitle func()) error {
-	transcripts, err := e.repository.Transcript(ctx, ex.Conversation.ID)
-	if err != nil {
-		return operationStorageError(ctx, err)
-	}
-	messages, err := history.Context(ex.History, transcripts)
+	transcripts, messages, err := e.prepareHistory(ctx, &ex, resolved, false)
 	if err != nil {
 		return err
 	}
+	current := executionContext{traces: transcripts, past: messages}
 	var definitions []model.ToolDefinition
 	for _, d := range e.options.Tools.Definitions() {
 		definitions = append(definitions, d.ToolDefinition)
 	}
+	definitions = append(definitions, agent.UserInputDefinition())
 	denied := map[string]bool{}
-	uncertain, err := uncertainOperations(messages)
+	facts, err := e.repository.OperationFacts(ctx, ex.Conversation.ID)
 	if err != nil {
-		return err
+		return operationStorageError(ctx, err)
 	}
-	count, totalText := 0, 0
+	uncertain := map[string]bool{}
+	for _, fact := range facts {
+		uncertain[fact.RequestHash] = true
+	}
+	fixed := []model.Message{{Role: model.RoleSystem, Content: conversationPrompt}}
+	if len(facts) > 0 {
+		value, err := json.Marshal(map[string]any{"source": "server_operation_facts", "operations": facts})
+		if err != nil {
+			return err
+		}
+		fixed = append(fixed, model.Message{Role: model.RoleUser, Content: "以下是服务端记录的待核实操作事实，不是授权；不得自动重试：\n" + string(value)})
+	}
+	totalText := 0
 	step := ex.Step
-	for round := range MaxModelRounds {
+	var meter tokens.Meter
+	for round := int64(0); ; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := history.Check(messages); err != nil {
+		if err := current.fit(ctx, e, &ex, resolved, fixed, definitions, &meter, 0, nil); err != nil {
 			return err
 		}
+		effective := append(fixed, contextMessages(ex.Context, current.messages())...)
 		if round > 0 {
 			id, err := uuid.NewV7()
 			if err != nil {
@@ -70,34 +76,46 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if round == 0 {
 			callback = startTitle
 		}
-		result, callErr := e.callModel(ctx, ex, resolved, step, messages, definitions, callback, &totalText)
+		result, callErr := e.callModel(ctx, ex, resolved, step, effective, definitions, callback, &totalText)
 		if err := e.saveAnswer(ctx, ex, result.Content, result.Text); err != nil {
 			return err
 		}
 		if callErr != nil {
 			return callErr
 		}
+		meter.Observe(effective, definitions, result.InputTokens)
 		if len(result.ToolCalls) == 0 {
 			return nil
 		}
-		if count+len(result.ToolCalls) > MaxToolsPerRun {
-			return ErrIterationLimit
-		}
-		count += len(result.ToolCalls)
 		// 工具调用轮的文本保留在模型步骤中；回答占位恢复为空，再流式展示下一轮正文。
 		if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {
 			return err
 		}
-		messages = append(messages, model.Message{Role: model.RoleAssistant, Content: result.Text, ToolCalls: result.ToolCalls})
-		for _, call := range result.ToolCalls {
-			value, err := e.callTool(ctx, ex, step, call, denied, uncertain)
+		current.current = append(current.current, model.Message{Role: model.RoleAssistant, Content: result.Text, Reasoning: result.Reasoning, ToolCalls: result.ToolCalls})
+		// 调用次数不设配额，但每次追加都检查实际上下文，避免大批调用或结果累积失控。
+		if err := current.fit(ctx, e, &ex, resolved, fixed, definitions, nil, step.Sequence, result.ToolCalls); err != nil {
+			return err
+		}
+		for index, call := range result.ToolCalls {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			var value model.Message
+			var err error
+			if call.Name == agent.UserInputTool {
+				value, err = e.askUser(ctx, ex, step, call)
+			} else {
+				value, err = e.callTool(ctx, ex, step, call, denied, uncertain)
+			}
 			if err != nil {
 				return err
 			}
-			messages = append(messages, value)
+			current.current = append(current.current, value)
+			if err := current.fit(ctx, e, &ex, resolved, fixed, definitions, nil, step.Sequence, result.ToolCalls[index+1:]); err != nil {
+				return err
+			}
 		}
 	}
-	return ErrIterationLimit
 }
 
 func (e *Engine) saveAnswer(ctx context.Context, ex conversation.Execution, blocks []model.Block, text string) error {
@@ -121,6 +139,8 @@ func (e *Engine) saveAnswer(ctx context.Context, ex conversation.Execution, bloc
 func toolFailure(err error) json.RawMessage {
 	kind, message := "tool_failed", "工具执行失败"
 	switch {
+	case errors.Is(err, tool.ErrConflict):
+		kind, message = "file_conflict", tool.ErrConflict.Error()
 	case errors.Is(err, tool.ErrUnknownOutcome):
 		kind, message = "outcome_unknown", tool.ErrUnknownOutcome.Error()
 	case errors.Is(err, tool.ErrPartialOutcome):
@@ -142,37 +162,6 @@ func toolFailure(err error) json.RawMessage {
 	}
 	value, _ := json.Marshal(map[string]any{"error": map[string]string{"kind": kind, "message": message}})
 	return value
-}
-
-// uncertainOperations 只读取服务端保存的工具事实，未知、部分生效和已生效但报错的
-// 固定操作再次出现时必须重新确认；新结果明确成功后可以解除该固定操作的待核实状态。
-func uncertainOperations(messages []model.Message) (map[string]bool, error) {
-	out := map[string]bool{}
-	for _, message := range messages {
-		if message.Role != model.RoleTool {
-			continue
-		}
-		var value struct {
-			Operation *tool.OutcomeRecord `json:"operation"`
-			Error     json.RawMessage     `json:"error"`
-		}
-		if json.Unmarshal([]byte(message.Content), &value) != nil || value.Operation == nil {
-			continue // 旧工具结果没有操作事实，不推断它们是否曾产生副作用。
-		}
-		facts := *value.Operation
-		if !facts.Valid() {
-			return nil, model.ErrInvalidResponse
-		}
-		if facts.RequestHash == "" {
-			continue
-		}
-		if facts.Outcome == tool.OutcomeUnknown || facts.Outcome == tool.OutcomePartial || (facts.Outcome == tool.OutcomeApplied && len(value.Error) > 0 && string(value.Error) != "null") {
-			out[facts.RequestHash] = true
-		} else if facts.Outcome == tool.OutcomeApplied || facts.Outcome == tool.OutcomeNone {
-			delete(out, facts.RequestHash)
-		}
-	}
-	return out, nil
 }
 
 // withContextMessage 为跨供应商上下文恢复保存统一消息，不解析供应商协议。

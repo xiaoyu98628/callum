@@ -89,13 +89,13 @@ func TestToolApprovalPoliciesBeforeExecution(t *testing.T) {
 		action     policy.Action
 		wantReason string
 	}{
-		{"on_request_read", policy.OnRequest, []tool.Effect{tool.EffectRead}, "{}", policy.Allow, "workspace_read_write_policy"},
+		{"on_request_read", policy.OnRequest, []tool.Effect{tool.EffectRead}, "{}", policy.Allow, "read_only_operation"},
 		{"on_request_write", policy.OnRequest, []tool.Effect{tool.EffectWrite}, "{}", policy.Allow, "workspace_read_write_policy"},
 		{"on_request_delete", policy.OnRequest, []tool.Effect{tool.EffectDestructive}, "{}", policy.Ask, "destructive_operation"},
 		{"on_request_external", policy.OnRequest, []tool.Effect{tool.EffectExternal}, "{}", policy.Ask, "external_operation"},
 		{"on_request_unclassified", policy.OnRequest, nil, "{}", policy.Ask, "unclassified_operation"},
 		{"always_read", policy.Always, []tool.Effect{tool.EffectRead}, "{}", policy.Ask, "policy_always"},
-		{"never_read", policy.Never, []tool.Effect{tool.EffectRead}, "{}", policy.Allow, "workspace_read_write_policy"},
+		{"never_read", policy.Never, []tool.Effect{tool.EffectRead}, "{}", policy.Allow, "read_only_operation"},
 		{"never_write", policy.Never, []tool.Effect{tool.EffectWrite}, "{}", policy.Allow, "workspace_read_write_policy"},
 		{"never_read_delete", policy.Never, []tool.Effect{tool.EffectRead, tool.EffectDestructive}, "{}", policy.Deny, "approval_required_but_disabled"},
 		{"never_external", policy.Never, []tool.Effect{tool.EffectExternal}, "{}", policy.Deny, "approval_required_but_disabled"},
@@ -130,7 +130,7 @@ func TestToolApprovalPoliciesBeforeExecution(t *testing.T) {
 			}
 			snapshot := model.Snapshot{ID: policyTestID(t), DisplayName: "测试模型", RemoteModelID: "test", Provider: model.ProviderSnapshot{ID: policyTestID(t), Name: "测试厂商"}}
 			service, err := conversationservice.New(conversations, func(context.Context, string) (agent.Resolved, error) {
-				return agent.Resolved{Client: policyTestModel{args: json.RawMessage(test.args), denied: test.action == policy.Deny}, Snapshot: snapshot, Protocol: "chatcompletions"}, nil
+				return agent.Resolved{Client: policyTestModel{args: json.RawMessage(test.args), denied: test.action == policy.Deny}, Snapshot: snapshot, ContextWindow: 1000000, Protocol: "chatcompletions"}, nil
 			}, runtime.manager, engine)
 			if err != nil {
 				t.Fatal(err)

@@ -20,12 +20,33 @@ type transcriptRow struct {
 
 // Transcript 在当前消息分支恢复成功轨迹及失败执行留下的副作用事实。
 // 查询前检查累计大小，只加载统一上下文，不加载大型原始模型结果。
-func (r *Repository) Transcript(ctx context.Context, id string) (map[string][]model.Message, error) {
+func (r *Repository) Transcript(ctx context.Context, id string, after ...int64) (map[string][]model.Message, error) {
+	floor := int64(0)
+	if len(after) > 0 {
+		floor = after[0]
+	}
+	return r.readTranscript(ctx, id, floor, 8<<20, 256, 0)
+}
+
+// ContextTranscript 为压缩准备读取有界的未覆盖轨迹，最终模型请求仍遵守原上限。
+func (r *Repository) ContextTranscript(ctx context.Context, id string, floor int64, before ...int64) (map[string][]model.Message, error) {
+	ceiling := int64(0)
+	if len(before) > 0 {
+		ceiling = before[0]
+	}
+	return r.readTranscript(ctx, id, floor, 16<<20, 512, ceiling)
+}
+
+func (r *Repository) readTranscript(ctx context.Context, id string, floor int64, maxBytes int64, maxMessages int, before int64) (map[string][]model.Message, error) {
 	base := func() *gorm.DB {
-		return r.db.WithContext(ctx).Model(&schema.Step{}).
+		q := r.db.WithContext(ctx).Model(&schema.Step{}).
 			Joins("JOIN conversation_runs r ON r.id=conversation_run_steps.run_id AND r.status IN ('completed','failed','cancelled','interrupted')").
 			Joins("JOIN conversation_messages m ON m.run_id=r.id AND m.role='user'").
-			Where("conversation_run_steps.conversation_id=?", id)
+			Where("conversation_run_steps.conversation_id=? AND m.conversation_id=? AND m.sequence>?", id, id, floor)
+		if before > 0 {
+			q = q.Where("m.sequence<?", before)
+		}
+		return q
 	}
 	// 新步骤缺失事实属于损坏记录，不能沿用旧契约而静默丢失操作。
 	var invalid int64
@@ -40,21 +61,48 @@ func (r *Repository) Transcript(ctx context.Context, id string) (map[string][]mo
 	if invalid != 0 {
 		return nil, model.ErrInvalidResponse
 	}
+	visible := func() *gorm.DB {
+		return base().Where(`r.status='completed' OR EXISTS (
+ SELECT 1 FROM conversation_run_steps t WHERE t.run_id=r.id AND t.type='tool_call'
+ AND json_extract(t.input,'$.operation_version')=1 AND json_extract(t.output,'$.operation.version')=1
+ AND json_extract(t.output,'$.operation.outcome') IN ('applied','partially_applied','unknown'))`)
+	}
+	var runIDs []string
+	if err := visible().Distinct("r.id").Limit(maxMessages+1).Pluck("r.id", &runIDs).Error; err != nil {
+		return nil, err
+	}
+	if len(runIDs) > maxMessages {
+		return nil, &model.InputLimitError{Dimension: "历史执行数量", Actual: int64(len(runIDs)), Limit: int64(maxMessages)}
+	}
+	checkpoints, err := r.readCheckpoints(ctx, id, runIDs, maxBytes)
+	if err != nil {
+		return nil, err
+	}
 	query := func() *gorm.DB {
-		return base().Where("json_type(conversation_run_steps.output,'$.context_message')='object'").
-			Where(`r.status='completed' OR EXISTS (
-				SELECT 1 FROM conversation_run_steps t WHERE t.run_id=r.id AND t.type='tool_call'
-				AND json_extract(t.input,'$.operation_version')=1
-				AND json_extract(t.output,'$.operation.version')=1
-				AND json_extract(t.output,'$.operation.outcome') IN ('applied','partially_applied','unknown')
-			)`)
+		q := visible().Where("json_type(conversation_run_steps.output,'$.context_message')='object'")
+		// 已验证的固定范围直接参与查询，不对每条消息再关联扫描全部压缩步骤。
+		for runID, checkpoint := range checkpoints {
+			q = q.Where("(conversation_run_steps.run_id<>? OR conversation_run_steps.sequence>?)", runID, checkpoint.Through)
+		}
+		return q
 	}
 	var bounds struct{ Size, Count int64 }
 	if err := query().Select("COALESCE(SUM(length(CAST(json_extract(conversation_run_steps.output,'$.context_message') AS BLOB))),0) AS size,COUNT(*) AS count").Scan(&bounds).Error; err != nil {
 		return nil, err
 	}
-	if bounds.Size > 8<<20 || bounds.Count > 256 {
-		return nil, model.ErrInputLimit
+	for _, checkpoint := range checkpoints {
+		raw, err := json.Marshal(checkpoint.Message())
+		if err != nil {
+			return nil, err
+		}
+		bounds.Size += int64(len(raw))
+		bounds.Count++
+	}
+	if bounds.Size > maxBytes {
+		return nil, &model.InputLimitError{Dimension: "历史轨迹字节", Actual: bounds.Size, Limit: maxBytes}
+	}
+	if bounds.Count > int64(maxMessages) {
+		return nil, &model.InputLimitError{Dimension: "历史轨迹消息数量", Actual: bounds.Count, Limit: int64(maxMessages)}
 	}
 	var rows []transcriptRow
 	if err := query().Select("conversation_run_steps.id,conversation_run_steps.run_id,r.status AS run_status,conversation_run_steps.parent_step_id,conversation_run_steps.tool_call_id,json_extract(conversation_run_steps.output,'$.context_message') AS message,json_extract(conversation_run_steps.output,'$.operation') AS operation").
@@ -62,7 +110,10 @@ func (r *Repository) Transcript(ctx context.Context, id string) (map[string][]mo
 		return nil, err
 	}
 	out := map[string][]model.Message{}
-	count := 0
+	for runID, checkpoint := range checkpoints {
+		out[runID] = []model.Message{checkpoint.Message()}
+	}
+	count := len(checkpoints)
 	for start := 0; start < len(rows); {
 		end := start + 1
 		for end < len(rows) && rows[end].RunID == rows[start].RunID {
@@ -73,18 +124,18 @@ func (r *Repository) Transcript(ctx context.Context, id string) (map[string][]mo
 			return nil, err
 		}
 		count += len(messages)
-		if count > 256 {
-			return nil, model.ErrInputLimit
+		if count > maxMessages {
+			return nil, &model.InputLimitError{Dimension: "历史轨迹消息数量", Actual: int64(count), Limit: int64(maxMessages)}
 		}
-		out[rows[start].RunID] = messages
+		out[rows[start].RunID] = append(out[rows[start].RunID], messages...)
 		start = end
 	}
 	encoded, err := json.Marshal(out)
 	if err != nil {
 		return nil, err
 	}
-	if len(encoded) > 8<<20 {
-		return nil, model.ErrInputLimit
+	if int64(len(encoded)) > maxBytes {
+		return nil, &model.InputLimitError{Dimension: "历史轨迹字节", Actual: int64(len(encoded)), Limit: maxBytes}
 	}
 	return out, nil
 }

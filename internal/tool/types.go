@@ -12,6 +12,12 @@ import (
 const MaxResultBytes = 64 << 10
 const MaxArgumentBytes = 16 << 10
 
+const (
+	MaxOutputChunkBytes = 4 << 10
+	MaxOutputBytes      = 64 << 10
+	MaxOutputEvents     = 128
+)
+
 var (
 	ErrInvalid        = errors.New("工具参数无效")
 	ErrDenied         = errors.New("操作超出授权工作区或权限范围")
@@ -20,6 +26,7 @@ var (
 	ErrPathBase       = errors.New("相对路径需要工作区，请提供绝对路径或绑定工作区")
 	ErrUnknownOutcome = errors.New("操作结果未知，需要核实后再重试")
 	ErrPartialOutcome = errors.New("操作仅部分生效，需要核实已完成的部分")
+	ErrConflict       = errors.New("文件版本、路径或补丁上下文发生冲突，请重新读取后修改")
 )
 
 // Outcome 描述实际副作用，与工具调用是否成功、执行是否取消分别记录。
@@ -115,6 +122,38 @@ type Scope struct {
 	RootPath string `json:"root_path"`
 }
 
+// SandboxMode 与审批策略分开；空值仅保留旧执行快照的无沙箱语义。
+type SandboxMode string
+
+const (
+	SandboxReadOnly       SandboxMode = "read-only"
+	SandboxWorkspaceWrite SandboxMode = "workspace-write"
+)
+
+func (m SandboxMode) Valid() bool { return m == SandboxReadOnly || m == SandboxWorkspaceWrite }
+
+// ExecutionPermissions 由受理时的服务端设置快照提供，模型不能指定沙箱模式。
+type ExecutionPermissions struct{ SandboxMode SandboxMode }
+
+// PermissionTool 为需要运行权限的工具显式传入执行快照；普通文件工具沿用 Prepare。
+type PermissionTool interface {
+	Tool
+	PrepareWithPermissions(context.Context, Scope, json.RawMessage, ExecutionPermissions) (Invocation, error)
+}
+
+// CommandBoundary 记录固定命令实际使用的执行边界，不将未知命令伪装为只读。
+type CommandBoundary struct {
+	Sandboxed bool        `json:"sandboxed"`
+	Mode      SandboxMode `json:"sandbox_mode,omitempty"`
+	Escalated bool        `json:"escalated"`
+	Risk      string      `json:"risk,omitempty"`
+}
+
+type CommandInvocation interface {
+	Invocation
+	CommandBoundary() CommandBoundary
+}
+
 // Target 记录文件工具固定的实际目标，目录操作的范围限于该目录。
 // WithinWorkspace 由可信实现依据实际路径判断，不能由模型参数指定。
 type Target struct {
@@ -122,6 +161,24 @@ type Target struct {
 	Path            string `json:"path"`
 	Kind            string `json:"kind"`
 	WithinWorkspace bool   `json:"within_workspace"`
+	Action          string `json:"action,omitempty"`
+	ExpectedSHA256  string `json:"expected_sha256,omitempty"`
+	RecoveryPath    string `json:"recovery_path,omitempty"`
+	StagingPath     string `json:"staging_path,omitempty"`
+}
+
+// Plan 固定多目标操作及额外影响。由可信调用实现生成，不能由模型声明权限。
+// AdditionalEffects 只能增加影响，不能抵消工具定义中已有的影响。
+type Plan struct {
+	Targets           []Target `json:"targets"`
+	AdditionalEffects []Effect `json:"additional_effects,omitempty"`
+}
+
+// PlannedInvocation 为实际需要多目标或动态影响判定的工具提供审批计划。
+// Plan 必须只返回元数据，在 Prepare、审批等待及执行开始前保持不变。
+type PlannedInvocation interface {
+	Invocation
+	Plan() Plan
 }
 
 // Invocation 持有一次调用的固定资源；Execute 在使用前重新校验目标。
@@ -131,6 +188,30 @@ type Invocation interface {
 	Target() *Target
 	Execute(context.Context) (Result, error)
 	Close() error
+}
+
+// SnapshotInvocation 提供服务端生成的补充审批详情，不包含凭据或可变引用。
+// 快照必须是非空 JSON 对象，不超过 MaxArgumentBytes；执行前重新比较其内容。
+// 未实现此接口的工具保持现有审批快照格式。
+type SnapshotInvocation interface {
+	Invocation
+	Snapshot() json.RawMessage
+}
+
+// OutputChunk 是一次工具调用的输出片段。Sequence 由执行器分配，从 1 开始。
+// Data 允许任意字节，回调只能在返回前借用；需要保存时必须复制。
+type OutputChunk struct {
+	Sequence int64
+	Stream   string
+	Data     []byte
+}
+
+// StreamingInvocation 在执行期间同步发布有界输出。回调失败必须停止执行并清理。
+// 返回前必须等待全部生产者退出，不允许返回后继续调用 emit；emit 为 nil 时仅保存最终结果。
+// emit 必须及时返回，不得在回调内同步等待本次调用的 Close。
+type StreamingInvocation interface {
+	Invocation
+	ExecuteStream(context.Context, func(OutputChunk) error) (Result, error)
 }
 
 // Tool 的 Validate 返回规范化参数；Prepare 固定目标，但不得读取正文或执行操作。

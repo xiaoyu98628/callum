@@ -2,6 +2,7 @@ package approval
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
@@ -33,14 +34,42 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request) (any, *proto
 		value, err = h.service.List(ctx, p)
 	case "approval.decide":
 		var p struct {
-			ApprovalID string  `json:"approval_id"`
-			Decision   string  `json:"decision"`
-			Note       *string `json:"decision_note,omitempty"`
+			ApprovalID string          `json:"approval_id"`
+			Decision   string          `json:"decision"`
+			Note       *string         `json:"decision_note,omitempty"`
+			Scope      json.RawMessage `json:"scope,omitempty"`
 		}
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
 			return nil, rpcErr
 		}
-		value, err = h.service.Decide(ctx, p.ApprovalID, p.Decision, p.Note)
+		scope := agent.ApprovalOnce
+		if len(p.Scope) > 0 {
+			var selected *string
+			if json.Unmarshal(p.Scope, &selected) != nil || selected == nil || (*selected != agent.ApprovalOnce && *selected != agent.ApprovalConversationDirectory) {
+				return nil, protocol.InvalidParams()
+			}
+			scope = *selected
+		}
+		value, err = h.service.Decide(ctx, p.ApprovalID, p.Decision, p.Note, scope)
+	case "approval.directory.list":
+		var p struct {
+			ConversationID string `json:"conversation_id"`
+			Limit          int    `json:"limit,omitempty"`
+			Offset         int    `json:"offset,omitempty"`
+		}
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return nil, rpcErr
+		}
+		value, err = h.service.ListDirectories(ctx, p.ConversationID, p.Limit, p.Offset)
+	case "approval.directory.revoke":
+		var p struct {
+			ConversationID string `json:"conversation_id"`
+			ID             string `json:"id"`
+		}
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return nil, rpcErr
+		}
+		value, err = h.service.RevokeDirectory(ctx, p.ConversationID, p.ID)
 	default:
 		return nil, protocol.MethodNotFound()
 	}

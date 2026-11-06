@@ -1,0 +1,137 @@
+package run
+
+import (
+	"crypto/rand"
+	"errors"
+	"os"
+	"path/filepath"
+	"runtime"
+	"slices"
+	"strings"
+
+	"github.com/xiaoyu98628/callum/internal/tool"
+)
+
+// configureSandbox 只固定边界、路径及系统启动器，不创建文件或运行探测命令。
+func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionPermissions) error {
+	if permissions.SandboxMode != "" && !permissions.SandboxMode.Valid() {
+		return tool.ErrDenied
+	}
+	p.boundary = tool.CommandBoundary{Mode: permissions.SandboxMode, Escalated: a.SandboxPermissions == "require_escalated", Risk: commandRisk(p.command)}
+	if p.boundary.Escalated || permissions.SandboxMode == "" {
+		return nil
+	}
+	// 未接入系统沙箱的平台保留明确的逐次审批，不能宣称受系统边界保护。
+	if runtime.GOOS != "darwin" {
+		p.boundary.Risk = "sandbox_backend_unsupported"
+		return nil
+	}
+	var err error
+	p.sandboxExecutable, err = pinPath("/usr/bin/sandbox-exec", false)
+	if err != nil {
+		return errors.Join(tool.ErrUnavailable, err)
+	}
+	p.temporaryParent, err = pinPath(os.TempDir(), true)
+	if err != nil {
+		return err
+	}
+	p.temporaryPath = filepath.Join(p.temporaryParent.actual, "callum-command-"+rand.Text())
+	p.boundary.Sandboxed = true
+	if p.workspace == nil {
+		p.boundary.Mode = tool.SandboxReadOnly
+	}
+	p.profile = seatbeltProfile(p.workspace != nil && p.boundary.Mode == tool.SandboxWorkspaceWrite)
+	p.launchArguments = []string{p.sandboxExecutable.actual, "-p", p.profile, "-D", "COMMAND_TEMP=" + p.temporaryPath}
+	if p.workspace != nil && p.boundary.Mode == tool.SandboxWorkspaceWrite {
+		p.launchArguments = append(p.launchArguments, "-D", "WORKSPACE="+p.workspace.actual)
+	}
+	p.launchArguments = append(p.launchArguments, "--")
+	p.launchArguments = append(p.launchArguments, p.command...)
+	// 不把真实用户缓存目录自动加入写入范围。常用工具缓存转入此次受控临时目录。
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOCACHE", "GOTMPDIR", "npm_config_cache"} {
+		p.environment = slices.DeleteFunc(p.environment, func(entry string) bool { return strings.HasPrefix(entry, key+"=") })
+		value := p.temporaryPath
+		if key == "GOCACHE" {
+			value = filepath.Join(value, "go-build")
+		}
+		if key == "npm_config_cache" {
+			value = filepath.Join(value, "npm-cache")
+		}
+		p.environment = append(p.environment, key+"="+value)
+	}
+	return nil
+}
+
+// setupExecution 只在审批完成、路径复核后创建私有临时目录；调用者在进程树收尾后清理。
+func (p *fixedCommand) setupExecution() (func() error, error) {
+	if !p.boundary.Sandboxed {
+		return func() error { return nil }, nil
+	}
+	if err := os.Mkdir(p.temporaryPath, 0700); err != nil {
+		return nil, errors.Join(tool.ErrUnavailable, err)
+	}
+	return func() error { return os.RemoveAll(p.temporaryPath) }, nil
+}
+
+// 路径使用 sandbox-exec 的独立参数传递，不能将带引号的目录拼进策略代码。
+// 默认不开放任何网络或其他应用的 IPC；子进程继承同一策略。
+func seatbeltProfile(workspaceWrite bool) string {
+	profile := `(version 1)
+(deny default)
+(allow process-exec)
+(allow process-fork)
+(allow signal (target same-sandbox))
+(allow process-info* (target same-sandbox))
+(allow file-read*)
+(allow sysctl-read)
+(allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
+(allow file-write-data (require-all (literal "/dev/null") (vnode-type CHARACTER-DEVICE)))
+(allow file-write* (require-all
+  (subpath (param "COMMAND_TEMP"))
+  (require-not (regex #"(^|/)[.](git|codex|agents|aws)(/|$)"))))
+`
+	if workspaceWrite {
+		profile += `(allow file-write* (require-all
+  (subpath (param "WORKSPACE"))
+  (require-not (regex #"(^|/)[.](git|codex|agents|aws)(/|$)"))))
+(deny file-write-unlink (literal (param "WORKSPACE")))
+`
+	}
+	profile += `(deny file-write-unlink (literal (param "COMMAND_TEMP")))
+(deny file-write* (regex #"(^|/)[.](git|codex|agents|aws)(/|$)"))
+`
+	return profile
+}
+
+// commandRisk 保留已识别破坏性操作的人工复核；任意脚本仍由系统沙箱限制实际访问。
+// 这不是命令白名单，也不声称能判断所有程序的业务副作用。
+func commandRisk(command []string) string {
+	if len(command) == 0 {
+		return "unclassified_operation"
+	}
+	words := make([]string, 0, len(command))
+	for _, part := range command {
+		words = append(words, strings.FieldsFunc(strings.ToLower(part), func(r rune) bool {
+			return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '/')
+		})...)
+	}
+	for _, word := range words {
+		switch filepath.Base(word) {
+		case "rm", "rmdir", "sudo", "su", "diskutil", "dd", "mkfs", "chmod", "chown":
+			return "destructive_command"
+		}
+	}
+	for _, word := range words {
+		if word == "-delete" || word == "-exec" || word == "-execdir" {
+			return "destructive_command"
+		}
+	}
+	if slices.ContainsFunc(words, func(word string) bool { return filepath.Base(word) == "git" }) {
+		for _, word := range words {
+			if word == "clean" || word == "reset" || word == "restore" || word == "push" {
+				return "sensitive_git_command"
+			}
+		}
+	}
+	return ""
+}

@@ -54,16 +54,21 @@ func (s *Service) List(ctx context.Context, f agent.ApprovalFilter) ([]agent.App
 	return s.repository.ListApprovals(ctx, f)
 }
 
-// Decide 的用户标识由本机服务确定，客户端仅能提交决定和说明。
-func (s *Service) Decide(ctx context.Context, id, decision string, note *string) (agent.Approval, error) {
-	if !validID(id) || (decision != agent.ApprovalApproved && decision != agent.ApprovalRejected) || (note != nil && (len(*note) > 4096 || !utf8.ValidString(*note))) {
+// Decide 的用户标识与目录范围由服务端确定；客户端只能选择本次或快照提供的会话目录授权。
+func (s *Service) Decide(ctx context.Context, id, decision string, note *string, scopes ...string) (agent.Approval, error) {
+	if len(scopes) > 1 || (len(scopes) == 1 && scopes[0] != agent.ApprovalOnce && scopes[0] != agent.ApprovalConversationDirectory) || !validID(id) || (decision != agent.ApprovalApproved && decision != agent.ApprovalRejected) || (note != nil && (len(*note) > 4096 || !utf8.ValidString(*note))) {
 		return agent.Approval{}, agent.ErrApprovalInvalid
 	}
-	value, err := s.repository.DecideApproval(ctx, id, decision, new("local_user"), note)
+	value, err := s.repository.DecideApproval(ctx, id, decision, new("local_user"), note, scopes...)
 	if value.ID != "" && err == nil {
 		s.signal(value.ID)
 		if publishErr := s.publish(ctx, "approval.updated", value); publishErr != nil {
 			return value, errors.Join(err, publishErr)
+		}
+		if value.DirectoryGrant != nil {
+			if err := s.emit(agent.Event{Type: "directory_grant.updated", ConversationID: value.DirectoryGrant.ConversationID, Data: *value.DirectoryGrant}); err != nil {
+				return value, err
+			}
 		}
 	}
 	return value, err

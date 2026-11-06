@@ -127,7 +127,9 @@ func (r *Repository) SaveMessage(ctx context.Context, id string, blocks []model.
 	if status == domain.Completed {
 		completed = &now
 	}
-	result := r.db.WithContext(ctx).Model(&schema.Message{}).Where("id = ? AND role = 'assistant' AND status IN ?", id, []string{"running", "awaiting_approval", "awaiting_user_input"}).Updates(map[string]any{"content": string(encoded), "status": status, "updated_at": now, "completed_at": completed})
+	// 单次 UPDATE 本身是原子的，不需要额外的隐式事务；取消后的自动回滚
+	// 否则可能用 ErrTxDone 覆盖原上下文错误。调用方已有的事务仍继续沿用。
+	result := r.db.Session(&gorm.Session{SkipDefaultTransaction: true}).WithContext(ctx).Model(&schema.Message{}).Where("id = ? AND role = 'assistant' AND status IN ?", id, []string{"running", "awaiting_approval", "awaiting_user_input"}).Updates(map[string]any{"content": string(encoded), "status": status, "updated_at": now, "completed_at": completed})
 	if result.Error != nil {
 		return result.Error
 	}
@@ -146,6 +148,9 @@ func (r *Repository) Finish(ctx context.Context, in domain.Run) error {
 		}
 		if result.RowsAffected != 1 {
 			return domain.ErrNotFound
+		}
+		if err := tx.Model(&schema.ContextVersion{}).Where("status='building' AND generated_by_step_id IN (SELECT id FROM conversation_run_steps WHERE run_id=?)", in.ID).Updates(map[string]any{"status": "failed", "updated_at": in.UpdatedAt}).Error; err != nil {
+			return err
 		}
 		if err := cancelApprovals(tx, in.ID, in.UpdatedAt); err != nil {
 			return err
@@ -173,6 +178,9 @@ func (r *Repository) Finish(ctx context.Context, in domain.Run) error {
 func (r *Repository) Recover(ctx context.Context) error {
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		now := time.Now().UnixMilli()
+		if err := tx.Model(&schema.ContextVersion{}).Where("status='building'").Updates(map[string]any{"status": "failed", "updated_at": now}).Error; err != nil {
+			return err
+		}
 		if err := cancelApprovals(tx, "", now); err != nil {
 			return err
 		}

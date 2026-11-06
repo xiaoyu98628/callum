@@ -1,6 +1,6 @@
 //go:build unix
 
-package filesystem
+package fileaccess
 
 import "syscall"
 

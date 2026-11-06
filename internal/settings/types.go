@@ -9,6 +9,7 @@ import (
 	"io"
 	"unicode/utf8"
 
+	"github.com/xiaoyu98628/callum/internal/tool"
 	"github.com/xiaoyu98628/callum/internal/tool/policy"
 )
 
@@ -36,27 +37,41 @@ type Record struct {
 type Execution struct {
 	ApprovalPolicy    policy.ApprovalPolicy `json:"approval_policy"`
 	ApprovalsReviewer policy.Reviewer       `json:"approvals_reviewer"`
+	SandboxMode       tool.SandboxMode      `json:"sandbox_mode,omitempty"`
 }
 
 // DefaultExecution 只在创建设置记录时使用，读取失败不能回退到默认权限。
 func DefaultExecution() Execution {
-	return Execution{ApprovalPolicy: policy.OnRequest, ApprovalsReviewer: policy.User}
+	return Execution{ApprovalPolicy: policy.OnRequest, ApprovalsReviewer: policy.User, SandboxMode: tool.SandboxWorkspaceWrite}
 }
 
 // Snapshot 固定一次执行实际采用的配置及版本，不能跟随全局设置更新。
 type Snapshot struct {
 	Revision int64 `json:"revision"`
 	Execution
+	Compaction *CompactionSnapshot `json:"context_compaction,omitempty"`
 }
 
 // Valid 判断快照是否具有有效版本和当前服务支持的独立配置值。
 func (s Snapshot) Valid() bool {
-	return s.Revision > 0 && s.ApprovalPolicy.Valid() && s.ApprovalsReviewer.Valid()
+	return s.Revision > 0 && s.ApprovalPolicy.Valid() && s.ApprovalsReviewer.Valid() &&
+		(s.SandboxMode == "" || s.SandboxMode.Valid()) &&
+		(s.Compaction == nil || s.Compaction.Valid())
+}
+
+// Clone 复制可变嵌套快照，受理回调不得修改即将执行的配置。
+func (s Snapshot) Clone() Snapshot {
+	if s.Compaction != nil {
+		value := *s.Compaction
+		s.Compaction = &value
+	}
+	return s
 }
 
 // DecodeExecution 严格校验客户端或存储中的 JSON；不接受重复键、未知字段或尾随内容。
 func DecodeExecution(raw json.RawMessage) (Execution, error) {
-	var value Execution
+	// 旧全局设置缺少此字段时，新受理执行采用工作区沙箱；历史快照直接解码，保持空值。
+	value := Execution{SandboxMode: tool.SandboxWorkspaceWrite}
 	if len(raw) == 0 || len(raw) > MaxValueBytes || !utf8.Valid(raw) {
 		return value, ErrInvalid
 	}
@@ -78,6 +93,13 @@ func DecodeExecution(raw json.RawMessage) (Execution, error) {
 			err = decoder.Decode(&value.ApprovalPolicy)
 		case "approvals_reviewer":
 			err = decoder.Decode(&value.ApprovalsReviewer)
+		case "sandbox_mode":
+			var selected *tool.SandboxMode
+			err = decoder.Decode(&selected)
+			if selected == nil {
+				return value, ErrInvalid
+			}
+			value.SandboxMode = *selected
 		default:
 			return value, ErrInvalid
 		}
@@ -89,7 +111,7 @@ func DecodeExecution(raw json.RawMessage) (Execution, error) {
 		return value, ErrInvalid
 	}
 	var trailing any
-	if decoder.Decode(&trailing) != io.EOF || !value.ApprovalPolicy.Valid() || !value.ApprovalsReviewer.Valid() {
+	if decoder.Decode(&trailing) != io.EOF || !value.ApprovalPolicy.Valid() || !value.ApprovalsReviewer.Valid() || !value.SandboxMode.Valid() {
 		return value, ErrInvalid
 	}
 	return value, nil

@@ -70,6 +70,9 @@ type Begin struct {
 
 // Execution 是提交后的执行快照，不持有数据库连接或事务。
 type Execution struct {
+	// HistoryMore 表示受理只装配有界前缀，执行阶段继续压缩并读取余下历史。
+	HistoryMore       bool
+	Context           *ContextVersion
 	RemovedMessageIDs []string
 	Created           bool
 	Conversation      Conversation

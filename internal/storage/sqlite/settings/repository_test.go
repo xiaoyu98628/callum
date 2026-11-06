@@ -17,6 +17,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 	conversationstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/conversation"
 	store "github.com/xiaoyu98628/callum/internal/storage/sqlite/settings"
+	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
 func fixture(t *testing.T) (*sqlite.Database, *service.Service) {
@@ -39,6 +40,41 @@ func fixture(t *testing.T) (*sqlite.Database, *service.Service) {
 		t.Fatal(err)
 	}
 	return db, s
+}
+
+func TestLegacySettingsCompatibilityAndSandboxRevision(t *testing.T) {
+	db, s := fixture(t)
+	legacy := `{"approval_policy":"on-request","approvals_reviewer":"user"}`
+	if err := db.DB.Table("app_settings").Where("key=?", settings.ExecutionKey).Update("value", legacy).Error; err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.Get(t.Context(), settings.ExecutionKey)
+	if err != nil || current.Revision != 1 {
+		t.Fatalf("旧设置读取失败: %+v %v", current, err)
+	}
+	snapshot, err := settings.ExecutionSnapshot(current)
+	if err != nil || snapshot.SandboxMode != tool.SandboxWorkspaceWrite {
+		t.Fatalf("旧配置没有返回明确默认值: %+v %v", snapshot, err)
+	}
+	var stored string
+	if err := db.DB.Table("app_settings").Where("key=?", settings.ExecutionKey).Select("value").Scan(&stored).Error; err != nil || stored != legacy {
+		t.Fatalf("查询改写了旧存储: %s %v", stored, err)
+	}
+	saved, err := s.Update(t.Context(), settings.ExecutionKey, 1, json.RawMessage(`{"approval_policy":"on-request","approvals_reviewer":"user","sandbox_mode":"read-only"}`))
+	if err != nil || saved.Revision != 2 {
+		t.Fatalf("沙箱设置保存失败: %+v %v", saved, err)
+	}
+	saved, err = s.Update(t.Context(), settings.ExecutionKey, 2, json.RawMessage(legacy))
+	if err != nil || saved.Revision != 3 {
+		t.Fatalf("旧客户端更新失败: %+v %v", saved, err)
+	}
+	snapshot, err = settings.ExecutionSnapshot(saved)
+	if err != nil || snapshot.SandboxMode != tool.SandboxReadOnly {
+		t.Fatalf("旧客户端更新扩大了权限: %+v %v", snapshot, err)
+	}
+	if _, err := s.Update(t.Context(), settings.ExecutionKey, 2, json.RawMessage(legacy)); !errors.Is(err, settings.ErrConflict) {
+		t.Fatalf("旧版本覆盖了沙箱设置: %v", err)
+	}
 }
 
 func TestConcurrentSettingsUpdateAndRollback(t *testing.T) {

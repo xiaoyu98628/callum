@@ -39,6 +39,13 @@ func newConversationResolver(providers *providerservice.Service, client *http.Cl
 		if err != nil {
 			return agent.Resolved{}, err
 		}
-		return agent.Resolved{Client: adapter, Protocol: runtime.Protocol, ImageInput: runtime.Model.Capabilities["image_input"], Snapshot: model.Snapshot{ID: runtime.Model.ID, DisplayName: runtime.Model.DisplayName, RemoteModelID: runtime.Model.RemoteModelID, Provider: model.ProviderSnapshot{ID: runtime.Model.ProviderID, Name: runtime.ProviderName}}}, nil
+		resolved := agent.Resolved{Client: adapter, Protocol: runtime.Protocol, ImageInput: runtime.Model.Capabilities["image_input"], Snapshot: model.Snapshot{ID: runtime.Model.ID, DisplayName: runtime.Model.DisplayName, RemoteModelID: runtime.Model.RemoteModelID, Provider: model.ProviderSnapshot{ID: runtime.Model.ProviderID, Name: runtime.ProviderName}}}
+		if runtime.Model.ContextWindow != nil {
+			resolved.ContextWindow = *runtime.Model.ContextWindow
+		}
+		if runtime.Model.MaxOutputTokens != nil {
+			resolved.MaxOutputTokens = *runtime.Model.MaxOutputTokens
+		}
+		return resolved, nil
 	}
 }

@@ -1,4 +1,5 @@
-package filesystem
+// Package search 提供固定目标范围的字面文本搜索工具。
+package search
 
 import (
 	"context"
@@ -11,7 +12,52 @@ import (
 	"unicode/utf8"
 
 	"github.com/xiaoyu98628/callum/internal/tool"
+	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem/internal/fileaccess"
 )
+
+type searchTool struct{}
+
+// New 返回独立的字面文本搜索工具。
+func New() tool.Tool { return searchTool{} }
+
+func (searchTool) Definition() tool.Definition {
+	return tool.Definition{Name: "search_text", Description: "在目录或文件中搜索字面文本。path 支持绝对路径；相对路径需要绑定工作区。只读访问不受工作区写入边界限制，审批由服务端策略判断", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["path","query"],"additionalProperties":false}`), Source: "builtin", Version: "3", Effects: []tool.Effect{tool.EffectRead}}
+}
+
+func (searchTool) Validate(raw json.RawMessage) (json.RawMessage, error) {
+	a, err := decodeArguments(raw)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(a)
+}
+
+func (searchTool) Prepare(ctx context.Context, scope tool.Scope, raw json.RawMessage) (tool.Invocation, error) {
+	a, err := decodeArguments(raw)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := fileaccess.Prepare(ctx, scope, a.Path, fileaccess.FileOrDirectory)
+	if err != nil {
+		return nil, err
+	}
+	return &invocation{Handle: handle, args: a}, nil
+}
+
+type invocation struct {
+	*fileaccess.Handle
+	args arguments
+}
+
+func (p *invocation) Execute(ctx context.Context) (tool.Result, error) {
+	if err := p.Check(ctx); err != nil {
+		return tool.Result{Outcome: tool.OutcomeNone}, err
+	}
+	a := p.args
+	a.Path = "."
+	output, err := search(ctx, p.Root(), p.File(), a, p.Target().Path)
+	return tool.Result{Output: output, Outcome: tool.OutcomeNone}, err
+}
 
 type match struct {
 	Path string `json:"path"`
@@ -48,7 +94,7 @@ func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base
 			return nil
 		}
 		if stat.IsDir() {
-			f, err := open(root, path)
+			f, err := fileaccess.OpenRead(root, path)
 			if err != nil {
 				return err
 			}
@@ -83,9 +129,9 @@ func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base
 		}
 		var data []byte
 		if file != nil {
-			data, err = fileText(ctx, file)
+			data, err = fileaccess.ReadText(ctx, file)
 		} else {
-			data, err = textFile(ctx, root, path)
+			data, err = fileaccess.ReadTextFile(ctx, root, path)
 		}
 		if errors.Is(err, tool.ErrLimit) || errors.Is(err, tool.ErrUnavailable) {
 			truncated = true

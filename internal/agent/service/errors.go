@@ -8,6 +8,7 @@ import (
 	"io"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/conversation/compaction"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 )
@@ -42,8 +43,12 @@ func fillFailure(result *model.Response, protocol string, err error) {
 func failure(err error) (status, kind, message string) {
 	status = agent.Failed
 	switch {
-	case errors.Is(err, ErrIterationLimit):
-		return status, "iteration_limit", "Agent 调用次数达到上限"
+	case errors.Is(err, model.ErrTokenBudget):
+		return status, "token_budget_unconfigured", "请配置模型上下文容量或有效的输入 Token 预算"
+	case errors.Is(err, model.ErrTokenLimit):
+		return status, "token_budget_exceeded", "保留上下文或单个完整轮次超过 Token 预算，请调整预算或保留轮次"
+	case errors.Is(err, compaction.ErrNoReduction):
+		return status, "compaction_not_reduced", "摘要未能缩小上下文，原有效版本已保留"
 	case errors.Is(err, agent.ErrStorage):
 		return status, "internal", "保存执行数据失败"
 	case errors.Is(err, context.Canceled):
@@ -65,6 +70,9 @@ func failure(err error) (status, kind, message string) {
 	case errors.Is(err, model.ErrImageFormat):
 		return status, "image_format", "图片格式不支持"
 	case errors.Is(err, model.ErrInputLimit):
+		if limit, ok := errors.AsType[*model.InputLimitError](err); ok {
+			return status, "input_limit", limit.Error()
+		}
 		return status, "input_limit", "模型输入超过字节上限"
 	default:
 		if call, ok := errors.AsType[*model.CallError](err); ok && call.StatusCode > 0 {

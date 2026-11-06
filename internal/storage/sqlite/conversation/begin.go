@@ -12,24 +12,14 @@ import (
 	domain "github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
-	"github.com/xiaoyu98628/callum/internal/settings"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
-	settingsstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/settings"
 )
 
 // Begin 在同一写事务中接受输入并建立执行；事务返回后才可调用模型。
 func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Execution, err error) {
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		// 与设置更新按同一数据库事务顺序确定配置；读失败时不创建会话或回退权限。
-		configuration, err := settingsstore.NewRepository(tx)
-		if err != nil {
-			return err
-		}
-		record, err := configuration.Get(ctx, settings.ExecutionKey)
-		if err != nil {
-			return err
-		}
-		snapshot, err := settings.ExecutionSnapshot(record)
+		snapshot, err := executionSettings(tx, ctx)
 		if err != nil {
 			return err
 		}
@@ -83,6 +73,9 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			if user.Sequence != latest {
 				return domain.ErrConflict
 			}
+			if err := invalidateContexts(tx, conv.ID, user.Sequence, now); err != nil {
+				return err
+			}
 			old := user.RunID
 			replaced = &old
 			if err := tx.Model(&schema.Message{}).Where("conversation_id = ? AND sequence > ?", conv.ID, user.Sequence).Pluck("id", &out.RemovedMessageIDs).Error; err != nil {
@@ -91,8 +84,8 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			if err := tx.Where("conversation_id = ? AND sequence > ?", conv.ID, user.Sequence).Delete(&schema.Message{}).Error; err != nil {
 				return err
 			}
-			// 不保留被替换回答的模型响应副本；实际工具结果和 usage 不受影响。
-			if err := tx.Model(&schema.Step{}).Where("run_id = ? AND type = 'model_call'", old).Update("output", nil).Error; err != nil {
+			// 清理被替换回答及标题的模型副本；仍有效的历史摘要、实际工具结果和 usage 保留。
+			if err := tx.Model(&schema.Step{}).Where("run_id = ? AND type = 'model_call' AND COALESCE(json_extract(input,'$.purpose'),'')<>'context_summary'", old).Update("output", nil).Error; err != nil {
 				return err
 			}
 			if user.Sequence == 1 && conv.TitleSource == "default" {
@@ -105,24 +98,22 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			}
 			user = schema.Message{ID: in.UserMessageID, ConversationID: conv.ID, Sequence: latest + 1, Role: "user", CreatedAt: now}
 		}
-		var size int64
-		if err := tx.Model(&schema.Message{}).Where("conversation_id = ? AND sequence < ? AND (role = 'user' OR status = 'completed')", conv.ID, user.Sequence).Select("COALESCE(SUM(length(CAST(content AS BLOB))),0)").Scan(&size).Error; err != nil {
-			return err
-		}
-		encoded, err := json.Marshal(in.Content)
+		past, current, more, err := loadContextHistory(tx, conv.ID, user.Sequence)
 		if err != nil {
 			return err
 		}
-		if size+int64(len(encoded)) > history.MaxBytes {
-			return agent.ErrOutputLimit
-		}
-		var rows []schema.Message
-		if err := tx.Where("conversation_id = ? AND sequence < ? AND (role = 'user' OR status = 'completed')", conv.ID, user.Sequence).Order("sequence").Limit(256).Find(&rows).Error; err != nil {
+		encoded, err := json.Marshal(past)
+		if err != nil {
 			return err
 		}
-		if len(rows) > 255 {
+		incoming, err := json.Marshal(in.Content)
+		if err != nil {
+			return err
+		}
+		if len(encoded)+len(incoming) > 16<<20 {
 			return agent.ErrOutputLimit
 		}
+		out.Context, out.HistoryMore = current, more
 		runRow := schema.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, SettingsSnapshot: &snapshot, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
 		if err := tx.Omit("Conversation", "Replaces").Create(&runRow).Error; err != nil {
 			return err
@@ -139,13 +130,9 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		if err := tx.Omit("Run").Create(&assistant).Error; err != nil {
 			return err
 		}
-		out.History = make([]domain.Message, 0, len(rows)+1)
-		sources := make([]map[string]any, 0, len(rows)+1)
-		for _, row := range rows {
-			if row.Role == "assistant" && row.Status != agent.Completed {
-				continue
-			}
-			out.History = append(out.History, message(row))
+		out.History = past
+		sources := make([]map[string]any, 0, len(past)+1)
+		for _, row := range past {
 			sources = append(sources, map[string]any{"id": row.ID, "fingerprint": history.Fingerprint(row.Content)})
 		}
 		out.History = append(out.History, message(user))

@@ -33,7 +33,7 @@ func TestApprovalUpgradeRollbackAndPreserve(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, sql := range []string{"DROP TABLE app_settings", "DROP TABLE conversation_run_approvals", "DROP INDEX uq_step_run", "PRAGMA user_version=2", "CREATE TABLE occupied(id TEXT)", "CREATE UNIQUE INDEX uq_approval_step ON occupied(id)"} {
+	for _, sql := range []string{"DROP TABLE conversation_directory_grants", "DROP TABLE conversation_context_versions", "DROP TABLE app_settings", "DROP TABLE conversation_run_approvals", "DROP INDEX uq_step_run", "PRAGMA user_version=2", "CREATE TABLE occupied(id TEXT)", "CREATE UNIQUE INDEX uq_approval_step ON occupied(id)"} {
 		if err := db.DB.Exec(sql).Error; err != nil {
 			t.Fatal(err)
 		}
@@ -57,7 +57,7 @@ func TestApprovalUpgradeRollbackAndPreserve(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	if err := upgraded.DB.Raw("PRAGMA user_version").Scan(&version).Error; err != nil || version != 4 {
+	if err := upgraded.DB.Raw("PRAGMA user_version").Scan(&version).Error; err != nil || version != 6 {
 		t.Fatalf("迁移未完成: %d %v", version, err)
 	}
 	if upgraded.DB.Migrator().HasColumn("conversation_run_approvals", "expires_at") {

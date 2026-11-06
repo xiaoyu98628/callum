@@ -2,8 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,7 +23,11 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	scope, operationErr := e.toolScope(ctx, ex)
 	var prepared *toolexecutor.Prepared
 	if operationErr == nil {
-		prepared, operationErr = e.options.Tools.Prepare(ctx, scope, call.Name, call.Arguments)
+		permissions := tool.ExecutionPermissions{}
+		if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
+			permissions.SandboxMode = snapshot.SandboxMode
+		}
+		prepared, operationErr = e.options.Tools.PrepareWithPermissions(ctx, scope, call.Name, call.Arguments, permissions)
 	}
 	var step agent.Step
 	result := tool.Result{Outcome: tool.OutcomeNotApplied}
@@ -50,7 +56,17 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	}()
 	decision := toolDecision(prepared, denied, uncertain, ex.Run.SettingsSnapshot)
 	var err error
-	step, err = e.createToolStep(ctx, ex, parent, call, prepared, decision)
+	var directoryIDs []string
+	if decision.Action == policy.Ask && decision.Reason == "outside_workspace" && e.options.Approvals != nil {
+		directoryIDs, err = e.options.Approvals.MatchDirectories(ctx, ex.Conversation.ID, prepared.Targets(), prepared.Definition().Effects)
+		if err != nil {
+			return message, operationStorageError(ctx, err)
+		}
+		if len(directoryIDs) > 0 {
+			decision = policy.Decision{Action: policy.Allow, Reason: "conversation_directory_grant"}
+		}
+	}
+	step, err = e.createToolStep(ctx, ex, parent, call, prepared, decision, directoryIDs)
 	if err != nil {
 		return message, err
 	}
@@ -81,6 +97,9 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	claimed, err := e.repository.StartTool(ctx, ex.Run.ID, step.ID, approvalID, prepared.Hash())
 	if err != nil {
 		operationErr = err
+		if errors.Is(err, tool.ErrDenied) {
+			return
+		}
 		return message, operationStorageError(ctx, err)
 	}
 	step = claimed
@@ -103,7 +122,10 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 		operationErr = err
 		return message, err
 	}
-	result, operationErr = e.options.Tools.Execute(ctx, prepared, prepared.Hash())
+	result, operationErr = e.options.Tools.ExecuteStream(ctx, prepared, prepared.Hash(), func(chunk tool.OutputChunk) error {
+		// 转为独立字符串后再发布，订阅队列不借用工具的读取缓冲区。
+		return e.event(ex, "tool.output", step.ID, "", agent.ToolOutput{Sequence: chunk.Sequence, Stream: chunk.Stream, Encoding: "base64", Data: base64.StdEncoding.EncodeToString(chunk.Data)})
+	})
 	return
 }
 
@@ -123,13 +145,23 @@ func toolDecision(prepared *toolexecutor.Prepared, denied, uncertain map[string]
 		}
 		return policy.Decision{Action: policy.Ask, Reason: "previous_result_requires_confirmation"}
 	}
+	if boundary := prepared.CommandBoundary(); boundary != nil {
+		return policy.EvaluateCommand(snapshot.ApprovalPolicy, *boundary)
+	}
+	if snapshot.SandboxMode == tool.SandboxReadOnly && slices.Contains(prepared.Definition().Effects, tool.EffectWrite) {
+		return policy.RequiresApproval(snapshot.ApprovalPolicy, "read_only_mode")
+	}
 	return policy.Evaluate(snapshot.ApprovalPolicy, prepared.Definition().Effects, prepared.OutsideWorkspace())
 }
 
-func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, prepared *toolexecutor.Prepared, decision policy.Decision) (agent.Step, error) {
+func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, prepared *toolexecutor.Prepared, decision policy.Decision, directoryIDs []string) (agent.Step, error) {
 	input := map[string]any{"arguments": call.Arguments, "authorization": decision, "operation_version": tool.OperationVersion}
+	if len(directoryIDs) > 0 {
+		input["directory_grant_ids"] = directoryIDs
+	}
 	if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
 		input["approval_policy"], input["approvals_reviewer"], input["settings_revision"] = snapshot.ApprovalPolicy, snapshot.ApprovalsReviewer, snapshot.Revision
+		input["sandbox_mode"] = snapshot.SandboxMode
 	}
 	var definition json.RawMessage
 	if prepared != nil {

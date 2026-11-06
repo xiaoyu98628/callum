@@ -28,6 +28,9 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 	inputBytes := 0
 
 	for i, message := range req.Messages {
+		if message.Reasoning != nil {
+			inputBytes += len(*message.Reasoning)
+		}
 		if len(message.Blocks) == 0 {
 			inputBytes += len(message.Content)
 		}
@@ -43,7 +46,7 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 				case "text":
 					inputBytes += len(block.Text)
 					if inputBytes > MaxInputBytes {
-						return openai.ChatCompletionNewParams{}, model.ErrInputLimit
+						return openai.ChatCompletionNewParams{}, &model.InputLimitError{Dimension: "请求字节", Actual: int64(inputBytes), Limit: MaxInputBytes}
 					}
 					text.WriteString(block.Text)
 					parts = append(parts, openai.TextContentPart(block.Text))
@@ -57,7 +60,7 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 					}
 					inputBytes += len(data)
 					if inputBytes > MaxInputBytes {
-						return openai.ChatCompletionNewParams{}, model.ErrInputLimit
+						return openai.ChatCompletionNewParams{}, &model.InputLimitError{Dimension: "请求字节", Actual: int64(inputBytes), Limit: MaxInputBytes}
 					}
 					images = true
 					parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: data}))
@@ -72,7 +75,7 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 			message.Content = text.String()
 		}
 		if inputBytes > MaxInputBytes {
-			return openai.ChatCompletionNewParams{}, model.ErrInputLimit
+			return openai.ChatCompletionNewParams{}, &model.InputLimitError{Dimension: "请求字节", Actual: int64(inputBytes), Limit: MaxInputBytes}
 		}
 		switch message.Role {
 		case model.RoleSystem:
@@ -81,6 +84,9 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 			messages = append(messages, openai.UserMessage(message.Content))
 		case model.RoleAssistant:
 			assistant := openai.ChatCompletionAssistantMessageParam{}
+			if message.Reasoning != nil {
+				assistant.SetExtraFields(map[string]any{"reasoning_content": *message.Reasoning})
+			}
 			if message.Content != "" || len(message.ToolCalls) == 0 {
 				assistant.Content.OfString = openai.String(message.Content)
 			}
@@ -111,7 +117,13 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 	}
 	// 为 SDK 注入的 stream 和流式选项预留固定头部空间，最终请求仍受 12 MiB 边界约束。
 	if len(encoded) > MaxInputBytes-1024 {
-		return openai.ChatCompletionNewParams{}, model.ErrInputLimit
+		return openai.ChatCompletionNewParams{}, &model.InputLimitError{Dimension: "请求字节", Actual: int64(len(encoded)), Limit: MaxInputBytes - 1024}
 	}
 	return params, nil
+}
+
+// ValidateInput 复用实际请求编码，包含工具定义、推理回传及图片编码的容量检查。
+func (c *Client) ValidateInput(ctx context.Context, req model.Request) error {
+	_, err := buildRequest(ctx, req)
+	return err
 }

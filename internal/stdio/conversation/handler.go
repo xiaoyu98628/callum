@@ -19,12 +19,34 @@ func New(s *service.Service, accepted func(string) error) *Handler {
 }
 
 func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(any, *protocol.Error) error) error {
+	if req.Method == "conversation.compact" {
+		return h.compact(ctx, req, reply)
+	}
 	if req.Method == "conversation.send" || req.Method == "conversation.resend" {
 		return h.send(ctx, req, reply)
 	}
 	var value any
 	var err error
 	switch req.Method {
+	case "conversation.context_versions":
+		var p struct {
+			ConversationID string `json:"conversation_id"`
+			Limit          int    `json:"limit,omitempty"`
+			Offset         int    `json:"offset,omitempty"`
+		}
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		value, err = h.service.ContextVersions(ctx, p.ConversationID, p.Limit, p.Offset)
+	case "conversation.context_version":
+		var p struct {
+			ConversationID string `json:"conversation_id"`
+			ID             string `json:"id"`
+		}
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		value, err = h.service.ContextVersion(ctx, p.ConversationID, p.ID)
 	case "conversation.list":
 		var p domain.Filter
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {

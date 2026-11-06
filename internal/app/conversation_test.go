@@ -37,7 +37,7 @@ func resultString(t *testing.T, f wireFrame, key string) string {
 func setupConversationModel(t *testing.T, p *appPeer, url string) string {
 	t.Helper()
 	pid := resultID(t, p.call(t, "provider.create", map[string]any{"name": "测试厂商", "protocol": "chatcompletions", "base_url": url + "/v1", "api_key": "fake-dialogue-key"}), "id")
-	return resultID(t, p.call(t, "model.create", map[string]any{"provider_id": pid, "display_name": "测试模型", "remote_model_id": "remote-model", "enabled": true}), "id")
+	return resultID(t, p.call(t, "model.create", map[string]any{"provider_id": pid, "display_name": "测试模型", "remote_model_id": "remote-model", "enabled": true, "context_window": 1000000}), "id")
 }
 
 func messageBlocks(text string) []map[string]string {
@@ -69,7 +69,8 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 			return
 		}
 		var input struct {
-			Stream   bool `json:"stream"`
+			Tools    []json.RawMessage `json:"tools"`
+			Stream   bool              `json:"stream"`
 			Messages []struct {
 				Role    string `json:"role"`
 				Content string `json:"content"`
@@ -80,7 +81,7 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 			w.WriteHeader(400)
 			return
 		}
-		if input.Messages[0].Role == "system" {
+		if len(input.Tools) == 0 {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-Request-ID", "title-request")
 			_, _ = io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"模型生成的标题"},"finish_reason":"stop"}],"usage":{"total_tokens":3,"custom":{"title":true}}}`)
@@ -88,7 +89,12 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 		}
 		text := input.Messages[len(input.Messages)-1].Content
 		mu.Lock()
-		historyCount[text] = len(input.Messages)
+		// 主对话的固定系统提示不属于持久化历史。
+		for _, message := range input.Messages {
+			if message.Role != "system" {
+				historyCount[text]++
+			}
+		}
 		mu.Unlock()
 		w.Header().Set("X-Request-ID", "answer-request")
 		if input.Stream {

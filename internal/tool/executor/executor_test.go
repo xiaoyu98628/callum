@@ -1,9 +1,14 @@
 package executor_test
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +18,46 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/executor"
 	"github.com/xiaoyu98628/callum/internal/tool/registry"
 )
+
+func TestDirectoryOptionsPreserveExistingOperationFingerprint(t *testing.T) {
+	instance := &mutableTool{definition: tool.Definition{ToolDefinition: model.ToolDefinition{Name: "read_file", Description: "目录指纹回归", Parameters: json.RawMessage(`{"type":"object"}`)}, Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectRead}}, target: &tool.Target{RequestedPath: t.TempDir(), Kind: "directory"}}
+	instance.target.Path = instance.target.RequestedPath
+	r := registry.New()
+	if err := r.Register(instance); err != nil {
+		t.Fatal(err)
+	}
+	e, err := executor.New(r, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.Prepare(t.Context(), tool.Scope{}, "read_file", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := p.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	// 此结构固定目录授权引入前的快照字段；原有未知操作必须继续按相同哈希匹配。
+	legacy := struct {
+		Tool      tool.Definition `json:"tool"`
+		Workspace *tool.Scope     `json:"workspace"`
+		Target    *tool.Target    `json:"target,omitempty"`
+		Plan      *tool.Plan      `json:"plan,omitempty"`
+		Details   json.RawMessage `json:"details,omitempty"`
+		Arguments json.RawMessage `json:"arguments"`
+		Summary   string          `json:"summary"`
+	}{Tool: instance.definition, Target: instance.target, Arguments: json.RawMessage(`{}`), Summary: instance.definition.Description}
+	raw, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	if !bytes.Equal(raw, p.Request()) || p.Hash() != hex.EncodeToString(sum[:]) {
+		t.Fatalf("目录授权改变了历史操作身份: %s", p.Request())
+	}
+}
 
 type mutableTool struct {
 	definition tool.Definition
@@ -214,5 +259,225 @@ func TestTargetSnapshotAndPreparationCleanup(t *testing.T) {
 		if err := p.Close(); err != nil || instance.closes != 1 {
 			t.Fatalf("重复关闭未保持安全: %v, closes=%d", err, instance.closes)
 		}
+	}
+}
+
+type plannedTool struct {
+	mutableTool
+	plan tool.Plan
+}
+
+func (t *plannedTool) Prepare(context.Context, tool.Scope, json.RawMessage) (tool.Invocation, error) {
+	return t, nil
+}
+func (t *plannedTool) Plan() tool.Plan { return t.plan }
+
+func TestMultiTargetPlanCannotChangeAfterApproval(t *testing.T) {
+	for _, change := range []string{"target", "effect", "none"} {
+		t.Run(change, func(t *testing.T) {
+			dir := t.TempDir()
+			a, b := filepath.Join(dir, "a"), filepath.Join(dir, "b")
+			instance := &plannedTool{definition: tool.Definition{Name: "operation", Description: "多目标审批", Parameters: json.RawMessage(`{}`), Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectRead}}, plan: tool.Plan{Targets: []tool.Target{{RequestedPath: a, Path: a, Kind: "file", WithinWorkspace: true}, {RequestedPath: b, Path: b, Kind: "file", WithinWorkspace: false}}, AdditionalEffects: []tool.Effect{tool.EffectDestructive}}}
+			r := registry.New()
+			if err := r.Register(instance); err != nil {
+				t.Fatal(err)
+			}
+			e, err := executor.New(r, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := e.Prepare(t.Context(), tool.Scope{}, "operation", json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := p.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			if !p.OutsideWorkspace() || !slices.Contains(p.Definition().Effects, tool.EffectDestructive) {
+				t.Fatal("多目标或额外影响丢失")
+			}
+			before := string(p.Request())
+			switch change {
+			case "target":
+				instance.plan.Targets[1].WithinWorkspace = true
+			case "effect":
+				instance.plan.AdditionalEffects[0] = tool.EffectRead
+			}
+			if string(p.Request()) != before {
+				t.Fatal("共享切片改变了审批记录")
+			}
+			_, err = e.Execute(t.Context(), p, p.Hash())
+			if change == "none" {
+				if err != nil || !instance.executed {
+					t.Fatalf("未变化计划无法执行: %v", err)
+				}
+			} else if !errors.Is(err, tool.ErrDenied) || instance.executed {
+				t.Fatalf("计划变化后仍执行: %v", err)
+			}
+		})
+	}
+}
+
+func TestPlanRejectsInvalidEffectsAndPreservesUnclassifiedRisk(t *testing.T) {
+	for _, effect := range []tool.Effect{tool.EffectRead, "invalid"} {
+		t.Run(string(effect), func(t *testing.T) {
+			instance := &plannedTool{definition: tool.Definition{Name: "operation", Description: "额外影响校验", Parameters: json.RawMessage(`{}`), Source: "test", Version: "1"}, plan: tool.Plan{AdditionalEffects: []tool.Effect{effect}}}
+			r := registry.New()
+			if err := r.Register(instance); err != nil {
+				t.Fatal(err)
+			}
+			e, err := executor.New(r, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := e.Prepare(t.Context(), tool.Scope{}, "operation", json.RawMessage(`{}`))
+			if effect == "invalid" {
+				if !errors.Is(err, tool.ErrInvalid) || instance.closes != 1 {
+					t.Fatalf("无效影响未被拒绝或资源泄漏: %v closes=%d", err, instance.closes)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer p.Close()
+			if !slices.Contains(p.Definition().Effects, tool.EffectUnknown) {
+				t.Fatal("额外读取声明抵消了未知影响")
+			}
+		})
+	}
+}
+
+func TestMissingOutcomeIncludesPlannedWriteEffects(t *testing.T) {
+	instance := &plannedTool{definition: tool.Definition{Name: "operation", Description: "动态修改影响", Parameters: json.RawMessage(`{}`), Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectRead}}, result: &tool.Result{Output: json.RawMessage(`{}`)}, plan: tool.Plan{AdditionalEffects: []tool.Effect{tool.EffectWrite}}}
+	r := registry.New()
+	if err := r.Register(instance); err != nil {
+		t.Fatal(err)
+	}
+	e, err := executor.New(r, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := e.Prepare(t.Context(), tool.Scope{}, "operation", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := p.Close(); err != nil {
+			t.Error(err)
+		}
+	}()
+	result, err := e.Execute(t.Context(), p, p.Hash())
+	if !errors.Is(err, tool.ErrInvalid) || result.Outcome != tool.OutcomeUnknown {
+		t.Fatalf("忽略额外写入影响而推断为无副作用: %+v %v", result, err)
+	}
+}
+
+type detailedTool struct {
+	mutableTool
+	details json.RawMessage
+}
+
+func (t *detailedTool) Prepare(context.Context, tool.Scope, json.RawMessage) (tool.Invocation, error) {
+	return t, nil
+}
+func (t *detailedTool) Snapshot() json.RawMessage { return t.details }
+
+func TestApprovalDetailsAreFrozenAndValidated(t *testing.T) {
+	for _, raw := range []string{`{}`, `null`, `[]`, `{"executable":"/fixed","cwd":"/work"}`} {
+		instance := &detailedTool{definition: tool.Definition{Name: "operation", Description: "snapshot", Parameters: json.RawMessage(`{}`), Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectUnknown}}, details: json.RawMessage(raw)}
+		r := registry.New()
+		if err := r.Register(instance); err != nil {
+			t.Fatal(err)
+		}
+		e, err := executor.New(r, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p, err := e.Prepare(t.Context(), tool.Scope{}, "operation", json.RawMessage(`{}`))
+		if raw != `{"executable":"/fixed","cwd":"/work"}` {
+			if !errors.Is(err, tool.ErrInvalid) || instance.closes != 1 {
+				t.Fatalf("无效快照未拒绝或清理: %s %v", raw, err)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := string(p.Request())
+		instance.details = json.RawMessage(`{"executable":"/changed","cwd":"/work"}`)
+		if string(p.Request()) != before {
+			t.Fatal("已固定请求被工具修改")
+		}
+		if _, err := e.Execute(t.Context(), p, p.Hash()); !errors.Is(err, tool.ErrDenied) || instance.executed {
+			t.Fatal("审批详情变化后仍然执行")
+		}
+		if err := p.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+type streamingTool struct {
+	mutableTool
+	chunks []tool.OutputChunk
+}
+
+func (t *streamingTool) Prepare(context.Context, tool.Scope, json.RawMessage) (tool.Invocation, error) {
+	return t, nil
+}
+func (t *streamingTool) ExecuteStream(_ context.Context, emit func(tool.OutputChunk) error) (tool.Result, error) {
+	for _, chunk := range t.chunks {
+		if err := emit(chunk); err != nil {
+			return tool.Result{Outcome: tool.OutcomeUnknown}, err
+		}
+	}
+	return tool.Result{Output: json.RawMessage(`{}`), Outcome: tool.OutcomeNone}, nil
+}
+func TestStreamingOutputBoundaryAndCallbackErrors(t *testing.T) {
+	callbackErr := errors.New("consumer failed")
+	for _, test := range []struct {
+		name                 string
+		chunks               []tool.OutputChunk
+		callbackErr, wantErr error
+	}{
+		{"ordered", []tool.OutputChunk{{Stream: "stdout", Data: []byte("first")}, {Stream: "stderr", Data: []byte("second")}}, nil, nil},
+		{"invalid_stream", []tool.OutputChunk{{Stream: "other", Data: []byte("x")}}, nil, tool.ErrInvalid},
+		{"oversize", []tool.OutputChunk{{Stream: "stdout", Data: make([]byte, tool.MaxOutputChunkBytes+1)}}, nil, tool.ErrInvalid},
+		{"callback", []tool.OutputChunk{{Stream: "stdout", Data: []byte("x")}}, callbackErr, callbackErr},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			instance := &streamingTool{definition: tool.Definition{Name: "operation", Description: "stream", Parameters: json.RawMessage(`{}`), Source: "test", Version: "1", Effects: []tool.Effect{tool.EffectRead}}, chunks: test.chunks}
+			r := registry.New()
+			if err := r.Register(instance); err != nil {
+				t.Fatal(err)
+			}
+			e, err := executor.New(r, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := e.Prepare(t.Context(), tool.Scope{}, "operation", json.RawMessage(`{}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := p.Close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			var sequence int64
+			_, err = e.ExecuteStream(t.Context(), p, p.Hash(), func(chunk tool.OutputChunk) error {
+				sequence++
+				if chunk.Sequence != sequence {
+					t.Error("序号错误")
+				}
+				return test.callbackErr
+			})
+			if !errors.Is(err, test.wantErr) {
+				t.Fatalf("流式错误丢失: %v", err)
+			}
+		})
 	}
 }

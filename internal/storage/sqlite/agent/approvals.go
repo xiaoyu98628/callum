@@ -37,36 +37,57 @@ func (r *Repository) CreateApproval(ctx context.Context, in agent.Approval) (out
 		if err := tx.Omit("Run", "Step").Create(&row).Error; err != nil {
 			return err
 		}
-		out = approval(row)
+		var err error
+		out, err = decorateApproval(tx, row)
+		return err
+	})
+	return
+}
+func (r *Repository) GetApproval(ctx context.Context, id string) (out agent.Approval, err error) {
+	// 决定与目录授权在同一事务提交，读取也使用同一快照，避免返回混合状态。
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var row schema.Approval
+		if err := tx.Where("id=?", id).Take(&row).Error; err != nil {
+			return notFound(err)
+		}
+		var err error
+		out, err = decorateApproval(tx, row)
+		return err
+	})
+	return
+}
+
+func (r *Repository) ListApprovals(ctx context.Context, f agent.ApprovalFilter) (out []agent.Approval, err error) {
+	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		q := tx
+		if f.RunID != "" {
+			q = q.Where("run_id=?", f.RunID)
+		}
+		if f.Status != "" {
+			q = q.Where("status=?", f.Status)
+		}
+		var rows []schema.Approval
+		if err := q.Order("created_at DESC").Order("id DESC").Limit(f.Limit).Offset(f.Offset).Find(&rows).Error; err != nil {
+			return err
+		}
+		out = make([]agent.Approval, 0, len(rows))
+		for _, row := range rows {
+			value, err := decorateApproval(tx, row)
+			if err != nil {
+				return err
+			}
+			out = append(out, value)
+		}
 		return nil
 	})
 	return
 }
-func (r *Repository) GetApproval(ctx context.Context, id string) (agent.Approval, error) {
-	var row schema.Approval
-	err := r.db.WithContext(ctx).Where("id=?", id).Take(&row).Error
-	return approval(row), notFound(err)
-}
-func (r *Repository) ListApprovals(ctx context.Context, f agent.ApprovalFilter) ([]agent.Approval, error) {
-	q := r.db.WithContext(ctx)
-	if f.RunID != "" {
-		q = q.Where("run_id=?", f.RunID)
+func (r *Repository) DecideApproval(ctx context.Context, id, status string, by, note *string, scopes ...string) (out agent.Approval, err error) {
+	scope := agent.ApprovalOnce
+	if len(scopes) == 1 {
+		scope = scopes[0]
 	}
-	if f.Status != "" {
-		q = q.Where("status=?", f.Status)
-	}
-	var rows []schema.Approval
-	if err := q.Order("created_at DESC").Order("id DESC").Limit(f.Limit).Offset(f.Offset).Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	out := make([]agent.Approval, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, approval(row))
-	}
-	return out, nil
-}
-func (r *Repository) DecideApproval(ctx context.Context, id, status string, by, note *string) (out agent.Approval, err error) {
-	if status != agent.ApprovalApproved && status != agent.ApprovalRejected {
+	if len(scopes) > 1 || (scope != agent.ApprovalOnce && scope != agent.ApprovalConversationDirectory) || (scope != agent.ApprovalOnce && status != agent.ApprovalApproved) || (status != agent.ApprovalApproved && status != agent.ApprovalRejected) {
 		return out, agent.ErrApprovalInvalid
 	}
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -74,8 +95,19 @@ func (r *Repository) DecideApproval(ctx context.Context, id, status string, by, 
 		if err := tx.Where("id=?", id).Take(&row).Error; err != nil {
 			return notFound(err)
 		}
-		out = approval(row)
+		var err error
+		out, err = decorateApproval(tx, row)
+		if err != nil {
+			return err
+		}
 		if row.Status == status {
+			savedScope := out.DecisionScope
+			if savedScope == "" {
+				savedScope = agent.ApprovalOnce
+			}
+			if savedScope != scope {
+				return agent.ErrConflict
+			}
 			return nil
 		}
 		if row.Status != agent.ApprovalPending {
@@ -88,13 +120,18 @@ func (r *Repository) DecideApproval(ctx context.Context, id, status string, by, 
 		if active != 1 {
 			return agent.ErrConflict
 		}
+		if scope == agent.ApprovalConversationDirectory {
+			if err := saveDirectoryGrant(tx, row, out.DirectoryScope); err != nil {
+				return err
+			}
+		}
 		now := time.Now().UnixMilli()
 		row.Status, row.DecidedBy, row.DecisionNote, row.DecidedAt, row.UpdatedAt = status, by, note, &now, now
 		if err := tx.Model(&schema.Approval{}).Where("id=? AND status='pending'", id).Select("Status", "DecidedBy", "DecisionNote", "DecidedAt", "UpdatedAt").Updates(&row).Error; err != nil {
 			return err
 		}
-		out = approval(row)
-		return nil
+		out, err = decorateApproval(tx, row)
+		return err
 	})
 	return
 }
@@ -146,6 +183,9 @@ func (r *Repository) StartTool(ctx context.Context, runID, stepID, approvalID, h
 		}
 		if row.Status == agent.AwaitingApproval && approvalID == "" {
 			return agent.ErrConflict
+		}
+		if err := checkDirectoryClaim(tx, row); err != nil {
+			return err
 		}
 		if err := setStatus(tx, runID, agent.Running); err != nil {
 			return err

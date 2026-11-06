@@ -48,7 +48,7 @@ func directModel(t *testing.T, runtime *Runtime, url string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := runtime.Providers().CreateModel(t.Context(), provider.ModelInput{ProviderID: pid, DisplayName: "模型", RemoteModelID: "remote", Enabled: true})
+	id, err := runtime.Providers().CreateModel(t.Context(), provider.ModelInput{ProviderID: pid, DisplayName: "模型", RemoteModelID: "remote", Enabled: true, ContextWindow: new(int64(1000000))})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,6 +146,7 @@ func TestSharedRuntimeConnectionCleanup(t *testing.T) {
 	releaseOther := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
+			Tools    []json.RawMessage `json:"tools"`
 			Messages []struct {
 				Role    string `json:"role"`
 				Content string `json:"content"`
@@ -156,7 +157,7 @@ func TestSharedRuntimeConnectionCleanup(t *testing.T) {
 			return
 		}
 		text := input.Messages[len(input.Messages)-1].Content
-		if input.Messages[0].Role == "system" {
+		if len(input.Tools) == 0 && input.Messages[0].Role == "system" {
 			text = "title"
 		}
 		switch text {
@@ -311,7 +312,7 @@ func TestOwnershipPrecedesMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, sql := range []string{"DROP TABLE app_settings", "DROP TABLE conversation_run_approvals", "DROP INDEX uq_step_run", "PRAGMA user_version=2"} {
+	for _, sql := range []string{"DROP TABLE conversation_directory_grants", "DROP TABLE conversation_context_versions", "DROP TABLE app_settings", "DROP TABLE conversation_run_approvals", "DROP INDEX uq_step_run", "PRAGMA user_version=2"} {
 		if err := db.DB.Exec(sql).Error; err != nil {
 			t.Fatal(err)
 		}

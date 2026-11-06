@@ -13,15 +13,12 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model"
 )
 
-const maxToolCalls = 32
 const maxToolArguments = 16 << 10
+const maxToolCallBytes = 8 << 20
 
 var toolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 
 func addTools(params *openai.ChatCompletionNewParams, defs []model.ToolDefinition) error {
-	if len(defs) > maxToolCalls {
-		return model.ErrInputLimit
-	}
 	seen := map[string]bool{}
 	for _, d := range defs {
 		var schema map[string]any
@@ -68,12 +65,17 @@ func responseCalls(raw, reason string, enabled bool) ([]model.ToolCall, error) {
 	if !enabled {
 		return nil, model.ErrUnsupportedOutput
 	}
-	if reason != "tool_calls" || len(message.Calls) > maxToolCalls {
+	if reason != "tool_calls" {
 		return nil, model.ErrInvalidResponse
 	}
 	out := make([]model.ToolCall, 0, len(message.Calls))
 	seen := map[string]bool{}
+	callBytes := 0
 	for _, c := range message.Calls {
+		callBytes += len(c.ID) + len(c.Function.Name) + len(c.Function.Arguments)
+		if callBytes > maxToolCallBytes {
+			return nil, model.ErrInputLimit
+		}
 		var object map[string]json.RawMessage
 		if c.ID == "" || len(c.ID) > 256 || seen[c.ID] || c.Type != "function" || !toolNamePattern.MatchString(c.Function.Name) || len(c.Function.Arguments) > maxToolArguments || json.Unmarshal([]byte(c.Function.Arguments), &object) != nil || object == nil {
 			return nil, model.ErrInvalidResponse
@@ -115,7 +117,7 @@ func (c *toolCallCapture) add(raw json.RawMessage) error {
 		return err
 	}
 	for position, d := range list {
-		if d.Index == nil || *d.Index < 0 || *d.Index >= maxToolCalls {
+		if d.Index == nil || *d.Index < 0 {
 			return model.ErrInvalidResponse
 		}
 		if err := c.captureUnknown(entries[position], *d.Index); err != nil {
@@ -146,7 +148,7 @@ func (c *toolCallCapture) add(raw json.RawMessage) error {
 				c.size += len(*d.Function.Arguments)
 			}
 		}
-		if f.ID.Len() > 256 || f.Name.Len() > 64 || f.Arguments.Len() > maxToolArguments || c.size > maxToolCalls*(maxToolArguments+320) {
+		if f.ID.Len() > 256 || f.Name.Len() > 64 || f.Arguments.Len() > maxToolArguments || c.size > maxToolCallBytes {
 			return model.ErrInputLimit
 		}
 	}
