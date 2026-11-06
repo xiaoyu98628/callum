@@ -125,6 +125,8 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 
 业务编排位于 internal/agent，filesystem 与 command 根包分别通过 Tools()、Tools(environment) 汇总工具；具体文件工具位于 filesystem 子包，命令实现位于 internal/tool/builtin/command/run。根包不承载具体参数校验、执行或资源生命周期；具体工具通过 New() 实现统一工具契约，数据库表名和通信 run 标识保持兼容。
 文件和命令工具共用 internal/tool/builtin/internal/arguments 的 JSON 结构解析：单个 UTF-8 对象、16 KiB 上限、字段名精确匹配、拒绝各层重复字段和 null、未知字段、类型错误、过深嵌套及尾随内容。各工具保留实际参数范围、默认值和业务校验，Validate 与 Prepare 共用同一业务解码函数。读取工具重复字段从保留最后值改为拒绝，合法参数的规范化及审批快照/指纹保持原义。
+主对话由 internal/agent/service/prompt.go 定义固定的过程沟通提示，loop.go 在每轮主调用的 fixed 上下文首位加入 system 消息，随后追加待核实操作事实及有效历史。提示参与预算估算和请求指纹，不落为用户消息，不参与历史摘要；自动压缩后继续注入，既有工具轨迹与来源不改写。标题、摘要与 model.invoke 保持原用途。提示引导操作前概括目的、阶段之间报告真实发现与下一步，不对每个文件重复说明；实际文本由模型输出，不补造内容，也不为补写说明增加模型请求。审批和副作用判断独立于这些文字。
+
 普通对话及 Agent 默认向所有模型提供已注册工具，不依赖 model_type、capabilities.tools 或工作区绑定，模型自主选择是否调用。辅助标题与兼容 model.invoke 保持文本用途。每轮最多一个回答模型请求，同轮工具串行；
 model_type 是 text、image、audio、video 内容类型元数据，可多选，不作为执行开关；图片输入由 capabilities.image_input 明确声明，推理等级只作元数据。
 不限制模型调用轮次、累计工具次数及单次响应提出的工具调用数量。模型完成、取消、应用/连接退出或不可继续的错误结束执行；保留并发、单次请求超时、Token 预算及内容边界。工具定义种类数不设本地固定上限，工具参数各不超过 16 KiB，调用 ID/名称/参数累计字段字节不超过 8 MiB。执行前验证整批最小结果结构可容纳，真实结果逐次检查累计上下文，已发生操作及结果照常审计。当前执行工具链不被拆分压缩，达到资源边界时明确失败。文件工具为 list_directory、read_file、search_text、apply_patch，支持绝对路径；相对路径需要工作区基准，不接受 .. 越界。无工作区的相对路径返回 path_base_required。

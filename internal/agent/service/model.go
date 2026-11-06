@@ -115,6 +115,11 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 				text.WriteString(event.Text)
 				if persisted == 0 || text.Len()-persisted >= 4096 || time.Since(lastPersist) >= 100*time.Millisecond {
 					if err := e.repository.SaveMessage(callCtx, ex.Assistant.ID, []model.Block{{Type: "text", Text: text.String()}}, agent.Running); err != nil {
+						// 取消可能恰好打断正文写入；只将同一上下文错误视为取消/超时。
+						// 真实写入错误仍保留存储失败标记，不能因同时取消而被掩盖。
+						if ctxErr := callCtx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+							return err
+						}
 						return errors.Join(agent.ErrStorage, err)
 					}
 					persisted, lastPersist = text.Len(), time.Now()

@@ -157,7 +157,7 @@ func TestSharedRuntimeConnectionCleanup(t *testing.T) {
 			return
 		}
 		text := input.Messages[len(input.Messages)-1].Content
-		if len(input.Tools) == 0 {
+		if len(input.Tools) == 0 && input.Messages[0].Role == "system" {
 			text = "title"
 		}
 		switch text {

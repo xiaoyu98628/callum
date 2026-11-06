@@ -25,6 +25,7 @@ import (
 )
 
 func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
+	const preamble = "我会先读取文件，确认内容后再回答。"
 	for _, mode := range []string{"automatic", "never", "approve", "reject", "cancel"} {
 		t.Run(mode, func(t *testing.T) {
 			automatic := mode == "automatic" || mode == "never"
@@ -47,6 +48,14 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 				}
 				if len(input.Tools) != 6 {
 					t.Errorf("未提供六个工具定义: %d", len(input.Tools))
+				}
+				if len(input.Messages) < 2 || input.Messages[0].Role != "system" || !strings.Contains(input.Messages[0].Content, "1～2句话") || !strings.Contains(input.Messages[0].Content, "正文 content") {
+					t.Error("主对话未发送操作前说明的固定提示")
+				}
+				for _, message := range input.Messages[1:] {
+					if message.Role == "system" {
+						t.Error("多轮工具上下文重复累计了固定系统提示")
+					}
 				}
 				last := input.Messages[len(input.Messages)-1]
 				if last.Role == "tool" {
@@ -87,10 +96,11 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 				}
 				if input.Stream {
 					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":%q},\"finish_reason\":null}]}\n\n", preamble)
 					_, _ = io.WriteString(w, "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-read\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"a.txt\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: {\"choices\":[],\"usage\":{\"total_tokens\":3,\"vendor\":true}}\n\ndata: [DONE]\n\n")
 				} else {
 					w.Header().Set("Content-Type", "application/json")
-					_, _ = io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"total_tokens":3,"vendor":true}}`)
+					_, _ = io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"我会先读取文件，确认内容后再回答。","tool_calls":[{"id":"call-read","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"total_tokens":3,"vendor":true}}`)
 				}
 			}))
 			t.Cleanup(upstream.Close)
@@ -185,6 +195,10 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 				terminal = "run.cancelled"
 			}
 			p.event(t, terminal)
+			seen := p.seen.String()
+			if intro, tool := strings.Index(seen, preamble), strings.Index(seen, `"type":"tool_call"`); intro < 0 || tool < intro {
+				t.Fatal("执行前说明未在工具步骤之前发布")
+			}
 			if mode == "cancel" {
 				if toolResults.Load() != 0 {
 					t.Fatal("取消后执行了待审批工具")
@@ -221,6 +235,23 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 					if step.UsageBytes == 0 {
 						t.Fatal("模型步骤丢失 usage")
 					}
+					if modelCalls == 1 {
+						data := p.call(t, "step.data", map[string]any{"step_id": step.ID, "field": "output"})
+						requireOK(t, data)
+						var page struct {
+							Fragment string
+							Done     bool
+						}
+						if err := json.Unmarshal(data.Result, &page); err != nil || !page.Done {
+							t.Fatalf("模型说明读取不完整: %s %v", data.Result, err)
+						}
+						var saved struct {
+							Message model.Message `json:"context_message"`
+						}
+						if err := json.Unmarshal([]byte(page.Fragment), &saved); err != nil || saved.Message.Content != preamble || len(saved.Message.ToolCalls) != 1 {
+							t.Fatalf("模型说明与工具调用未一起保存: %+v %v", saved, err)
+						}
+					}
 				}
 				if step.Type == "tool_call" {
 					toolCalls++
@@ -231,6 +262,12 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 			}
 			if toolCalls != 1 || modelCalls != map[bool]int{true: 1, false: 2}[mode == "cancel"] {
 				t.Fatalf("步骤记录错误: %s", stepsFrame.Result)
+			}
+			if mode != "cancel" {
+				rows := readMessages(t, p, convID)
+				if len(rows) != 2 || len(rows[1].Content) != 1 || rows[1].Content[0].Text != "最终回答" {
+					t.Fatal("过程说明混入最终回答或产生额外消息")
+				}
 			}
 			if mode == "automatic" {
 				accepted := p.call(t, "conversation.send", map[string]any{"conversation_id": convID, "stream": false, "content": messageBlocks("继续")})

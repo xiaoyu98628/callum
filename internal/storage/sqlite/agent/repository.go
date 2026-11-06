@@ -127,7 +127,9 @@ func (r *Repository) SaveMessage(ctx context.Context, id string, blocks []model.
 	if status == domain.Completed {
 		completed = &now
 	}
-	result := r.db.WithContext(ctx).Model(&schema.Message{}).Where("id = ? AND role = 'assistant' AND status IN ?", id, []string{"running", "awaiting_approval", "awaiting_user_input"}).Updates(map[string]any{"content": string(encoded), "status": status, "updated_at": now, "completed_at": completed})
+	// 单次 UPDATE 本身是原子的，不需要额外的隐式事务；取消后的自动回滚
+	// 否则可能用 ErrTxDone 覆盖原上下文错误。调用方已有的事务仍继续沿用。
+	result := r.db.Session(&gorm.Session{SkipDefaultTransaction: true}).WithContext(ctx).Model(&schema.Message{}).Where("id = ? AND role = 'assistant' AND status IN ?", id, []string{"running", "awaiting_approval", "awaiting_user_input"}).Updates(map[string]any{"content": string(encoded), "status": status, "updated_at": now, "completed_at": completed})
 	if result.Error != nil {
 		return result.Error
 	}
