@@ -147,6 +147,15 @@ func (c *Client) streamText(
 			)
 		}
 
+		reasoning, err := reasoningText(choice.Delta.RawJSON())
+		if err != nil {
+			return httpResponse, wrapError("decode reasoning", httpResponse, err)
+		}
+		if reasoning != nil {
+			if err := emit(model.Event{Type: model.EventReasoningDelta, Text: *reasoning, RequestID: requestID(httpResponse)}); err != nil {
+				return httpResponse, wrapError("callback", httpResponse, err)
+			}
+		}
 		if choice.Delta.Content != "" {
 			if err := emit(model.Event{
 				Type:      model.EventTextDelta,

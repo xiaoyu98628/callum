@@ -63,3 +63,19 @@ func TestActualInputReferenceOnlyAppliesToIdenticalPrefix(t *testing.T) {
 		t.Fatal("缺失 usage 时推测了实际用量")
 	}
 }
+
+func TestReasoningCountsTowardInputBudget(t *testing.T) {
+	messages := []model.Message{{Role: model.RoleAssistant, Content: "回答"}}
+	before := tokens.Estimate(messages, nil, 0)
+	messages[0].Reasoning = new(strings.Repeat("推理", 100))
+	if tokens.Estimate(messages, nil, 0) != before+tokens.Text(*messages[0].Reasoning) {
+		t.Fatal("推理未计入输入预算")
+	}
+	var meter tokens.Meter
+	actual := int64(1000)
+	meter.Observe(messages, nil, &actual)
+	messages[0].Reasoning = new("不同推理")
+	if meter.Estimate(messages, nil, 0).ReferenceInputTokens != 0 {
+		t.Fatal("推理变化后复用了旧输入用量")
+	}
+}

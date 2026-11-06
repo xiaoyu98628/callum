@@ -43,12 +43,17 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 	if err := e.event(ex, "step.updated", step.ID, "", step); err != nil {
 		return result, err
 	}
-	var text strings.Builder
+	var text, reasoning strings.Builder
+	reasoningSeen := false
 	defer func() {
 		if ex.Run.Stream {
 			// 捕获结果可能包含导致回调拒绝的分片；消息正文只采用通过累计限额的增量。
 			// 原始 Output、usage 和工具调用仍保留在结果中，供步骤审计及成功后的循环使用。
 			result.Text = text.String()
+			result.Reasoning = nil
+			if reasoningSeen {
+				result.Reasoning = new(reasoning.String())
+			}
 			result.Content = nil
 		}
 		if len(result.Text) > inference.MaxTextBytes {
@@ -60,9 +65,14 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 			result.Content = []model.Block{{Type: "text", Text: result.Text}}
 		}
 		fillFailure(&result, resolved.Protocol, retErr)
+		if result.Reasoning != nil {
+			var err error
+			result.Output, err = withReasoning(result.Output, *result.Reasoning)
+			retErr = errors.Join(retErr, err)
+		}
 		if retErr == nil {
 			var err error
-			result.Output, err = withContextMessage(result.Output, model.Message{Role: model.RoleAssistant, Content: result.Text, ToolCalls: result.ToolCalls})
+			result.Output, err = withContextMessage(result.Output, model.Message{Role: model.RoleAssistant, Content: result.Text, Reasoning: result.Reasoning, ToolCalls: result.ToolCalls})
 			if err != nil {
 				retErr = errors.Join(retErr, err)
 			}
@@ -105,6 +115,27 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 				if err := callCtx.Err(); err != nil {
 					return err
 				}
+				if event.Type == model.EventReasoningDelta {
+					if *totalText+len(event.Text) > inference.MaxTextBytes {
+						return agent.ErrOutputLimit
+					}
+					*totalText += len(event.Text)
+					reasoningSeen = true
+					reasoning.WriteString(event.Text)
+					// 等待正文前也定期保存推理，进程中断后仍可查询已接受的片段。
+					if reasoning.Len() == len(event.Text) || time.Since(lastPersist) >= 100*time.Millisecond {
+						var err error
+						step.Output, err = withReasoning(nil, reasoning.String())
+						if err != nil {
+							return err
+						}
+						if err := e.repository.SaveStep(callCtx, step); err != nil {
+							return operationStorageError(callCtx, err)
+						}
+						lastPersist = time.Now()
+					}
+					return e.event(ex, "reasoning.delta", step.ID, "", map[string]any{"text": event.Text})
+				}
 				if event.Type != model.EventTextDelta {
 					return nil
 				}
@@ -130,8 +161,12 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 		var err error
 		result, err = resolved.Client.Generate(callCtx, request)
 		*totalText += len(result.Text)
+		if result.Reasoning != nil {
+			*totalText += len(*result.Reasoning)
+		}
 		if *totalText > inference.MaxTextBytes {
 			result.Text = ""
+			result.Reasoning = nil
 			result.Content = []model.Block{}
 			return errors.Join(err, agent.ErrOutputLimit)
 		}
@@ -189,4 +224,23 @@ func tokenMetadata(step *agent.Step, ex conversation.Execution, resolved agent.R
 	input["token_budget"] = map[string]any{"input_limit": budget, "context_window": resolved.ContextWindow, "max_output_tokens": resolved.MaxOutputTokens, "estimated_input_tokens": tokens.Estimate(messages, tools, cfg.ImageTokenEstimate), "estimation_method": tokens.Method}
 	step.Input, err = json.Marshal(input)
 	return err
+}
+
+// withReasoning 保存统一展示投影；失败或中断时也保留已接受的推理，不冒充完整上下文。
+func withReasoning(output json.RawMessage, text string) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if len(output) > 0 {
+		if err := json.Unmarshal(output, &fields); err != nil {
+			return nil, err
+		}
+	}
+	if fields == nil {
+		fields = map[string]json.RawMessage{}
+	}
+	value, err := json.Marshal(text)
+	if err != nil {
+		return nil, err
+	}
+	fields["reasoning"] = value
+	return json.Marshal(fields)
 }

@@ -77,6 +77,10 @@ func (c *Client) Generate(ctx context.Context, req model.Request) (result model.
 		return result, wrapError("decode response", httpResponse, err)
 	}
 
+	result.Reasoning, err = reasoningText(choice.Message.RawJSON())
+	if err != nil {
+		return result, wrapError("decode reasoning", httpResponse, err)
+	}
 	result.Text = choice.Message.Content
 	result.Content = []model.Block{{Type: "text", Text: result.Text}}
 
@@ -165,4 +169,21 @@ func checkFinishReason(reason string) error {
 	default:
 		return model.ErrInvalidResponse
 	}
+}
+
+// reasoningText 仅识别已核实的 Chat Completions 扩展，不从正文标签推测推理。
+func reasoningText(raw string) (*string, error) {
+	var message map[string]json.RawMessage
+	if json.Unmarshal([]byte(raw), &message) != nil {
+		return nil, model.ErrInvalidResponse
+	}
+	value, ok := message["reasoning_content"]
+	if !ok || string(value) == "null" {
+		return nil, nil
+	}
+	var text string
+	if json.Unmarshal(value, &text) != nil {
+		return nil, model.ErrInvalidResponse
+	}
+	return &text, nil
 }

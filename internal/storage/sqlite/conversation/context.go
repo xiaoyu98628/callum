@@ -10,7 +10,6 @@ import (
 
 	"gorm.io/gorm"
 
-	"github.com/xiaoyu98628/callum/internal/agent"
 	domain "github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/compaction"
 	"github.com/xiaoyu98628/callum/internal/model"
@@ -142,7 +141,7 @@ func checkContextSource(tx *gorm.DB, in domain.ContextVersion) error {
 	if err != nil {
 		return err
 	}
-	traces, err := repository.ContextTranscript(tx.Statement.Context, in.ConversationID, floor)
+	traces, err := repository.ContextTranscript(tx.Statement.Context, in.ConversationID, floor, in.ThroughSequence+1)
 	if err != nil {
 		return err
 	}
@@ -214,36 +213,66 @@ func (r *Repository) FailContext(ctx context.Context, id string) error {
 		Updates(map[string]any{"status": "failed", "updated_at": time.Now().UnixMilli()}).Error
 }
 
-// loadContextHistory 仅读取未被有效摘要覆盖的消息，历史总量不再限制会话寿命。
-func loadContextHistory(tx *gorm.DB, id string, before int64) ([]domain.Message, *domain.ContextVersion, error) {
+// LoadContextHistory 按完整用户轮次读取有界前缀，压缩后可从新的有效摘要边界继续。
+func (r *Repository) LoadContextHistory(ctx context.Context, id string, before int64) ([]domain.Message, *domain.ContextVersion, bool, error) {
+	return loadContextHistory(r.db.WithContext(ctx), id, before)
+}
+
+func loadContextHistory(tx *gorm.DB, id string, before int64) ([]domain.Message, *domain.ContextVersion, bool, error) {
 	current, err := activeContext(tx, id)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	floor := int64(0)
 	if current != nil {
 		floor = current.ThroughSequence
 	}
-	q := tx.Model(&schema.Message{}).Where("conversation_id=? AND sequence>? AND (role='user' OR status='completed')", id, floor)
-	if before > 0 {
-		q = q.Where("sequence<?", before)
+	query := func() *gorm.DB {
+		q := tx.Model(&schema.Message{}).Where("conversation_id=? AND sequence>? AND (role='user' OR status='completed')", id, floor)
+		if before > 0 {
+			q = q.Where("sequence<?", before)
+		}
+		return q
 	}
-	var bounds struct{ Size, Count int64 }
-	if err := q.Select("COALESCE(SUM(length(CAST(content AS BLOB))),0) AS size,COUNT(*) AS count").Scan(&bounds).Error; err != nil {
-		return nil, nil, err
+	// 先读取长度和边界，不把无界正文加载进进程；每页留出当前输入和模型封装空间。
+	var metadata []struct {
+		Sequence int64
+		Role     string
+		Size     int64
 	}
-	if bounds.Size > 16<<20 || bounds.Count > 511 {
-		return nil, nil, agent.ErrOutputLimit
+	if err := query().Select("sequence,role,length(CAST(content AS BLOB)) AS size").Order("sequence").Limit(512).Scan(&metadata).Error; err != nil {
+		return nil, nil, false, err
+	}
+	end, size := len(metadata), int64(0)
+	for i, row := range metadata {
+		size += row.Size + 512
+		if i >= 511 || size > 12<<20 {
+			end = i
+			break
+		}
+	}
+	more := end < len(metadata)
+	if more {
+		// 从下一个完整轮次开始留给后续页面；不能只加载一个回答的一半。
+		for end > 0 && metadata[end].Role != "user" {
+			end--
+		}
+		if end == 0 {
+			return nil, nil, false, &model.InputLimitError{Dimension: "单轮历史字节", Actual: size, Limit: 12 << 20}
+		}
+	}
+	if end == 0 {
+		return nil, current, false, nil
 	}
 	var rows []schema.Message
-	if err := q.Select("conversation_messages.*").Order("sequence").Find(&rows).Error; err != nil {
-		return nil, nil, err
+	if err := query().Where("sequence<=?", metadata[end-1].Sequence).Order("sequence").Find(&rows).Error; err != nil {
+		return nil, nil, false, err
 	}
 	out := make([]domain.Message, len(rows))
 	for i, row := range rows {
 		out[i] = message(row)
 	}
-	return out, current, nil
+	return out, current, more, nil
 }
 
 // invalidateContexts 与重发事务一起清理失效摘要及其模型结果，不删除操作审计和实际 usage。

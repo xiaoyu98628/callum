@@ -98,7 +98,7 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			}
 			user = schema.Message{ID: in.UserMessageID, ConversationID: conv.ID, Sequence: latest + 1, Role: "user", CreatedAt: now}
 		}
-		past, current, err := loadContextHistory(tx, conv.ID, user.Sequence)
+		past, current, more, err := loadContextHistory(tx, conv.ID, user.Sequence)
 		if err != nil {
 			return err
 		}
@@ -113,7 +113,7 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		if len(encoded)+len(incoming) > 16<<20 {
 			return agent.ErrOutputLimit
 		}
-		out.Context = current
+		out.Context, out.HistoryMore = current, more
 		runRow := schema.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, SettingsSnapshot: &snapshot, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
 		if err := tx.Omit("Conversation", "Replaces").Create(&runRow).Error; err != nil {
 			return err

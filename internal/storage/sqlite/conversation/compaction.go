@@ -63,7 +63,7 @@ func (r *Repository) BeginCompaction(ctx context.Context, in domain.Begin) (out 
 		if err := busy(tx, conv.ID); err != nil {
 			return err
 		}
-		out.History, out.Context, err = loadContextHistory(tx, conv.ID, 0)
+		out.History, out.Context, out.HistoryMore, err = loadContextHistory(tx, conv.ID, 0)
 		if err != nil {
 			return err
 		}

@@ -37,6 +37,9 @@ func Text(value string) int64 {
 func Estimate(messages []model.Message, tools []model.ToolDefinition, imageTokens int64) int64 {
 	total := int64(16)
 	for _, m := range messages {
+		if m.Reasoning != nil {
+			total += Text(*m.Reasoning)
+		}
 		total += 8 + Text(string(m.Role)) + Text(m.ToolCallID)
 		if len(m.Blocks) == 0 {
 			total += Text(m.Content)

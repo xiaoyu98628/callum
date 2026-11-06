@@ -152,6 +152,8 @@ func (c *streamCapture) result(requestID string) (model.Response, error) {
 		c.message[key] = value
 		if key == "content" {
 			result.Text = builder.String()
+		} else if key == "reasoning_content" {
+			result.Reasoning = new(builder.String())
 		}
 	}
 	if calls, err := c.calls.result(); err != nil {

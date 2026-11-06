@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/xiaoyu98628/callum/internal/inference"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,5 +90,78 @@ func TestCancelledIncrementalSaveDoesNotBecomeStorageFailure(t *testing.T) {
 				t.Fatal("真实存储错误链丢失")
 			}
 		})
+	}
+}
+
+// 测试同时覆盖供应商未交付最终结果的取消，以及超过累计内容边界的分片。
+type reasoningStream struct {
+	model.Client
+	cancel bool
+	reject bool
+}
+
+func (c reasoningStream) Stream(ctx context.Context, _ model.Request, emit func(model.Event) error) error {
+	if err := emit(model.Event{Type: model.EventReasoningDelta, Text: "已收到的推理"}); err != nil {
+		return err
+	}
+	if c.reject {
+		return emit(model.Event{Type: model.EventReasoningDelta, Text: strings.Repeat("x", inference.MaxTextBytes)})
+	}
+	if c.cancel {
+		return context.Canceled
+	}
+	return nil
+}
+
+type reasoningRepository struct {
+	agent.Repository
+	final   agent.Step
+	partial bool
+}
+
+func (r *reasoningRepository) SaveStep(_ context.Context, step agent.Step) error {
+	if step.Status == agent.Running && len(step.Output) > 0 {
+		r.partial = true
+	}
+	if step.Status != agent.Running {
+		r.final = step
+	}
+	return nil
+}
+func TestReasoningPersistsOnCancellationAndLimit(t *testing.T) {
+	for _, reject := range []bool{false, true} {
+		repo := &reasoningRepository{}
+		manager, err := executor.New(t.Context(), 1, time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(manager.Close)
+		count := 0
+		engine := &Engine{repository: repo, manager: manager, options: Options{CallTimeout: time.Second}, emit: func(event agent.Event) error {
+			if event.Type == "reasoning.delta" {
+				count++
+			}
+			return nil
+		}}
+		total := 0
+		result, err := engine.callModel(t.Context(), conversation.Execution{Run: agent.Run{Stream: true}}, agent.Resolved{Client: reasoningStream{cancel: !reject, reject: reject}}, agent.Step{Input: []byte(`{}`)}, nil, nil, func() {}, &total)
+		want := context.Canceled
+		if reject {
+			want = agent.ErrOutputLimit
+		}
+		if !errors.Is(err, want) || count != 1 || !repo.partial {
+			t.Fatalf("推理取消或限额行为错误: count=%d partial=%v err=%v", count, repo.partial, err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(repo.final.Output, &fields); err != nil {
+			t.Fatal(err)
+		}
+		var text string
+		if err := json.Unmarshal(fields["reasoning"], &text); err != nil {
+			t.Fatal(err)
+		}
+		if text != "已收到的推理" || result.Reasoning == nil || *result.Reasoning != text || fields["context_message"] != nil {
+			t.Fatalf("部分推理保存错误: %s", repo.final.Output)
+		}
 	}
 }

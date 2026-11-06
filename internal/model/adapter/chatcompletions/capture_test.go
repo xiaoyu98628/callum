@@ -59,7 +59,11 @@ func TestCaptureStreamCompletionAndInterruption(t *testing.T) {
 			req.CaptureResult = true
 			var result *model.Response
 			completed := false
+			var reasoning strings.Builder
 			err := client.Stream(t.Context(), req, func(event model.Event) error {
+				if event.Type == model.EventReasoningDelta {
+					reasoning.WriteString(event.Text)
+				}
 				if event.Type == model.EventResult {
 					if body.closes != 1 {
 						t.Error("结果交付前响应未关闭")
@@ -71,6 +75,9 @@ func TestCaptureStreamCompletionAndInterruption(t *testing.T) {
 			})
 			if (err == nil) != complete || completed != complete || result == nil || result.Text != "你好" {
 				t.Fatalf("流式结果不正确: %v %+v", err, result)
+			}
+			if reasoning.String() != "ab" || result.Reasoning == nil || *result.Reasoning != "ab" {
+				t.Fatalf("统一推理字段或增量丢失: %+v", result)
 			}
 			if !bytes.Contains(result.Output, []byte(`"reasoning_content":"ab"`)) || !bytes.Contains(result.Output, []byte(`"vendor_meta":"kept"`)) {
 				t.Fatalf("组装丢失返回字段: %s", result.Output)

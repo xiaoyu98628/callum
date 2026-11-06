@@ -13,7 +13,7 @@ import (
 
 const MaxSummaryBytes = 64 << 10
 
-// Plan 只覆盖较早完整轮次；当前输入和当前执行工具链始终留在原始上下文。
+// Plan 覆盖较早完整用户轮次；当前输入不纳入来源。执行内工具轨迹由步骤摘要单独规划。
 type Plan struct {
 	Sources  []conversation.ContextSource
 	Messages []model.Message

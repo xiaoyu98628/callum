@@ -37,8 +37,11 @@ func Assemble(messages []conversation.Message, transcripts map[string][]model.Me
 	if err != nil {
 		return nil, err
 	}
-	if len(out) > 512 || len(raw) > 16<<20 {
-		return nil, model.ErrInputLimit
+	if len(out) > 512 {
+		return nil, &model.InputLimitError{Dimension: "历史准备消息数量", Actual: int64(len(out)), Limit: 512}
+	}
+	if len(raw) > 16<<20 {
+		return nil, &model.InputLimitError{Dimension: "历史准备字节", Actual: int64(len(raw)), Limit: 16 << 20}
 	}
 	return out, nil
 }
@@ -46,14 +49,14 @@ func Assemble(messages []conversation.Message, transcripts map[string][]model.Me
 // Check 限制消息数量和实际序列化大小，不估算 Token。
 func Check(messages []model.Message) error {
 	if len(messages) > 256 {
-		return model.ErrInputLimit
+		return &model.InputLimitError{Dimension: "消息数量", Actual: int64(len(messages)), Limit: 256}
 	}
 	value, err := json.Marshal(messages)
 	if err != nil {
 		return err
 	}
 	if len(value) > MaxBytes {
-		return model.ErrInputLimit
+		return &model.InputLimitError{Dimension: "上下文字节", Actual: int64(len(value)), Limit: MaxBytes}
 	}
 	return nil
 }

@@ -3,6 +3,8 @@ package model
 import "encoding/json"
 
 type Response struct {
+	// Reasoning 为空表示供应商未提供；非空指针保留显式空字段以便工具轮回传。
+	Reasoning    *string `json:"reasoning,omitempty"`
 	Text         string
 	RequestID    string
 	Content      []Block

@@ -12,7 +12,6 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent/executor"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/compaction"
-	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/tokens"
 )
@@ -27,11 +26,7 @@ func (e *Engine) ExecuteCompaction(ctx context.Context, lease *executor.Lease, e
 		err = agent.ErrInvalid
 	}
 	if err == nil {
-		floor := int64(0)
-		if ex.Context != nil {
-			floor = ex.Context.ThroughSequence
-		}
-		traces, readErr := e.repository.ContextTranscript(ctx, ex.Conversation.ID, floor)
+		traces, _, readErr := e.prepareHistory(ctx, &ex, resolved, true)
 		err = readErr
 		if err == nil {
 			err = e.manualCompaction(ctx, &ex, resolved, traces)
@@ -66,7 +61,7 @@ func (e *Engine) manualCompaction(ctx context.Context, ex *conversation.Executio
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		plan, err := compressionPlan(*ex, resolved, traces, ex.Run.SettingsSnapshot.Compaction.RetainTurns)
+		plan, err := e.compressionPlan(ctx, *ex, resolved, traces, ex.Run.SettingsSnapshot.Compaction.RetainTurns)
 		if err != nil {
 			return err
 		}
@@ -113,64 +108,44 @@ func contextMessages(version *conversation.ContextVersion, messages []model.Mess
 	return append([]model.Message{compaction.SummaryMessage(*version)}, messages...)
 }
 
-// automaticContext 只压缩较早完整轮次，当前运行新增的工具链始终保留原文。
-func (e *Engine) automaticContext(ctx context.Context, ex *conversation.Execution, resolved agent.Resolved, traces map[string][]model.Message, messages, fixed []model.Message, definitions []model.ToolDefinition, meter *tokens.Meter) ([]model.Message, error) {
-	snapshot := ex.Run.SettingsSnapshot
-	if snapshot == nil || snapshot.Compaction == nil || !snapshot.Compaction.Enabled {
-		return messages, nil
-	}
-	cfg := snapshot.Compaction
-	budget, err := cfg.InputBudget(resolved.ContextWindow, resolved.MaxOutputTokens)
+// compactOld 压缩较早完整轮次；没有可用轮次时由调用方继续尝试步骤级压缩。
+func (e *Engine) compactOld(ctx context.Context, ex *conversation.Execution, resolved agent.Resolved, traces map[string][]model.Message, retain int) (bool, error) {
+	plan, err := e.compressionPlan(ctx, *ex, resolved, traces, retain)
 	if err != nil {
-		return nil, model.ErrTokenBudget
+		return false, err
 	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		effective := append(fixed, contextMessages(ex.Context, messages)...)
-		estimate := meter.Estimate(effective, definitions, cfg.ImageTokenEstimate)
-		if estimate.Tokens <= budget {
-			return messages, nil
-		}
-		plan, err := compressionPlan(*ex, resolved, traces, cfg.RetainTurns+1)
-		if err != nil {
-			return nil, err
-		}
-		if len(plan.Sources) == 0 {
-			return nil, model.ErrTokenLimit
-		}
-		id, err := uuid.NewV7()
-		if err != nil {
-			return nil, err
-		}
-		now := time.Now().UnixMilli()
-		input, err := json.Marshal(map[string]any{"purpose": "context_compaction", "trigger": map[string]any{"type": "automatic", "reason": "token_budget", "token_budget": budget, "estimate": estimate}})
-		if err != nil {
-			return nil, err
-		}
-		step, err := e.repository.CreateStep(ctx, agent.Step{ID: id.String(), ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, Type: "context_compression", Name: "压缩历史上下文",
-			Status: agent.Pending, Input: input, CreatedAt: now, UpdatedAt: now})
-		if err != nil {
-			return nil, operationStorageError(ctx, err)
-		}
-		if err := e.event(*ex, "step.created", step.ID, "", step); err != nil {
-			return nil, err
-		}
-		version, err := e.compress(ctx, *ex, resolved, step, plan)
-		if err != nil {
-			return nil, err
-		}
-		ex.Context = version
-		kept := make([]conversation.Message, 0, len(ex.History))
-		for _, row := range ex.History {
-			if row.Sequence > plan.Through {
-				kept = append(kept, row)
-			}
-		}
-		ex.History = kept
-		messages = messages[len(plan.Messages):]
+	if len(plan.Sources) == 0 {
+		return false, nil
 	}
+	id, err := uuid.NewV7()
+	if err != nil {
+		return false, err
+	}
+	now := time.Now().UnixMilli()
+	input, err := json.Marshal(map[string]any{"purpose": "context_compaction", "trigger": map[string]string{"type": "automatic", "reason": "context_capacity"}})
+	if err != nil {
+		return false, err
+	}
+	step, err := e.repository.CreateStep(ctx, agent.Step{ID: id.String(), ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, Type: "context_compression", Name: "压缩历史上下文", Status: agent.Pending, Input: input, CreatedAt: now, UpdatedAt: now})
+	if err != nil {
+		return false, operationStorageError(ctx, err)
+	}
+	if err := e.event(*ex, "step.created", step.ID, "", step); err != nil {
+		return false, err
+	}
+	version, err := e.compress(ctx, *ex, resolved, step, plan)
+	if err != nil {
+		return false, err
+	}
+	ex.Context = version
+	kept := make([]conversation.Message, 0, len(ex.History))
+	for _, row := range ex.History {
+		if row.Sequence > plan.Through {
+			kept = append(kept, row)
+		}
+	}
+	ex.History = kept
+	return true, nil
 }
 
 func summaryInput(version *conversation.ContextVersion, messages []model.Message) []model.Message {
@@ -178,12 +153,25 @@ func summaryInput(version *conversation.ContextVersion, messages []model.Message
 	return append(input, model.Message{Role: model.RoleUser, Content: "请压缩上述历史，只返回规定的 JSON 摘要。"})
 }
 
-func compressionPlan(ex conversation.Execution, resolved agent.Resolved, traces map[string][]model.Message, retain int) (compaction.Plan, error) {
+func (e *Engine) compressionPlan(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, traces map[string][]model.Message, retain int) (compaction.Plan, error) {
 	cfg := ex.Run.SettingsSnapshot.Compaction
 	budget, budgetErr := cfg.InputBudget(resolved.ContextWindow, resolved.MaxOutputTokens)
+	var fitsErr error
 	plan, err := compaction.BuildWithin(ex.History, traces, retain, func(messages []model.Message) bool {
-		return budgetErr == nil && tokens.Estimate(summaryInput(ex.Context, messages), nil, cfg.ImageTokenEstimate) <= budget
+		if budgetErr != nil {
+			fitsErr = model.ErrTokenBudget
+			return false
+		}
+		if tokens.Estimate(summaryInput(ex.Context, messages), nil, cfg.ImageTokenEstimate) > budget {
+			fitsErr = model.ErrTokenLimit
+			return false
+		}
+		fitsErr = inputCapacity(ctx, ex, resolved, summaryInput(ex.Context, messages), nil, nil)
+		return fitsErr == nil
 	})
+	if err != nil && fitsErr != nil {
+		return compaction.Plan{}, fitsErr
+	}
 	if budgetErr != nil && err != nil {
 		return compaction.Plan{}, model.ErrTokenBudget
 	}
@@ -262,7 +250,7 @@ func (e *Engine) compress(ctx context.Context, ex conversation.Execution, resolv
 	if tokens.Estimate(input, nil, cfg.ImageTokenEstimate) > budget {
 		return nil, model.ErrTokenLimit
 	}
-	if err := history.Check(input); err != nil {
+	if err := inputCapacity(ctx, ex, resolved, input, nil, nil); err != nil {
 		return nil, err
 	}
 	id, err := uuid.NewV7()

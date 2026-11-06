@@ -70,6 +70,9 @@ func failure(err error) (status, kind, message string) {
 	case errors.Is(err, model.ErrImageFormat):
 		return status, "image_format", "图片格式不支持"
 	case errors.Is(err, model.ErrInputLimit):
+		if limit, ok := errors.AsType[*model.InputLimitError](err); ok {
+			return status, "input_limit", limit.Error()
+		}
 		return status, "input_limit", "模型输入超过字节上限"
 	default:
 		if call, ok := errors.AsType[*model.CallError](err); ok && call.StatusCode > 0 {

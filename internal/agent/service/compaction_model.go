@@ -15,11 +15,25 @@ import (
 
 // summaryModel 使用统一调用槽位和超时，原始结果、usage 只保存到具体模型步骤。
 func (e *Engine) summaryModel(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, parent agent.Step, messages []model.Message, versionID string) (result model.Response, retErr error) {
+	if err := summaryCapacity(ctx, ex, resolved, messages); err != nil {
+		return result, err
+	}
 	id, err := uuid.NewV7()
 	if err != nil {
 		return result, err
 	}
-	metadata := map[string]any{"purpose": "context_summary", "generated_context_version_id": versionID, "protocol": resolved.Protocol}
+	metadata := map[string]any{"purpose": "context_summary", "protocol": resolved.Protocol}
+	var parentInput struct {
+		SourceRunID string `json:"source_run_id"`
+	}
+	if err := json.Unmarshal(parent.Input, &parentInput); err != nil {
+		return result, err
+	}
+	if parentInput.SourceRunID != "" {
+		metadata["generated_checkpoint_id"] = versionID
+	} else {
+		metadata["generated_context_version_id"] = versionID
+	}
 	if ex.Context != nil {
 		metadata["context_version_id"] = ex.Context.ID
 	}

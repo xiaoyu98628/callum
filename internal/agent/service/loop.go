@@ -10,25 +10,17 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/conversation"
-	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/tokens"
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
 func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, startTitle func()) error {
-	floor := int64(0)
-	if ex.Context != nil {
-		floor = ex.Context.ThroughSequence
-	}
-	transcripts, err := e.repository.ContextTranscript(ctx, ex.Conversation.ID, floor)
-	if err != nil {
-		return operationStorageError(ctx, err)
-	}
-	messages, err := history.Assemble(ex.History, transcripts)
+	transcripts, messages, err := e.prepareHistory(ctx, &ex, resolved, false)
 	if err != nil {
 		return err
 	}
+	current := executionContext{traces: transcripts, past: messages}
 	var definitions []model.ToolDefinition
 	for _, d := range e.options.Tools.Definitions() {
 		definitions = append(definitions, d.ToolDefinition)
@@ -58,14 +50,10 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		messages, err = e.automaticContext(ctx, &ex, resolved, transcripts, messages, fixed, definitions, &meter)
-		if err != nil {
+		if err := current.fit(ctx, e, &ex, resolved, fixed, definitions, &meter, 0, nil); err != nil {
 			return err
 		}
-		effective := append(fixed, contextMessages(ex.Context, messages)...)
-		if err := history.Check(effective); err != nil {
-			return err
-		}
+		effective := append(fixed, contextMessages(ex.Context, current.messages())...)
 		if round > 0 {
 			id, err := uuid.NewV7()
 			if err != nil {
@@ -103,12 +91,12 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {
 			return err
 		}
-		messages = append(messages, model.Message{Role: model.RoleAssistant, Content: result.Text, ToolCalls: result.ToolCalls})
+		current.current = append(current.current, model.Message{Role: model.RoleAssistant, Content: result.Text, Reasoning: result.Reasoning, ToolCalls: result.ToolCalls})
 		// 调用次数不设配额，但每次追加都检查实际上下文，避免大批调用或结果累积失控。
-		if err := checkToolContext(append(fixed, contextMessages(ex.Context, messages)...), result.ToolCalls); err != nil {
+		if err := current.fit(ctx, e, &ex, resolved, fixed, definitions, nil, step.Sequence, result.ToolCalls); err != nil {
 			return err
 		}
-		for _, call := range result.ToolCalls {
+		for index, call := range result.ToolCalls {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -122,30 +110,12 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			if err != nil {
 				return err
 			}
-			messages = append(messages, value)
-			if err := history.Check(append(fixed, contextMessages(ex.Context, messages)...)); err != nil {
+			current.current = append(current.current, value)
+			if err := current.fit(ctx, e, &ex, resolved, fixed, definitions, nil, step.Sequence, result.ToolCalls[index+1:]); err != nil {
 				return err
 			}
 		}
 	}
-}
-
-// checkToolContext 在副作用发生前确认整批调用及最小结果结构能放入请求。
-// 占位只用于容量检查，不保存或发送；真实结果仍逐次检查，超限时保留已完成操作的审计。
-func checkToolContext(messages []model.Message, calls []model.ToolCall) error {
-	if err := history.Check(messages); err != nil {
-		return err
-	}
-	var results []model.Message
-	for _, call := range calls {
-		results = append(results, model.Message{Role: model.RoleTool, ToolCallID: call.ID})
-		// 单独检查前缀，避免对任意大批次直接分配等量占位，也不复制资源边界常量。
-		if err := history.Check(results); err != nil {
-			return err
-		}
-	}
-	preview := append(append([]model.Message(nil), messages...), results...)
-	return history.Check(preview)
 }
 
 func (e *Engine) saveAnswer(ctx context.Context, ex conversation.Execution, blocks []model.Block, text string) error {
