@@ -279,5 +279,8 @@ func (e *Engine) toolScope(ctx context.Context, ex conversation.Execution) (tool
 	if workspace.DeletedAt != nil || workspace.ArchivedAt != nil {
 		return tool.Scope{}, tool.ErrDenied
 	}
+	if workspace.RootPath == "" {
+		return tool.Scope{}, nil
+	}
 	return tool.Scope{ID: workspace.ID, RootPath: workspace.RootPath}, nil
 }

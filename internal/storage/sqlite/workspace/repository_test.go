@@ -90,6 +90,9 @@ func TestWorkspacePrimaryDirectoryTransaction(t *testing.T) {
 		if _, err := repo.Update(ctx, project.ID, workspace.Change{Name: new("不得保存"), RootPath: &other}); !errors.Is(err, workspace.ErrBusy) {
 			t.Fatalf("%s 时没有阻止主目录切换: %v", status, err)
 		}
+		if _, err := repo.Update(ctx, project.ID, workspace.Change{RootPath: &root, OtherPaths: new([]string{}), ExpectedFolders: new([]string{root, other})}); !errors.Is(err, workspace.ErrBusy) {
+			t.Fatalf("%s 时允许增删源目录: %v", status, err)
+		}
 	}
 	// 未改变主目录的保存仍可在执行期间改名。
 	if _, err := repo.Update(ctx, project.ID, workspace.Change{Name: new("已改名"), RootPath: &root}); err != nil {

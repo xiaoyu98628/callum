@@ -1,6 +1,6 @@
 # JSON-RPC 通信与手工测试
 
-本文按当前代码整理已实现的 stdio JSON-RPC 接口，共 42 个方法。协议版本为 `1`，数据库结构版本为 `5`，两者含义不同。
+本文按当前代码整理已实现的 stdio JSON-RPC 接口，共 42 个方法。协议版本为 `1`，数据库结构版本为 `2`，两者含义不同。
 
 ## 1. 启动及输入约定
 
@@ -460,9 +460,9 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"id":"<workspace_id>","name":"JSON-RPC 测试工作区","root_path":"<workspace_path>","other_paths":[],"pinned_at":null,"archived_at":null,"deleted_at":null,"created_at":1700000000000,"updated_at":1700000000000}
 ```
 
-`list` 返回对象数组，`limit` 为 1 至 200。主目录必须是绝对路径，已存在的主目录返回冲突。创建时可附带 `other_paths`，最多 15 个其他目录。多目录创建会解析符号链接、检查所有目录实际存在，并拒绝同项目内重复的目录。项目和其他目录在同一事务保存。
+`list` 返回对象数组，`limit` 为 1 至 200。提供非空主目录时必须是绝对路径，已存在的主目录返回冲突。省略主目录或使用空字符串可创建无目录项目，此时 `other_paths` 必须为空；多个无目录项目不会合并。创建时可附带 `other_paths`，最多 15 个其他目录。多目录创建会解析符号链接、检查所有目录实际存在，并拒绝同项目内重复的目录。项目和其他目录在同一事务保存。
 
-工作区对象中的 `other_paths` 按路径排序，无其他目录时返回空数组。同主目录重新添加已软删除的项目时，省略 `other_paths` 保留原目录，显式提供该字段时以新列表为准，包括空数组。
+工作区对象中的 `other_paths` 按路径排序，无其他目录时返回空数组。同一非空主目录重新添加已软删除的项目时，省略 `other_paths` 保留原目录，显式提供该字段时以新列表为准，包括空数组。
 
 ### workspace.update
 
@@ -474,9 +474,16 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"jsonrpc":"2.0","id":"workspace-primary","method":"workspace.update","params":{"id":"<workspace_id>","name":"修改后的工作区名称","root_path":"<existing_source_directory>"}}
 ```
 
-返回更新后的工作区对象。`root_path` 可将已有源目录切换为主目录；服务端解析实际路径并检查目录存在，目标必须属于该项目，原主目录转为其他目录。切换与名称在同一事务提交，保留项目 ID、对话及所有源目录，不移动磁盘文件，后续相对路径使用新主目录。若目标是其他项目（包括软删除项目）的主目录，返回 `1003`，不保存名称或目录变更。已删除项目不能切换主目录。源目录的增删仍通过创建接口设置。
+返回更新后的工作区对象。仅更新 `root_path` 时可将已有源目录切换为主目录；服务端解析实际路径并检查目录存在，目标必须属于该项目，原主目录转为其他目录。切换与名称在同一事务提交，保留项目 ID、对话及所有源目录，不移动磁盘文件，后续相对路径使用新主目录。若目标是其他项目（包括软删除项目）的主目录，返回 `1003`，不保存名称或目录变更。已删除项目不能切换主目录。完整目录更新同时提供 `root_path`、`other_paths` 和 `expected_folders`，支持添加和移除源目录。后者为打开编辑时的原目录快照，第一项必须是原主目录，其余为原附加目录；无目录项目使用空数组。服务校验每个实际目录并拒绝重复身份，在事务内复核原快照、活动执行、主目录唯一约束后一次保存目录及名称。原快照已变化返回 `1003`，不覆盖并发修改。移除目录只解除关联，保留磁盘文件、项目 ID 和历史对话。
 
-工作区有关联活动执行（运行中、等待审批或等待用户输入）时，切换主目录、归档或删除状态变更会返回 `1006`；只改名称或提交未变化的主目录不触发切换限制。
+```json
+{"jsonrpc":"2.0","id":"workspace-folders","method":"workspace.update","params":{"id":"<workspace_id>","root_path":"<main_path>","other_paths":["<new_folder>"],"expected_folders":["<old_main>","<old_other>"]}}
+{"jsonrpc":"2.0","id":"workspace-no-folders","method":"workspace.update","params":{"id":"<workspace_id>","root_path":"","other_paths":[],"expected_folders":["<main_path>","<other_path>"]}}
+```
+
+无目录项目返回 `root_path:""` 和 `other_paths:[]`，其对话仍归属原项目，工具使用未绑定目录时的路径规则；相对路径不可用，不回退服务进程当前目录。
+
+工作区有关联活动执行（运行中、等待审批或等待用户输入）时，增删源目录、切换主目录、归档或删除状态变更会返回 `1006`；只改名称或提交未变化的主目录不触发切换限制。
 
 ### workspace.delete / workspace.restore
 

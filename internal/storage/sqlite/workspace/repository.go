@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"gorm.io/gorm"
@@ -26,7 +27,10 @@ func NewRepository(db *gorm.DB) (*Repository, error) {
 func (r *Repository) Create(ctx context.Context, in domain.Workspace) (out domain.Workspace, err error) {
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row schema.Workspace
-		err := tx.Where("root_path = ?", in.RootPath).Take(&row).Error
+		err := gorm.ErrRecordNotFound
+		if in.RootPath != "" {
+			err = tx.Where("root_path = ?", in.RootPath).Take(&row).Error
+		}
 		switch {
 		case err == nil:
 			if row.DeletedAt == nil {
@@ -42,7 +46,7 @@ func (r *Repository) Create(ctx context.Context, in domain.Workspace) (out domai
 				}
 			}
 		case errors.Is(err, gorm.ErrRecordNotFound):
-			row = schema.Workspace{ID: in.ID, Name: in.Name, RootPath: in.RootPath, CreatedAt: in.CreatedAt, UpdatedAt: in.UpdatedAt}
+			row = schema.Workspace{ID: in.ID, Name: in.Name, RootPath: optionalPath(in.RootPath), CreatedAt: in.CreatedAt, UpdatedAt: in.UpdatedAt}
 			if err := tx.Create(&row).Error; err != nil {
 				return err
 			}
@@ -126,12 +130,33 @@ func (r *Repository) Update(ctx context.Context, id string, change domain.Change
 			}
 			return err
 		}
-		switchingRoot := change.RootPath != nil && *change.RootPath != row.RootPath
-		if switchingRoot && row.DeletedAt != nil {
+		switchingRoot := change.RootPath != nil && *change.RootPath != pathValue(row.RootPath)
+		directoriesChanged := switchingRoot
+		if change.OtherPaths != nil {
+			if change.RootPath == nil || change.ExpectedFolders == nil {
+				return domain.ErrInvalid
+			}
+			current, err := workspaceWithFolders(tx, row)
+			if err != nil {
+				return err
+			}
+			folders := append([]string{}, current.OtherPaths...)
+			if current.RootPath != "" {
+				folders = append(folders, current.RootPath)
+			}
+			if (len(*change.ExpectedFolders) == 0 && current.RootPath != "") || (len(*change.ExpectedFolders) > 0 && (*change.ExpectedFolders)[0] != current.RootPath) {
+				return domain.ErrChanged
+			}
+			if !slices.Equal(slices.Sorted(slices.Values(folders)), slices.Sorted(slices.Values(*change.ExpectedFolders))) {
+				return domain.ErrChanged
+			}
+			directoriesChanged = switchingRoot || !slices.Equal(current.OtherPaths, slices.Sorted(slices.Values(*change.OtherPaths)))
+		}
+		if directoriesChanged && row.DeletedAt != nil {
 			return domain.ErrNotFound
 		}
 		// 与执行受理共用写事务边界，避免工具运行期间改变相对路径及审批范围。
-		if switchingRoot || change.Archived != nil || change.Deleted != nil {
+		if directoriesChanged || change.Archived != nil || change.Deleted != nil {
 			var count int64
 			if err := tx.Model(&schema.Run{}).Joins("JOIN conversations ON conversations.id = conversation_runs.conversation_id").Where("conversations.workspace_id = ? AND conversation_runs.status IN ?", id, []string{"running", "awaiting_approval", "awaiting_user_input"}).Count(&count).Error; err != nil {
 				return err
@@ -147,10 +172,30 @@ func (r *Repository) Update(ctx context.Context, id string, change domain.Change
 			updates["name"] = row.Name
 		}
 		if switchingRoot {
-			if err := swapRoot(tx, row, *change.RootPath); err != nil {
+			if change.OtherPaths == nil {
+				if err := swapRoot(tx, row, *change.RootPath); err != nil {
+					return err
+				}
+			} else if *change.RootPath != "" {
+				var count int64
+				if err := tx.Model(&schema.Workspace{}).Where("root_path = ? AND id <> ?", *change.RootPath, id).Count(&count).Error; err != nil {
+					return err
+				}
+				if count != 0 {
+					return domain.ErrConflict
+				}
+			}
+			updates["root_path"] = optionalPath(*change.RootPath)
+		}
+		if directoriesChanged && change.OtherPaths != nil {
+			if err := tx.Where("workspace_id = ?", id).Delete(&schema.WorkspaceAdditionalFolder{}).Error; err != nil {
 				return err
 			}
-			updates["root_path"] = *change.RootPath
+			for _, path := range *change.OtherPaths {
+				if err := tx.Create(&schema.WorkspaceAdditionalFolder{WorkspaceID: id, Path: path}).Error; err != nil {
+					return err
+				}
+			}
 		}
 		for key, flag := range map[string]*bool{"pinned_at": change.Pinned, "archived_at": change.Archived, "deleted_at": change.Deleted} {
 			if flag != nil {
@@ -189,12 +234,26 @@ func swapRoot(tx *gorm.DB, row schema.Workspace, path string) error {
 	if count != 0 {
 		return domain.ErrConflict
 	}
-	return tx.Model(&folder).Update("path", row.RootPath).Error
+	return tx.Model(&folder).Update("path", pathValue(row.RootPath)).Error
+}
+
+func optionalPath(path string) *string {
+	if path == "" {
+		return nil
+	}
+	return &path
+}
+
+func pathValue(path *string) string {
+	if path == nil {
+		return ""
+	}
+	return *path
 }
 
 func workspaceFromRow(row schema.Workspace) domain.Workspace {
 	return domain.Workspace{
-		ID: row.ID, Name: row.Name, RootPath: row.RootPath, OtherPaths: []string{},
+		ID: row.ID, Name: row.Name, RootPath: pathValue(row.RootPath), OtherPaths: []string{},
 		PinnedAt: row.PinnedAt, ArchivedAt: row.ArchivedAt, DeletedAt: row.DeletedAt,
 		CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 	}

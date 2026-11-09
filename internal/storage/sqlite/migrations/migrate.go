@@ -11,7 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 // Run 在同一个事务内初始化空库或校验当前结构。调用方持有连接与实例锁。
 func Run(ctx context.Context, db *gorm.DB) (err error) {
@@ -21,6 +21,27 @@ func Run(ctx context.Context, db *gorm.DB) (err error) {
 	if db == nil {
 		return errors.New("初始化需要数据库")
 	}
+	// 固定同一连接，确保迁移期间的外键设置只影响初始化连接且在返回前恢复。
+	return db.WithContext(ctx).Connection(func(conn *gorm.DB) (err error) {
+		conn = conn.Session(&gorm.Session{NewDB: true})
+		var version int
+		if err := conn.Raw("PRAGMA user_version").Scan(&version).Error; err != nil {
+			return err
+		}
+		if version == 1 {
+			// SQLite 重建父表必须在事务外临时关闭外键，避免触发子表级联删除。
+			if err := conn.Exec("PRAGMA foreign_keys = OFF").Error; err != nil {
+				return err
+			}
+			defer func() {
+				err = errors.Join(err, conn.WithContext(context.WithoutCancel(ctx)).Exec("PRAGMA foreign_keys = ON").Error)
+			}()
+		}
+		return runSchema(ctx, conn, version)
+	})
+}
+
+func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 	tx := db.WithContext(ctx).Begin()
 	if tx.Error != nil {
 		return fmt.Errorf("开始数据库初始化: %w", tx.Error)
@@ -31,14 +52,26 @@ func Run(ctx context.Context, db *gorm.DB) (err error) {
 			err = errors.Join(err, rollbackErr)
 		}
 	}()
-	var version int
-	if err := tx.Raw("PRAGMA user_version").Scan(&version).Error; err != nil {
+	// 外层读取只决定是否需关闭外键；取得写事务后重新读取，串行处理并发初始化。
+	var actualVersion int
+	if err := tx.Raw("PRAGMA user_version").Scan(&actualVersion).Error; err != nil {
 		return err
 	}
+	if actualVersion == 1 && version != 1 {
+		return errors.New("数据库结构版本在初始化期间发生变化，请重新打开")
+	}
+	version = actualVersion
 	tables := slices.Concat(catalogTables(), conversationTables(), approvalTables(), settingsTables())
 	if version == 0 {
 		if err := initialize(tx, tables); err != nil {
 			return err
+		}
+	} else if version == 1 {
+		if err := validateSchema(tx, tables); err != nil {
+			return fmt.Errorf("数据库结构与当前版本 1 不匹配: %w", err)
+		}
+		if err := optionalWorkspaceRoot(tx); err != nil {
+			return fmt.Errorf("升级工作区目录结构: %w", err)
 		}
 	} else if version != schemaVersion {
 		return fmt.Errorf("不支持数据库结构版本 %d，请使用独立开发数据目录", version)
@@ -46,7 +79,14 @@ func Run(ctx context.Context, db *gorm.DB) (err error) {
 	if err := validateSchema(tx, tables); err != nil {
 		return fmt.Errorf("数据库结构与当前版本 %d 不匹配: %w", schemaVersion, err)
 	}
-	if version == 0 {
+	var required int
+	if err := tx.Raw(`SELECT "notnull" FROM pragma_table_info('workspaces') WHERE name='root_path'`).Scan(&required).Error; err != nil {
+		return err
+	}
+	if required != 0 {
+		return errors.New("工作区主目录仍具有非空约束")
+	}
+	if version != schemaVersion {
 		if err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)).Error; err != nil {
 			return err
 		}

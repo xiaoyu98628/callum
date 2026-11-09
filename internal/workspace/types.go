@@ -13,13 +13,15 @@ type Workspace struct {
 	UpdatedAt  int64    `json:"updated_at"`
 }
 
-// Change 只更新明确提供的字段；RootPath 只能选择已有源目录，false 清除对应状态时间。
+// Change 只更新明确提供的字段；完整目录更新携带原目录集合，避免覆盖并发修改。
 type Change struct {
-	Name     *string `json:"name,omitempty"`
-	RootPath *string `json:"root_path,omitempty"`
-	Pinned   *bool   `json:"pinned,omitempty"`
-	Archived *bool   `json:"archived,omitempty"`
-	Deleted  *bool   `json:"-"`
+	Name            *string   `json:"name,omitempty"`
+	RootPath        *string   `json:"root_path,omitempty"`
+	OtherPaths      *[]string `json:"other_paths,omitempty"`
+	ExpectedFolders *[]string `json:"expected_folders,omitempty"`
+	Pinned          *bool     `json:"pinned,omitempty"`
+	Archived        *bool     `json:"archived,omitempty"`
+	Deleted         *bool     `json:"-"`
 }
 
 // Filter 是有界列表查询，Archived、Deleted 选择对应状态的记录。

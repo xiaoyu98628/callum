@@ -79,6 +79,60 @@ func readWorkspace(t *testing.T, frame wireFrame) workspace.Workspace {
 	return value
 }
 
+func TestWorkspaceFolderEditingThroughStdio(t *testing.T) {
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := startApp(t, cfg, io.Discard)
+	root, other, added := t.TempDir(), t.TempDir(), t.TempDir()
+	created := readWorkspace(t, p.call(t, "workspace.create", map[string]any{"name": "原项目", "root_path": root, "other_paths": []string{other}}))
+	root, other = created.RootPath, created.OtherPaths[0]
+	added, err = filepath.EvalSymlinks(added)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keep := filepath.Join(root, "kept.txt")
+	if err := os.WriteFile(keep, []byte("保留磁盘文件"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	change := map[string]any{"id": created.ID, "name": "修改项目", "root_path": other, "other_paths": []string{added}, "expected_folders": []string{root, other}}
+	value := readWorkspace(t, p.call(t, "workspace.update", change))
+	if value.ID != created.ID || value.RootPath != other || !slices.Equal(value.OtherPaths, []string{added}) {
+		t.Fatalf("完整目录更新失败: %+v", value)
+	}
+	if frame := p.call(t, "workspace.update", change); frame.Error == nil || frame.Error.Code != 1003 {
+		t.Fatalf("旧目录快照覆盖了新设置: %+v", frame)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(other, alias); err != nil {
+		t.Fatal(err)
+	}
+	change["expected_folders"], change["other_paths"] = []string{other, added}, []string{alias}
+	if frame := p.call(t, "workspace.update", change); frame.Error == nil || frame.Error.Code != -32602 {
+		t.Fatalf("接受了重复目录身份: %+v", frame)
+	}
+	change["root_path"], change["other_paths"] = "", []string{}
+	value = readWorkspace(t, p.call(t, "workspace.update", change))
+	if value.RootPath != "" || len(value.OtherPaths) != 0 {
+		t.Fatalf("无法移除全部目录: %+v", value)
+	}
+	if content, err := os.ReadFile(keep); err != nil || string(content) != "保留磁盘文件" {
+		t.Fatalf("解除目录关联改变了磁盘文件: %q %v", content, err)
+	}
+	second := readWorkspace(t, p.call(t, "workspace.create", map[string]any{"name": "另一个无目录项目"}))
+	if second.RootPath != "" || second.ID == value.ID {
+		t.Fatalf("无目录项目发生合并: %+v", second)
+	}
+	p.stop(t)
+	p = startApp(t, cfg, io.Discard)
+	value = readWorkspace(t, p.call(t, "workspace.get", map[string]any{"id": created.ID}))
+	if value.RootPath != "" || len(value.OtherPaths) != 0 {
+		t.Fatalf("重启后无目录状态丢失: %+v", value)
+	}
+	readWorkspace(t, p.call(t, "workspace.update", map[string]any{"id": created.ID, "root_path": added, "other_paths": []string{}, "expected_folders": []string{}}))
+}
+
 func TestWorkspacePrimaryDirectoryThroughStdio(t *testing.T) {
 	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
 	if err != nil {
@@ -139,7 +193,8 @@ func TestWorkspacePrimaryDirectoryUsesNewPathBase(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var readNewRoot atomic.Bool
+	var readNewRoot, folderless atomic.Bool
+	absoluteFile := filepath.Join(other, "note.txt")
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Tools    []json.RawMessage `json:"tools"`
@@ -159,7 +214,16 @@ func TestWorkspacePrimaryDirectoryUsesNewPathBase(t *testing.T) {
 			if last.Role == "tool" {
 				readNewRoot.Store(strings.Contains(last.Content, "from-new-root") && !strings.Contains(last.Content, "from-original-root"))
 			} else {
-				reply = map[string]any{"tool_calls": []any{map[string]any{"id": "read-note", "type": "function", "function": map[string]any{"name": "read_file", "arguments": `{"path":"note.txt"}`}}}}
+				path := "note.txt"
+				if folderless.Load() {
+					path = absoluteFile
+				}
+				arguments, err := json.Marshal(map[string]string{"path": path})
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				reply = map[string]any{"tool_calls": []any{map[string]any{"id": "read-note", "type": "function", "function": map[string]any{"name": "read_file", "arguments": string(arguments)}}}}
 				reason = "tool_calls"
 			}
 		}
@@ -173,10 +237,18 @@ func TestWorkspacePrimaryDirectoryUsesNewPathBase(t *testing.T) {
 	p := startApp(t, cfg, io.Discard)
 	mid := setupConversationModel(t, p, upstream.URL)
 	project := readWorkspace(t, p.call(t, "workspace.create", map[string]any{"name": "相对路径项目", "root_path": root, "other_paths": []string{other}}))
-	requireOK(t, p.call(t, "workspace.update", map[string]any{"id": project.ID, "root_path": project.OtherPaths[0]}))
+	switched := readWorkspace(t, p.call(t, "workspace.update", map[string]any{"id": project.ID, "root_path": project.OtherPaths[0]}))
 	requireOK(t, p.call(t, "conversation.send", map[string]any{"workspace_id": project.ID, "model_id": mid, "stream": false, "content": messageBlocks("读取 note.txt")}))
 	p.event(t, "run.completed")
 	if !readNewRoot.Load() {
 		t.Fatal("相对路径读取没有使用切换后的主要目录")
+	}
+	readNewRoot.Store(false)
+	folderless.Store(true)
+	requireOK(t, p.call(t, "workspace.update", map[string]any{"id": project.ID, "root_path": "", "other_paths": []string{}, "expected_folders": append([]string{switched.RootPath}, switched.OtherPaths...)}))
+	requireOK(t, p.call(t, "conversation.send", map[string]any{"workspace_id": project.ID, "model_id": mid, "stream": false, "content": messageBlocks("使用绝对路径读取文件")}))
+	p.event(t, "run.completed")
+	if !readNewRoot.Load() {
+		t.Fatal("无目录项目未按未绑定路径规则执行绝对路径工具")
 	}
 }

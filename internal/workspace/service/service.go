@@ -26,10 +26,12 @@ func New(repository workspace.Repository) (*Service, error) {
 // Create 保存项目。省略其他目录时，重新添加已删除的项目会保留原目录。
 func (s *Service) Create(ctx context.Context, name, rootPath string, otherPaths ...string) (workspace.Workspace, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 1024 || !validPath(rootPath) || len(otherPaths) > 15 {
+	if name == "" || len(name) > 1024 || (rootPath != "" && !validPath(rootPath)) || len(otherPaths) > 15 || (rootPath == "" && len(otherPaths) != 0) {
 		return workspace.Workspace{}, workspace.ErrInvalid
 	}
-	rootPath = filepath.Clean(rootPath)
+	if rootPath != "" {
+		rootPath = filepath.Clean(rootPath)
+	}
 	if len(otherPaths) > 0 {
 		actualRoot, rootInfo, err := realDirectory(rootPath)
 		if err != nil {
@@ -104,6 +106,9 @@ func (s *Service) Update(ctx context.Context, id string, change workspace.Change
 	if !validID(id) {
 		return workspace.Workspace{}, workspace.ErrInvalid
 	}
+	if (change.OtherPaths == nil) != (change.ExpectedFolders == nil) {
+		return workspace.Workspace{}, workspace.ErrInvalid
+	}
 	if change.Name != nil {
 		value := strings.TrimSpace(*change.Name)
 		if value == "" || len(value) > 1024 {
@@ -111,7 +116,21 @@ func (s *Service) Update(ctx context.Context, id string, change workspace.Change
 		}
 		change.Name = &value
 	}
-	if change.RootPath != nil {
+	if change.OtherPaths != nil {
+		if change.RootPath == nil || change.ExpectedFolders == nil || len(*change.OtherPaths) > 15 || len(*change.ExpectedFolders) > 16 {
+			return workspace.Workspace{}, workspace.ErrInvalid
+		}
+		for _, path := range *change.ExpectedFolders {
+			if !validPath(path) {
+				return workspace.Workspace{}, workspace.ErrInvalid
+			}
+		}
+		root, others, err := normalizeFolders(ctx, *change.RootPath, *change.OtherPaths)
+		if err != nil {
+			return workspace.Workspace{}, err
+		}
+		change.RootPath, change.OtherPaths = &root, &others
+	} else if change.RootPath != nil {
 		path, _, err := realDirectory(*change.RootPath)
 		if err != nil {
 			return workspace.Workspace{}, err
@@ -119,4 +138,28 @@ func (s *Service) Update(ctx context.Context, id string, change workspace.Change
 		change.RootPath = &path
 	}
 	return s.repository.Update(ctx, id, change)
+}
+
+// normalizeFolders 允许无目录项目；绑定目录时按实际身份拒绝重复和符号链接别名。
+func normalizeFolders(ctx context.Context, root string, others []string) (string, []string, error) {
+	if root == "" {
+		if len(others) != 0 {
+			return "", nil, workspace.ErrInvalid
+		}
+		return "", []string{}, nil
+	}
+	paths := append([]string{root}, others...)
+	seen := make([]os.FileInfo, 0, len(paths))
+	for i, path := range paths {
+		if err := ctx.Err(); err != nil {
+			return "", nil, err
+		}
+		actual, info, err := realDirectory(path)
+		if err != nil || slices.ContainsFunc(seen, func(previous os.FileInfo) bool { return os.SameFile(previous, info) }) {
+			return "", nil, workspace.ErrInvalid
+		}
+		paths[i] = actual
+		seen = append(seen, info)
+	}
+	return paths[0], paths[1:], nil
 }
