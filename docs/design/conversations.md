@@ -140,21 +140,22 @@ model_type 是 text、image、audio、video 内容类型元数据，可多选，
 审批等待保留有界执行容量和会话互斥，但释放模型请求槽位，不持有数据库事务。
 
 应用设置保存在 app_settings：id TEXT UUIDv7 PRIMARY KEY；key TEXT UNIQUE；value TEXT JSON 对象；revision INTEGER 默认 1 且大于零；created_at INTEGER；updated_at INTEGER。
-当前配置组 key=execution，value 保存独立的 approval_policy、approvals_reviewer，不为每个设置项增加数据库字段。
+执行配置组 key=execution，value 保存独立的 approval_policy、approvals_reviewer、sandbox_mode，不为每个设置项增加数据库字段。
 settings.get 读取配置组，settings.update 携带 key、当前 revision 和完整 value 原子替换；冲突返回 1003，非法参数返回 -32602，失败不改变配置。
 受理执行与读取设置在同一事务中完成，保存 settings_snapshot；更新成功后发起的新任务读取新值，已受理任务的审批策略保持不变，无需重启。
-approval_policy 支持 on-request（默认）、always、never；approvals_reviewer 当前只支持 user，不接受尚未实现的 auto_review。
+approval_policy 支持 on-request（默认）、always、never。approvals_reviewer 支持 user（默认）和 auto_review。auto_review 仅用于 on-request 或 always 的受限沙箱模式。完全访问显式配置为 sandbox_mode=danger-full-access，并与 never、user 配对。
 启动时保留用户选择；读取异常阻止受理，不回退默认权限；旧执行缺失快照不伪造数据。
-on-request 放行纯读取及工作区内普通修改；纯读取可访问当前系统用户可读的本地路径，不要求绑定工作区或额外目录授权。无工作区或工作区外普通修改以及删除、大范围覆盖、外发或未知影响需要询问；always 逐次询问；never 将需要审批的操作直接拒绝。
+on-request 放行纯读取及工作区内普通修改（只读沙箱除外）。纯读取可访问当前系统用户可读的本地路径，无需绑定工作区或额外目录授权。无工作区或工作区外普通修改以及删除、大范围覆盖、外发或未知影响需要询问。always 逐次询问。受限沙箱下的 never 直接拒绝需要审批的操作。
 工具 effects 由可信代码声明，可包含 read、write、destructive、external、unknown；缺少类别按未知操作处理，无效类别拒绝注册。
 混合类别采用需要审批的结果，读取声明不能抵消破坏性或外发影响；工具负责将影响较大的覆盖声明为 destructive。
 当前已提供三个读取工具、apply_patch 文件创建修改及 run_command 命令工具。独立删除和外发工具尚未接入；命令保持 unknown 分类，审批另结合服务端固定的执行边界。
 参数、目标范围及工作区状态独立校验；默认批准只授权本次固定目标操作；会话目录授权由用户明确选择并单独保存。策略拒绝和参数校验失败不生成用户审批记录。
-权限判定属于 Go，模型不能声明自己已获授权。旧 approval-mode、approval-policy、approvals-reviewer 启动参数移除，macOS 命令已接入 Seatbelt，未提供永久完全访问模式。
+权限判定属于 Go，模型不能声明自己已获授权。旧 approval-mode、approval-policy、approvals-reviewer 启动参数移除，macOS 受限模式命令使用 Seatbelt。审批人可配置为用户或 AI 审核。完全访问由用户选择并写入执行快照，命令使用当前系统账户权限。
 工具步骤 input 保存 settings_revision、approval_policy、approvals_reviewer、sandbox_mode 和 authorization（action、reason），供审计查询；审批表结构和通信接口保持不变。
 request 保存服务端生成的工具完整定义、版本、可选工作区、实际目标及规范化参数，request_hash 为该快照的 SHA-256。无工作区时 workspace 为 null；target 保存 requested_path、path、kind 和 within_workspace，不能由模型参数覆盖。
-approval.get/list 查询记录，approval.decide 只接受 approval_id、decision、decision_note；批准或拒绝身份由服务端填写为 local_user。
-相同决定幂等，冲突决定拒绝。批准与取消竞争时，仍需在执行前检查上下文、工作区及操作指纹，数据库原子认领保证同一步骤不会启动两次。
+approval.get/list 查询记录，approval.decide 接收 approval_id、decision、decision_note 和可选 scope。人工决定的身份由服务端填写为 local_user。
+当审批人为 auto_review 时，原本需询问的项目内普通文件操作、无已知风险的只读沙箱命令及系统 `mkdir` 在项目内创建单层目录可提交独立审核。审核使用本轮模型和有限的最新用户文字、固定操作快照，占用模型请求槽位且最多等待 20 秒。其他可写沙箱命令、沙箱外命令及待核实操作继续交给用户。审核超时、失败或缺乏足够信息时交给用户。审核使用独立模型步骤记录模型、结论和实际用量，不进入主对话上下文。AI 决定绑定同一执行、工具步骤和请求哈希，按 auto_review 记录审批人，不创建目录授权。
+同一人工决定与授权范围重复提交幂等，冲突决定或覆盖 AI 决定的请求会被拒绝。批准与取消竞争时，仍需在执行前检查上下文、工作区及操作指纹，数据库原子认领保证同一步骤不会启动两次。
 拒绝转为结构化工具结果，模型可解释或采用其他允许的操作；同一执行内相同被拒绝的操作不再次请求审批。
 进程关闭或取消结束 pending 审批，已经作出的决定保留；重启保留审计、标记中断，不自动执行已批准但结果未知的操作。
 

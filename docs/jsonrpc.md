@@ -1,6 +1,6 @@
 # JSON-RPC 通信与手工测试
 
-本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `2`，两者含义不同。
+本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `3`，两者含义不同。
 
 ## 1. 启动及输入约定
 
@@ -123,10 +123,10 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | 字段 | 支持值 | 默认值 |
 | --- | --- | --- |
 | `approval_policy` | `on-request`、`always`、`never` | `on-request` |
-| `approvals_reviewer` | 当前仅 `user` | `user` |
-| `sandbox_mode` | `workspace-write`、`read-only` | `workspace-write` |
+| `approvals_reviewer` | `user`、`auto_review` | `user` |
+| `sandbox_mode` | `workspace-write`、`read-only`、`danger-full-access` | `workspace-write` |
 
-`on-request` 按操作类别判断；`always` 逐次询问；`never` 不询问，并拒绝需要审批的操作。`never` 不扩大工作区或工具权限，不是完全访问模式。
+`on-request` 按操作类别判断；`always` 逐次询问；`never` 不询问，并拒绝需要审批的操作。`never` 在只读和项目写入模式下不会扩大工具权限。完全访问要求显式设置 `sandbox_mode: "danger-full-access"`，同时使用 `approval_policy: "never"` 和 `approvals_reviewer: "user"`。
 
 ### settings.get
 
@@ -148,7 +148,9 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"jsonrpc":"2.0","id":"settings-update","method":"settings.update","params":{"key":"execution","revision":1,"value":{"approval_policy":"always","approvals_reviewer":"user"}}}
 ```
 
-成功返回更新后的完整设置记录，`revision` 加一。再次携带旧版本保存，返回 `1003`；重新读取后再保存。`auto_review`、未知配置字段、缺少字段、重复键或错误类型返回 `-32602`。
+成功返回更新后的完整设置记录，`revision` 加一。再次携带旧版本保存，返回 `1003`；重新读取后再保存。非法审批人与沙箱组合、未知字段、缺少必要字段、重复键或错误类型返回 `-32602`。
+
+审批人为 `auto_review` 时策略须为 `on-request` 或 `always`，并保留沙箱。服务端按固定操作判断是否适合 AI 审核，符合范围时创建工具步骤的 `model_call` 子步骤，`input.purpose` 为 `approval_review`，`input.request_hash` 与工具操作一致。模型、结论、理由及实际 usage 可用步骤接口查询。AI 决定直接发布 `approval.updated`，`decided_by` 为 `auto_review`，审批对象的 `review` 包含 `step_id`、`decision`、`reason`。转人工时发出 `approval.requested`，`review.decision` 为 `handoff`。客户端通过 `approval.decide` 提交人工决定，服务端将身份记为 `local_user`。
 
 修改成功后发起的新执行无需重启即可使用新设置。已受理、正在执行或等待审批的任务继续使用自己的快照，可通过 `run.get.result.settings_snapshot` 查看。设置更新当前不推送专门的 `settings.updated` 事件，其他窗口通过 `settings.get` 读取最新值。
 
@@ -588,7 +590,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 {"jsonrpc":"2.0","id":"approval-reject","method":"approval.decide","params":{"approval_id":"<approval_id>","decision":"rejected","decision_note":"不允许本次操作"}}
 ```
 
-二选一进行测试；同一决定重复提交保持幂等，提交相反决定返回 `1003`。说明可省略，提供时必须是最多 4096 字节的 UTF-8 文本。
+二选一进行测试。同一人工决定按原授权范围重复提交保持幂等。提交相反决定或尝试改动已完成的 AI 决定时返回 `1003`。说明可省略，提供时必须是最多 4096 字节的 UTF-8 文本。
 
 返回保存后的完整审批记录；用户身份由服务写入为 `local_user`。不能由客户端提供或修改 `request`、`request_hash`、`decided_by`。
 
@@ -596,7 +598,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 待审批时可使用 `run.cancel` 取消整个执行，审批随之进入 `cancelled`。`approval.decide` 不接受 `cancelled`、`expired` 或 `user_input` 作为决定。
 
-### 11.4 三种策略的测试区别
+### 11.4 受限沙箱下三种策略的测试区别
 
 | 策略 | 纯读取（含无工作区／工作区外绝对路径）及工作区内普通修改 | 工作区外普通修改及其他需要审批的操作 |
 | --- | --- | --- |
@@ -830,7 +832,7 @@ usage 片段响应示例：
 {"jsonrpc":"2.0","id":"bad-method","method":"missing.method","params":{}}
 {"jsonrpc":"2.0","id":"bad-field","method":"system.info","params":{"unknown":true}}
 {"jsonrpc":"2.0","id":"bad-id","method":"model.get","params":{"id":"not-a-uuid"}}
-{"jsonrpc":"2.0","id":"bad-reviewer","method":"settings.update","params":{"key":"execution","revision":1,"value":{"approval_policy":"always","approvals_reviewer":"auto_review"}}}
+{"jsonrpc":"2.0","id":"bad-reviewer","method":"settings.update","params":{"key":"execution","revision":1,"value":{"approval_policy":"never","approvals_reviewer":"auto_review"}}}
 ```
 
 预期依次为 `-32601`、`-32602`、`-32602`、`-32602`。另可手动输入不完整 JSON 验证 `-32700`。

@@ -148,7 +148,7 @@ func TestOptionalWorkspaceRootMigrationPreservesData(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			if version != 2 || foreignKeys != 1 || messages != 1 || folders != 1 || triggers != 1 {
+			if version != 3 || foreignKeys != 1 || messages != 1 || folders != 1 || triggers != 1 {
 				t.Fatalf("升级后丢失数据、触发器或外键设置: %d %d %d %d %d", version, foreignKeys, messages, folders, triggers)
 			}
 			var workspaceID string

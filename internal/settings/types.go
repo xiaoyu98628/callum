@@ -45,6 +45,17 @@ func DefaultExecution() Execution {
 	return Execution{ApprovalPolicy: policy.OnRequest, ApprovalsReviewer: policy.User, SandboxMode: tool.SandboxWorkspaceWrite}
 }
 
+// Valid 校验审批人与沙箱的组合。旧快照可保留未记录的沙箱模式。
+func (e Execution) Valid() bool {
+	if !e.ApprovalPolicy.Valid() || !e.ApprovalsReviewer.Valid() || (e.SandboxMode != "" && !e.SandboxMode.Valid()) {
+		return false
+	}
+	if e.SandboxMode == tool.SandboxFullAccess {
+		return e.ApprovalPolicy == policy.Never && e.ApprovalsReviewer == policy.User
+	}
+	return e.ApprovalsReviewer != policy.AutoReview || (e.SandboxMode != "" && e.ApprovalPolicy != policy.Never)
+}
+
 // Snapshot 固定一次执行实际采用的配置及版本，不能跟随全局设置更新。
 type Snapshot struct {
 	Revision int64 `json:"revision"`
@@ -54,8 +65,7 @@ type Snapshot struct {
 
 // Valid 判断快照是否具有有效版本和当前服务支持的独立配置值。
 func (s Snapshot) Valid() bool {
-	return s.Revision > 0 && s.ApprovalPolicy.Valid() && s.ApprovalsReviewer.Valid() &&
-		(s.SandboxMode == "" || s.SandboxMode.Valid()) &&
+	return s.Revision > 0 && s.Execution.Valid() &&
 		(s.Compaction == nil || s.Compaction.Valid())
 }
 
@@ -111,7 +121,7 @@ func DecodeExecution(raw json.RawMessage) (Execution, error) {
 		return value, ErrInvalid
 	}
 	var trailing any
-	if decoder.Decode(&trailing) != io.EOF || !value.ApprovalPolicy.Valid() || !value.ApprovalsReviewer.Valid() || !value.SandboxMode.Valid() {
+	if decoder.Decode(&trailing) != io.EOF || !value.Valid() || !value.SandboxMode.Valid() {
 		return value, ErrInvalid
 	}
 	return value, nil

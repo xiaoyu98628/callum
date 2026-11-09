@@ -18,7 +18,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/policy"
 )
 
-func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall, denied, uncertain map[string]bool) (message model.Message, retErr error) {
+func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, parent agent.Step, call model.ToolCall, denied, uncertain map[string]bool) (message model.Message, retErr error) {
 	scope, operationErr := e.toolScope(ctx, ex)
 	var prepared *toolexecutor.Prepared
 	if operationErr == nil {
@@ -74,7 +74,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, parent
 	if operationErr != nil {
 		return
 	}
-	approvalID, err := e.authorizeTool(ctx, ex, &step, prepared, decision, denied)
+	approvalID, err := e.authorizeTool(ctx, ex, resolved, &step, prepared, decision, denied)
 	if err != nil {
 		operationErr = err
 		if errors.Is(err, tool.ErrDenied) {
@@ -174,34 +174,45 @@ func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, 
 	return step, nil
 }
 
-func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, step *agent.Step, prepared *toolexecutor.Prepared, decision policy.Decision, denied map[string]bool) (string, error) {
+func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, step *agent.Step, prepared *toolexecutor.Prepared, decision policy.Decision, denied map[string]bool) (string, error) {
 	switch decision.Action {
 	case policy.Allow:
 		return "", nil
 	case policy.Ask:
 		// 审批策略只决定是否询问；审批人独立校验，不能回退成自动放行。
-		if ex.Run.SettingsSnapshot == nil || ex.Run.SettingsSnapshot.ApprovalsReviewer != policy.User {
+		if ex.Run.SettingsSnapshot == nil || !ex.Run.SettingsSnapshot.Valid() {
 			return "", tool.ErrDenied
 		}
 	default:
 		return "", tool.ErrDenied
 	}
-	a, err := e.options.Approvals.Request(ctx, ex.Run.ID, step.ID, prepared.Request(), prepared.Hash())
+	var review *agent.ApprovalReview
+	if ex.Run.SettingsSnapshot.ApprovalsReviewer == policy.AutoReview && canReviewTool(prepared, decision) {
+		var err error
+		review, err = e.reviewTool(ctx, ex, resolved, step, prepared)
+		if err != nil {
+			return "", err
+		}
+	}
+	a, err := e.options.Approvals.Request(ctx, ex.Run.ID, step.ID, prepared.Request(), prepared.Hash(), review)
 	if err != nil {
 		return "", operationStorageError(ctx, err)
 	}
 	step.Status, step.UpdatedAt = agent.AwaitingApproval, time.Now().UnixMilli()
-	if err := e.event(ex, "step.updated", step.ID, "", *step); err != nil {
-		return "", err
-	}
-	paused := ex.Run
-	paused.Status, paused.UpdatedAt = agent.AwaitingApproval, step.UpdatedAt
-	if err := e.event(ex, "run.updated", "", "", paused); err != nil {
-		return "", err
-	}
-	decided, err := e.options.Approvals.Wait(ctx, a.ID)
-	if err != nil {
-		return "", err
+	decided := a
+	if a.Status == agent.ApprovalPending {
+		if err := e.event(ex, "step.updated", step.ID, "", *step); err != nil {
+			return "", err
+		}
+		paused := ex.Run
+		paused.Status, paused.UpdatedAt = agent.AwaitingApproval, step.UpdatedAt
+		if err := e.event(ex, "run.updated", "", "", paused); err != nil {
+			return "", err
+		}
+		decided, err = e.options.Approvals.Wait(ctx, a.ID)
+		if err != nil {
+			return "", err
+		}
 	}
 	if decided.Status == agent.ApprovalApproved {
 		return decided.ID, nil

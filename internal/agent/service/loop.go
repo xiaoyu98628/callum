@@ -101,7 +101,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			if call.Name == agent.UserInputTool {
 				value, err = e.askUser(ctx, ex, step, call)
 			} else {
-				value, err = e.callTool(ctx, ex, step, call, denied, uncertain)
+				value, err = e.callTool(ctx, ex, resolved, step, call, denied, uncertain)
 			}
 			if err != nil {
 				return err

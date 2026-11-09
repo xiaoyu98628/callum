@@ -31,6 +31,12 @@ func EvaluateOperation(p ApprovalPolicy, operation Operation) Decision {
 		}
 		return Decision{Ask, "previous_result_requires_confirmation"}
 	}
+	if operation.SandboxMode == tool.SandboxFullAccess {
+		if p != Never {
+			return Decision{Deny, "invalid_approval_policy"}
+		}
+		return Decision{Allow, "full_access"}
+	}
 	if operation.Command != nil {
 		return EvaluateCommand(p, *operation.Command)
 	}

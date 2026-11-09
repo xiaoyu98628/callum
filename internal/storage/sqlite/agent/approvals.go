@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"time"
 
 	"gorm.io/gorm"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
+	"github.com/xiaoyu98628/callum/internal/tool/policy"
 )
 
 var _ agent.ApprovalRepository = (*Repository)(nil)
@@ -22,18 +24,28 @@ func (r *Repository) CreateApproval(ctx context.Context, in agent.Approval) (out
 	if hex.EncodeToString(sum[:]) != in.RequestHash {
 		return out, agent.ErrApprovalInvalid
 	}
+	if in.Status != agent.ApprovalPending && in.Status != "" && in.Status != agent.ApprovalApproved && in.Status != agent.ApprovalRejected {
+		return out, agent.ErrApprovalInvalid
+	}
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var step schema.Step
 		if err := tx.Where("id=? AND run_id=? AND type='tool_call' AND status='pending'", in.StepID, in.RunID).Take(&step).Error; err != nil {
 			return notFound(err)
 		}
-		if err := setStatus(tx, in.RunID, agent.AwaitingApproval); err != nil {
-			return err
+		if in.Status == agent.ApprovalApproved || in.Status == agent.ApprovalRejected {
+			if err := verifyAutoDecision(tx, in, step); err != nil {
+				return err
+			}
+		} else {
+			in.Status, in.DecidedBy, in.DecisionNote, in.DecidedAt = agent.ApprovalPending, nil, nil, nil
+			if err := setStatus(tx, in.RunID, agent.AwaitingApproval); err != nil {
+				return err
+			}
 		}
 		if err := tx.Model(&schema.Step{}).Where("id=? AND status='pending'", in.StepID).Updates(map[string]any{"status": agent.AwaitingApproval, "updated_at": in.UpdatedAt}).Error; err != nil {
 			return err
 		}
-		row := schema.Approval{ID: in.ID, RunID: in.RunID, StepID: in.StepID, Request: in.Request, RequestHash: in.RequestHash, Status: agent.ApprovalPending, CreatedAt: in.CreatedAt, UpdatedAt: in.UpdatedAt}
+		row := schema.Approval{ID: in.ID, RunID: in.RunID, StepID: in.StepID, Request: in.Request, RequestHash: in.RequestHash, Status: in.Status, DecidedBy: in.DecidedBy, DecisionNote: in.DecisionNote, DecidedAt: in.DecidedAt, CreatedAt: in.CreatedAt, UpdatedAt: in.UpdatedAt}
 		if err := tx.Omit("Run", "Step").Create(&row).Error; err != nil {
 			return err
 		}
@@ -43,6 +55,41 @@ func (r *Repository) CreateApproval(ctx context.Context, in agent.Approval) (out
 	})
 	return
 }
+
+// 自动决定必须来自同次执行中已保存、绑定同一工具和指纹的审核步骤。
+func verifyAutoDecision(tx *gorm.DB, in agent.Approval, step schema.Step) error {
+	if in.Review == nil || in.DecidedBy == nil || *in.DecidedBy != agent.ApprovalAutoReviewer || in.DecisionNote == nil || in.DecidedAt == nil {
+		return agent.ErrApprovalInvalid
+	}
+	var operation struct {
+		Hash   string               `json:"request_hash"`
+		Review agent.ApprovalReview `json:"approval_review"`
+	}
+	if json.Unmarshal(step.Input, &operation) != nil || operation.Hash != in.RequestHash || operation.Review != *in.Review {
+		return agent.ErrApprovalInvalid
+	}
+	var run schema.Run
+	if err := tx.Select("settings_snapshot").Where("id=? AND status=?", in.RunID, agent.Running).Take(&run).Error; err != nil {
+		return err
+	}
+	if run.SettingsSnapshot == nil || !run.SettingsSnapshot.Valid() || run.SettingsSnapshot.ApprovalsReviewer != policy.AutoReview {
+		return agent.ErrApprovalInvalid
+	}
+	var review schema.Step
+	if err := tx.Select("input", "output").Where("id=? AND run_id=? AND parent_step_id=? AND type='model_call' AND status=?", in.Review.StepID, in.RunID, in.StepID, agent.Completed).Take(&review).Error; err != nil {
+		return err
+	}
+	var input struct {
+		Purpose string `json:"purpose"`
+		Hash    string `json:"request_hash"`
+	}
+	var decision agent.ApprovalReview
+	if json.Unmarshal(review.Input, &input) != nil || json.Unmarshal(review.Output, &decision) != nil || input.Purpose != "approval_review" || input.Hash != in.RequestHash || decision != *in.Review || decision.Decision != in.Status || decision.Reason != *in.DecisionNote {
+		return agent.ErrApprovalInvalid
+	}
+	return nil
+}
+
 func (r *Repository) GetApproval(ctx context.Context, id string) (out agent.Approval, err error) {
 	// 决定与目录授权在同一事务提交，读取也使用同一快照，避免返回混合状态。
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -105,7 +152,7 @@ func (r *Repository) DecideApproval(ctx context.Context, id, status string, by, 
 			if savedScope == "" {
 				savedScope = agent.ApprovalOnce
 			}
-			if savedScope != scope {
+			if savedScope != scope || (row.DecidedBy != nil && *row.DecidedBy == agent.ApprovalAutoReviewer) {
 				return agent.ErrConflict
 			}
 			return nil

@@ -19,6 +19,11 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 		return tool.ErrDenied
 	}
 	p.boundary = tool.CommandBoundary{Mode: permissions.SandboxMode, Escalated: a.SandboxPermissions == sandboxEscalated, Risk: commandRisk(p.command)}
+	if permissions.SandboxMode == tool.SandboxFullAccess {
+		// 完全访问由受理快照明确选定，模型的单次沙箱参数不改变该模式。
+		p.boundary.Escalated = false
+		return nil
+	}
 	projectWrite := a.SandboxPermissions == sandboxProjectWrite
 	if projectWrite && (permissions.SandboxMode != tool.SandboxWorkspaceWrite || p.workspace == nil) {
 		return tool.ErrDenied
@@ -56,6 +61,7 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 	p.boundary.Sandboxed, p.boundary.Mode = true, tool.SandboxReadOnly
 	if projectWrite {
 		p.boundary.Mode = tool.SandboxWorkspaceWrite
+		p.boundary.CreatesWorkspaceDirectory = p.createsWorkspaceDirectory()
 	}
 	p.profile = seatbeltProfile(projectWrite, p.protectedDirectory != nil)
 	ancestorArguments := p.protectDataAncestors(projectWrite)
@@ -82,6 +88,19 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 		p.environment = append(p.environment, key+"="+value)
 	}
 	return nil
+}
+
+// 仅识别系统 mkdir 在项目内创建单层目录的操作，现有目标不会被覆盖。
+func (p *fixedCommand) createsWorkspaceDirectory() bool {
+	if len(p.command) != 2 || p.command[0] != "/bin/mkdir" {
+		return false
+	}
+	name := p.command[1]
+	if !filepath.IsLocal(name) || filepath.Base(name) != name || name == "." || strings.HasPrefix(name, "-") {
+		return false
+	}
+	relative, err := filepath.Rel(p.workspace.actual, p.directory.actual)
+	return err == nil && filepath.IsLocal(relative)
 }
 
 // 保护项目内通往应用数据的祖先路径，避免获批命令通过重命名祖先绕过路径限制。

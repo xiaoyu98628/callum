@@ -92,16 +92,24 @@ func (s *Service) publish(ctx context.Context, name string, a agent.Approval) er
 	return s.emit(agent.Event{Type: name, ConversationID: execution.ConversationID, RunID: a.RunID, StepID: a.StepID, Data: a})
 }
 
-// Request 在落库后才发布审批通知，审批快照和哈希必须由执行器生成。
-func (s *Service) Request(ctx context.Context, runID, stepID string, request []byte, hash string) (agent.Approval, error) {
+// Request 在落库后才发布审批通知。已完成的独立审核与审批记录一并提交。
+func (s *Service) Request(ctx context.Context, runID, stepID string, request []byte, hash string, review *agent.ApprovalReview) (agent.Approval, error) {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return agent.Approval{}, err
 	}
 	now := time.Now()
-	value, err := s.repository.CreateApproval(ctx, agent.Approval{ID: id.String(), RunID: runID, StepID: stepID, Request: request, RequestHash: hash, Status: agent.ApprovalPending, CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli()})
+	in := agent.Approval{ID: id.String(), RunID: runID, StepID: stepID, Request: request, RequestHash: hash, Status: agent.ApprovalPending, CreatedAt: now.UnixMilli(), UpdatedAt: now.UnixMilli()}
+	if review != nil && (review.Decision == agent.ApprovalApproved || review.Decision == agent.ApprovalRejected) {
+		in.Status, in.DecidedBy, in.DecisionNote, in.DecidedAt = review.Decision, new(agent.ApprovalAutoReviewer), new(review.Reason), new(in.CreatedAt)
+		in.Review = review
+	}
+	value, err := s.repository.CreateApproval(ctx, in)
 	if err != nil {
 		return value, err
+	}
+	if value.Status != agent.ApprovalPending {
+		return value, s.publish(ctx, "approval.updated", value)
 	}
 	return value, s.publish(ctx, "approval.requested", value)
 }

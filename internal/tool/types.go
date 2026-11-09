@@ -128,9 +128,12 @@ type SandboxMode string
 const (
 	SandboxReadOnly       SandboxMode = "read-only"
 	SandboxWorkspaceWrite SandboxMode = "workspace-write"
+	SandboxFullAccess     SandboxMode = "danger-full-access"
 )
 
-func (m SandboxMode) Valid() bool { return m == SandboxReadOnly || m == SandboxWorkspaceWrite }
+func (m SandboxMode) Valid() bool {
+	return m == SandboxReadOnly || m == SandboxWorkspaceWrite || m == SandboxFullAccess
+}
 
 // ExecutionPermissions 由受理时的服务端设置快照提供，模型不能指定沙箱模式。
 type ExecutionPermissions struct{ SandboxMode SandboxMode }
@@ -143,10 +146,11 @@ type PermissionTool interface {
 
 // CommandBoundary 记录固定命令实际使用的执行边界，不将未知命令伪装为只读。
 type CommandBoundary struct {
-	Sandboxed bool        `json:"sandboxed"`
-	Mode      SandboxMode `json:"sandbox_mode,omitempty"`
-	Escalated bool        `json:"escalated"`
-	Risk      string      `json:"risk,omitempty"`
+	Sandboxed                 bool        `json:"sandboxed"`
+	Mode                      SandboxMode `json:"sandbox_mode,omitempty"`
+	Escalated                 bool        `json:"escalated"`
+	Risk                      string      `json:"risk,omitempty"`
+	CreatesWorkspaceDirectory bool        `json:"-"` // 由固定的系统程序、参数和工作目录计算，不改变请求指纹。
 }
 
 type CommandInvocation interface {

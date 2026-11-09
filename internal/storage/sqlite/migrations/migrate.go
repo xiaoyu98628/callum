@@ -11,7 +11,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 // Run 在同一个事务内初始化空库或校验当前结构。调用方持有连接与实例锁。
 func Run(ctx context.Context, db *gorm.DB) (err error) {
@@ -28,7 +28,7 @@ func Run(ctx context.Context, db *gorm.DB) (err error) {
 		if err := conn.Raw("PRAGMA user_version").Scan(&version).Error; err != nil {
 			return err
 		}
-		if version == 1 {
+		if version == 1 || version == 2 {
 			// SQLite 重建父表必须在事务外临时关闭外键，避免触发子表级联删除。
 			if err := conn.Exec("PRAGMA foreign_keys = OFF").Error; err != nil {
 				return err
@@ -57,7 +57,7 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 	if err := tx.Raw("PRAGMA user_version").Scan(&actualVersion).Error; err != nil {
 		return err
 	}
-	if actualVersion == 1 && version != 1 {
+	if (actualVersion == 1 || actualVersion == 2) && version != actualVersion {
 		return errors.New("数据库结构版本在初始化期间发生变化，请重新打开")
 	}
 	version = actualVersion
@@ -66,18 +66,26 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 		if err := initialize(tx, tables); err != nil {
 			return err
 		}
-	} else if version == 1 {
+	} else if version == 1 || version == 2 {
 		if err := validateSchema(tx, tables); err != nil {
-			return fmt.Errorf("数据库结构与当前版本 1 不匹配: %w", err)
+			return fmt.Errorf("数据库结构与版本 %d 不匹配: %w", version, err)
 		}
-		if err := optionalWorkspaceRoot(tx); err != nil {
-			return fmt.Errorf("升级工作区目录结构: %w", err)
+		if version == 1 {
+			if err := optionalWorkspaceRoot(tx); err != nil {
+				return fmt.Errorf("升级工作区目录结构: %w", err)
+			}
+		}
+		if err := allowAutoReviewer(tx); err != nil {
+			return fmt.Errorf("升级审批人约束: %w", err)
 		}
 	} else if version != schemaVersion {
 		return fmt.Errorf("不支持数据库结构版本 %d，请使用独立开发数据目录", version)
 	}
 	if err := validateSchema(tx, tables); err != nil {
 		return fmt.Errorf("数据库结构与当前版本 %d 不匹配: %w", schemaVersion, err)
+	}
+	if err := validateAutoReviewer(tx); err != nil {
+		return err
 	}
 	var required int
 	if err := tx.Raw(`SELECT "notnull" FROM pragma_table_info('workspaces') WHERE name='root_path'`).Scan(&required).Error; err != nil {
