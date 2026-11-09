@@ -1,6 +1,6 @@
 # JSON-RPC 通信与手工测试
 
-本文按当前代码整理已实现的 stdio JSON-RPC 接口，共 42 个方法。协议版本为 `1`，数据库结构版本为 `2`，两者含义不同。
+本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `2`，两者含义不同。
 
 ## 1. 启动及输入约定
 
@@ -68,7 +68,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | 无历史调用 | `model.invoke` |
 | 工作区 | `workspace.create`、`workspace.update`、`workspace.get`、`workspace.list`、`workspace.delete`、`workspace.restore` |
 | 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.messages`、`conversation.delete`、`conversation.restore` |
-| 上下文压缩 | `conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
+| 上下文压缩 | `conversation.context_usage`、`conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
 | 执行 | `run.get`、`run.list`、`run.cancel` |
 | 步骤 | `step.get`、`step.list`、`step.data` |
 | 审批 | `approval.get`、`approval.list`、`approval.decide` |
@@ -401,6 +401,21 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 每次回答模型请求前，将摘要、有效消息、图片估算、工具定义、调用与结果及服务端操作事实计入本地 Token 估算；超过 Token 预算或触及消息数量、上下文 JSON 与实际请求字节边界时尝试压缩。保留指定用户轮次和当前问题；较早已完成的模型及全部工具结果可生成步骤摘要，正在执行的批次保持完整，模型请求前保留最近完整批次。压缩后重新检查全部边界；摘要模型的源批次也必须满足预算和实际请求编码边界。历史按完整轮次分页读取，旧超长轨迹在恢复阶段按完整批次推进，不能安全压缩时明确失败，不静默丢弃内容。有效请求仍最多 256 条、上下文 JSON 最多 8 MiB。
 
 估算方法 unicode-v1 按有效文本字符、代码标点和封装开销计算，图片使用可配置单图估算；不是厂商 tokenizer。仅在同一执行的请求前缀和工具定义未变时，可参考上一轮实际 prompt_tokens 并估算增量；不以累计 usage 判断当前上下文，估算不写入 usage。无效预算使异步执行以 token_budget_unconfigured 失败；必须保留的输入或单个源轮次超预算时为 token_budget_exceeded。远端仍负责最终容量校验，失败不自动重发。context_compaction 直接初始化当前 Token 配置，revision 为 1；旧条数/字节设置及相应执行快照不做自动转换，版本 6 数据库不受支持。拒绝时保留已有数据和版本，不删除或重建数据库。
+
+#### conversation.context_usage
+
+```json
+{"jsonrpc":"2.0","id":"usage-new","method":"conversation.context_usage","params":{"model_id":"<model_id>","draft":"尚未发送的草稿"}}
+{"jsonrpc":"2.0","id":"usage-chat","method":"conversation.context_usage","params":{"conversation_id":"<conversation_id>","model_id":"<model_id>","draft":""}}
+```
+
+新对话可指定 workspace_id；已有对话从会话读取项目，不可另传 workspace_id。model_id 可在已有对话省略，使用会话模型。草稿只参与本次计算，不保存、不发送到模型；单条 RPC 仍受 1 MiB 输入边界限制。查询不会创建会话、运行或摘要，也不会触发自动压缩。
+
+result 包含 conversation_id（新对话为空）、model_id、可选 run_id、进程内递增 revision、updated_at（毫秒）、state、可选 reason、estimated_tokens、draft_tokens、input_limit、context_window、output_reserve、safety_margin、estimation_method 与 actual_input_tokens。state 为 ready 时 estimated_tokens 是非负整数；preparing（准备中）、refresh_required（来源变化需重查）、unavailable（reason=history_limit，历史无法安全恢复）时为 null。input_limit 是可用输入预算，context_window 是已配置模型窗口，未知保持 null；不能用未知值计算百分比。估算计入系统提示、工具定义、有效摘要、未覆盖历史与工具调用结果；执行中还计入已接受的生成内容，草稿单独叠加。预览沿有界完整轮次分页，检查消息边界、最后用户执行、有效摘要和设置版本，变化时不返回混合快照。
+
+实际输入 actual_input_tokens 只来自同一模型最近主调用的统一结果投影，缺失保持 null；与当前估算独立。新增主模型步骤将该标量保存在 output.context_usage.actual_input_tokens，原始 usage 不改写；旧记录不反向解析厂商私有响应。执行缓存使用受理时模型和设置，空闲查询使用当前配置；活动执行选择其他模型返回 busy。
+
+通知 conversation.context_usage.updated 的 params 含 conversation_id、run_id 与 context_usage（同一 DTO，不带草稿）。流式通知最多每 100ms 一次，最新数字仍可查询；工具结果、请求边界强制发布，终态持久化后、执行终态通知前发布 refresh_required。revision 只在当前进程有序，服务重连后客户端清空旧快照再查询。缓存仅在执行期间持有数字，无新增数据库表、计时 goroutine 或模型调用。
 
 #### conversation.compact
 
@@ -757,6 +772,7 @@ usage 片段响应示例：
 | `system.ready` | 服务信息 | 当前连接已就绪 |
 | `conversation.created` | `conversation_id`、`run_id`、`conversation` | 首次问题创建会话 |
 | `conversation.updated` | `conversation_id`、`conversation`，执行内通常还有 `run_id` | 更新会话属性或标题 |
+| `conversation.context_usage.updated` | `conversation_id`、`run_id`、`context_usage` | 更新当前执行数字快照；refresh_required 时重新查询有效历史 |
 | `run.started` | `conversation_id`、`run_id`、`run` | 记录受理执行及设置快照 |
 | `run.updated` | `conversation_id`、`run_id`、`run` | 更新运行／等待审批状态 |
 | `message.created` | 会话、执行、消息标识及 `message` | 新增用户或回答消息 |

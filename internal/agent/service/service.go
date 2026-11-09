@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
@@ -24,6 +25,9 @@ type Engine struct {
 	options       Options
 	inputMu       sync.Mutex
 	inputSignals  map[string]chan struct{}
+	usageMu       sync.RWMutex
+	usage         map[string]liveContextUsage
+	usageRevision atomic.Int64
 }
 
 // Options 保存运行时依赖；审批设置来自每次执行受理时持久化的快照。
@@ -43,7 +47,7 @@ func New(repository agent.Repository, conversations conversation.Repository, man
 			return nil, agent.ErrInvalid
 		}
 	}
-	return &Engine{repository: repository, conversations: conversations, manager: manager, emit: emit, logger: logger, options: options, inputSignals: make(map[string]chan struct{})}, nil
+	return &Engine{repository: repository, conversations: conversations, manager: manager, emit: emit, logger: logger, options: options, inputSignals: make(map[string]chan struct{}), usage: make(map[string]liveContextUsage)}, nil
 }
 
 func (e *Engine) event(ex conversation.Execution, name, stepID, messageID string, data any) error {

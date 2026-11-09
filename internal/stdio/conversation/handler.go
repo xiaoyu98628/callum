@@ -28,6 +28,12 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 	var value any
 	var err error
 	switch req.Method {
+	case "conversation.context_usage":
+		var p domain.ContextUsageRequest
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		value, err = h.service.ContextUsage(ctx, p)
 	case "conversation.context_versions":
 		var p struct {
 			ConversationID string `json:"conversation_id"`

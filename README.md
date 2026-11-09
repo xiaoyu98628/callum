@@ -492,6 +492,10 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 
 ## 上下文压缩
 
+`conversation.context_usage` 提供不调用模型、不保存草稿的只读上下文统计。新对话传 `model_id` 和可选 `workspace_id`、`draft`；已有对话传 `conversation_id`、可选 `model_id` 与 `draft`，不得再指定 workspace_id。统计共用实际请求的系统指令、项目目录、工具定义、有效摘要、未压缩历史和工具轨迹；活动执行还计入已接受的流式正文与推理。执行期间使用受理时的模型及设置快照，空闲预览使用当前配置。过长轨迹无法安全恢复时返回 unavailable，不显示局部计数。
+
+`estimated_tokens` 与 `actual_input_tokens` 分开：前者是当前有效上下文及草稿的估算，后者是本模型最近一次主调用返回的实际输入用量，缺失保持 null，不累加 usage 或解释厂商私有结果。实际值作为统一投影保存在现有模型步骤 output.context_usage，旧记录保持未知。`input_limit` 为扣除输出及安全预留后的可用输入预算；模型窗口或输入预算未知时保持 null，不推测容量。活动执行通过 `conversation.context_usage.updated` 发送数字快照，高频通知最多每 100ms 一次；结束发送 refresh_required，客户端重新读取持久化历史。缓存仅持有活动执行的数字，结束释放；无数据库结构变更。
+
 Go 服务支持 `conversation.compact` 手动压缩，并在每次回答模型请求前按设置自动检查有效上下文。手动压缩复用会话互斥、全局执行容量、`run.cancel`、执行与步骤查询，不创建用户消息或回答消息。原始消息、图片路径、模型结果和工具操作审计保留。
 
 `context_compaction` 是独立应用设置组，使用 `settings.get` 和携带 revision 的 `settings.update` 管理：

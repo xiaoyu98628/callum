@@ -79,3 +79,22 @@ func TestReasoningCountsTowardInputBudget(t *testing.T) {
 		t.Fatal("推理变化后复用了旧输入用量")
 	}
 }
+
+func TestTextCounterMatchesWholeTextAcrossFragments(t *testing.T) {
+	for _, text := range []string{"", "abcdefghijklmnopqrstuvwxyz 12345", "func main() {\n println(123) }", "中文约束👩‍💻与a b c结束", "ab,cd!é fg\t中文"} {
+		runes := []rune(text)
+		for width := 1; width <= 7; width++ {
+			var counter tokens.TextCounter
+			for i := 0; i < len(runes); i += width {
+				end := min(i+width, len(runes))
+				counter.Add(string(runes[i:end]))
+				if got, want := counter.Tokens(), tokens.Text(string(runes[:end])); got != want {
+					t.Fatalf("分片取整不同: width=%d got=%d want=%d", width, got, want)
+				}
+			}
+			if counter.Tokens() != tokens.Text(text) {
+				t.Fatal("最终计数不同")
+			}
+		}
+	}
+}

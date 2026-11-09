@@ -40,6 +40,8 @@ type Compact struct {
 
 // ContextRepository 管理摘要生命周期；生成模型输出期间不持有事务。
 type ContextRepository interface {
+	ContextState(context.Context, string) (ContextState, error)
+	ContextPage(context.Context, string, int64, int64) ([]Message, bool, error)
 	LoadContextHistory(context.Context, string, int64) ([]Message, *ContextVersion, bool, error)
 	ActiveContext(context.Context, string) (*ContextVersion, error)
 	ContextVersion(context.Context, string, string) (ContextVersion, error)
