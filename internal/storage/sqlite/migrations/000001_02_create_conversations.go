@@ -8,9 +8,13 @@ import (
 	"gorm.io/gorm"
 )
 
-// 会话、执行和步骤按外键依赖排列，消息及上下文版本依赖此前的表。
+// 项目目录、会话及执行相关表按外键依赖排列。
 func conversationTables() []any {
-	return []any{&schema.Workspace{}, &schema.Conversation{}, &schema.Run{}, &schema.Message{}, &schema.Step{}, &schema.ContextVersion{}}
+	return []any{&schema.Workspace{}, &schema.WorkspaceAdditionalFolder{}, &schema.Conversation{}, &schema.Run{}, &schema.Message{}, &schema.Step{}, &schema.ContextVersion{}}
+}
+
+func validateWorkspaceFolders(tx *gorm.DB) error {
+	return validateUniqueIndex(tx, "workspace_additional_folders", "uq_workspace_additional_folder", []string{"workspace_id", "path"})
 }
 
 func validateContextIndex(tx *gorm.DB) error {

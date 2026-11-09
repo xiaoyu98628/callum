@@ -13,3 +13,13 @@ type Workspace struct {
 }
 
 func (Workspace) TableName() string { return "workspaces" }
+
+// WorkspaceAdditionalFolder 保存项目的其他源目录，主目录由 Workspace 保存。
+type WorkspaceAdditionalFolder struct {
+	ID          int64      `gorm:"primaryKey;autoIncrement"`
+	WorkspaceID string     `gorm:"type:text;not null;uniqueIndex:uq_workspace_additional_folder,priority:1"`
+	Path        string     `gorm:"type:text;not null;uniqueIndex:uq_workspace_additional_folder,priority:2;index:ix_workspace_additional_folder_path;check:ck_workspace_additional_folder_path,length(path) > 0"`
+	Workspace   *Workspace `gorm:"foreignKey:WorkspaceID;references:ID;constraint:OnDelete:CASCADE"`
+}
+
+func (WorkspaceAdditionalFolder) TableName() string { return "workspace_additional_folders" }

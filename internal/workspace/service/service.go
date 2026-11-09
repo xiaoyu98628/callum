@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -21,17 +23,59 @@ func New(repository workspace.Repository) (*Service, error) {
 	return &Service{repository: repository}, nil
 }
 
-func (s *Service) Create(ctx context.Context, name, rootPath string) (workspace.Workspace, error) {
+// Create 保存项目。省略其他目录时，重新添加已删除的项目会保留原目录。
+func (s *Service) Create(ctx context.Context, name, rootPath string, otherPaths ...string) (workspace.Workspace, error) {
 	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 1024 || !filepath.IsAbs(rootPath) {
+	if name == "" || len(name) > 1024 || !validPath(rootPath) || len(otherPaths) > 15 {
 		return workspace.Workspace{}, workspace.ErrInvalid
+	}
+	rootPath = filepath.Clean(rootPath)
+	if len(otherPaths) > 0 {
+		actualRoot, rootInfo, err := realDirectory(rootPath)
+		if err != nil {
+			return workspace.Workspace{}, err
+		}
+		rootPath = actualRoot
+		seen := []os.FileInfo{rootInfo}
+		normalized := make([]string, 0, len(otherPaths))
+		for _, path := range otherPaths {
+			if err := ctx.Err(); err != nil {
+				return workspace.Workspace{}, err
+			}
+			actual, info, err := realDirectory(path)
+			if err != nil || slices.ContainsFunc(seen, func(previous os.FileInfo) bool { return os.SameFile(previous, info) }) {
+				return workspace.Workspace{}, workspace.ErrInvalid
+			}
+			seen = append(seen, info)
+			normalized = append(normalized, actual)
+		}
+		otherPaths = normalized
 	}
 	id, err := uuid.NewV7()
 	if err != nil {
 		return workspace.Workspace{}, err
 	}
 	now := time.Now().UnixMilli()
-	return s.repository.Create(ctx, workspace.Workspace{ID: id.String(), Name: name, RootPath: filepath.Clean(rootPath), CreatedAt: now, UpdatedAt: now})
+	return s.repository.Create(ctx, workspace.Workspace{ID: id.String(), Name: name, RootPath: rootPath, OtherPaths: otherPaths, CreatedAt: now, UpdatedAt: now})
+}
+
+func validPath(path string) bool {
+	return len(path) <= 8192 && !strings.ContainsRune(path, 0) && filepath.IsAbs(path)
+}
+
+func realDirectory(path string) (string, os.FileInfo, error) {
+	if !validPath(path) {
+		return "", nil, workspace.ErrInvalid
+	}
+	actual, err := filepath.EvalSymlinks(path)
+	if err != nil || !validPath(actual) {
+		return "", nil, workspace.ErrInvalid
+	}
+	info, err := os.Stat(actual)
+	if err != nil || !info.IsDir() {
+		return "", nil, workspace.ErrInvalid
+	}
+	return actual, info, nil
 }
 
 func validID(id string) bool {

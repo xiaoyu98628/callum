@@ -24,6 +24,7 @@ func TestPatchToolsThroughStdio(t *testing.T) {
 	for _, test := range []struct {
 		name, policy, decision                                    string
 		update, outside, stream, changeDuringApproval, fragmented bool
+		additional                                                bool
 	}{
 		{name: "create_workspace"},
 		{name: "create_never", policy: "never"},
@@ -32,6 +33,7 @@ func TestPatchToolsThroughStdio(t *testing.T) {
 		{name: "always_approve", policy: "always", decision: "approved"},
 		{name: "always_reject", policy: "always", decision: "rejected"},
 		{name: "outside_approve", outside: true, decision: "approved", stream: true},
+		{name: "additional_folder_approve", outside: true, additional: true, decision: "approved"},
 		{name: "outside_never", outside: true, policy: "never"},
 		{name: "cancel_waiting", policy: "always", decision: "cancel"},
 		{name: "version_changed", update: true, policy: "always", decision: "approved", changeDuringApproval: true},
@@ -186,7 +188,11 @@ func TestPatchToolsThroughStdio(t *testing.T) {
 				setApprovalPolicy(t, p, test.policy)
 			}
 			mid := setupConversationModel(t, p, upstream.URL)
-			workspaceID := resultString(t, p.call(t, "workspace.create", map[string]any{"name": "文件工具", "root_path": workspace}), "id")
+			create := map[string]any{"name": "文件工具", "root_path": workspace}
+			if test.additional {
+				create["other_paths"] = []string{outside}
+			}
+			workspaceID := resultString(t, p.call(t, "workspace.create", create), "id")
 			accepted := p.call(t, "conversation.send", map[string]any{"workspace_id": workspaceID, "model_id": mid, "stream": test.stream, "content": messageBlocks("创建或修改文件")})
 			runID := resultString(t, accepted, "run_id")
 			if test.fragmented {

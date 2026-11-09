@@ -17,13 +17,14 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request) (any, *proto
 	switch req.Method {
 	case "workspace.create":
 		var p struct {
-			Name     string `json:"name"`
-			RootPath string `json:"root_path"`
+			Name       string   `json:"name"`
+			RootPath   string   `json:"root_path"`
+			OtherPaths []string `json:"other_paths"`
 		}
 		if err := protocol.DecodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
-		value, err := h.service.Create(ctx, p.Name, p.RootPath)
+		value, err := h.service.Create(ctx, p.Name, p.RootPath, p.OtherPaths...)
 		return value, publicError(err)
 	case "workspace.list":
 		var p domain.Filter

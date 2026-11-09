@@ -2,14 +2,15 @@ package workspace
 
 // Workspace 是用户任务操作的项目目录，不是应用数据目录。
 type Workspace struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	RootPath   string `json:"root_path"`
-	PinnedAt   *int64 `json:"pinned_at"`
-	ArchivedAt *int64 `json:"archived_at"`
-	DeletedAt  *int64 `json:"deleted_at"`
-	CreatedAt  int64  `json:"created_at"`
-	UpdatedAt  int64  `json:"updated_at"`
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	RootPath   string   `json:"root_path"`
+	OtherPaths []string `json:"other_paths"`
+	PinnedAt   *int64   `json:"pinned_at"`
+	ArchivedAt *int64   `json:"archived_at"`
+	DeletedAt  *int64   `json:"deleted_at"`
+	CreatedAt  int64    `json:"created_at"`
+	UpdatedAt  int64    `json:"updated_at"`
 }
 
 // Change 只更新明确提供的字段；false 清除对应状态时间。

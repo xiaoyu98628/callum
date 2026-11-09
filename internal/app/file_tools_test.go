@@ -22,6 +22,7 @@ func TestFileToolsIndependentOfWorkspaceThroughStdio(t *testing.T) {
 		bound, inside, relative, symlink, replace, stream bool
 		capabilities                                      map[string]bool
 		modelTypes                                        []string
+		additional                                        bool
 	}{
 		{name: "unbound_automatic_stream", stream: true},
 		{name: "tools_false_does_not_disable_tools", capabilities: map[string]bool{"tools": false}, modelTypes: []string{"text"}},
@@ -34,6 +35,8 @@ func TestFileToolsIndependentOfWorkspaceThroughStdio(t *testing.T) {
 		{name: "workspace_absolute_inside_never", bound: true, inside: true, policy: "never"},
 		{name: "workspace_absolute_inside_always", bound: true, inside: true, policy: "always", decision: "approved"},
 		{name: "workspace_absolute_outside", bound: true},
+		{name: "workspace_additional_absolute", bound: true, additional: true},
+		{name: "workspace_main_relative_with_additional", bound: true, inside: true, relative: true, additional: true},
 		{name: "workspace_outside_never", bound: true, policy: "never"},
 		{name: "workspace_symlink_outside", bound: true, symlink: true, relative: true},
 		{name: "unbound_directory", operation: "list_directory"},
@@ -46,6 +49,14 @@ func TestFileToolsIndependentOfWorkspaceThroughStdio(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			workspaceRoot, outside := t.TempDir(), t.TempDir()
+			actualRoot, err := filepath.EvalSymlinks(workspaceRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			actualOther, err := filepath.EvalSymlinks(outside)
+			if err != nil {
+				t.Fatal(err)
+			}
 			root := outside
 			if test.inside {
 				root = workspaceRoot
@@ -92,6 +103,18 @@ func TestFileToolsIndependentOfWorkspaceThroughStdio(t *testing.T) {
 				}
 				if len(request.Tools) != 6 {
 					t.Errorf("未绑定工作区时丢失工具定义: %d", len(request.Tools))
+				}
+				if test.additional {
+					found := false
+					for _, message := range request.Messages {
+						if message.Role == "user" && bytes.Contains([]byte(message.Content), []byte(actualRoot)) &&
+							bytes.Contains([]byte(message.Content), []byte(actualOther)) {
+							found = true
+						}
+					}
+					if !found {
+						t.Error("模型请求缺少主目录和其他目录")
+					}
 				}
 				last := request.Messages[len(request.Messages)-1]
 				if last.Role == "tool" {
@@ -150,7 +173,11 @@ func TestFileToolsIndependentOfWorkspaceThroughStdio(t *testing.T) {
 			}
 			params := map[string]any{"model_id": mid, "stream": test.stream, "content": messageBlocks("读取指定目标")}
 			if test.bound {
-				params["workspace_id"] = resultString(t, p.call(t, "workspace.create", map[string]any{"name": "项目", "root_path": workspaceRoot}), "id")
+				create := map[string]any{"name": "项目", "root_path": workspaceRoot}
+				if test.additional {
+					create["other_paths"] = []string{outside}
+				}
+				params["workspace_id"] = resultString(t, p.call(t, "workspace.create", create), "id")
 			}
 			accepted := p.call(t, "conversation.send", params)
 			runID := resultString(t, accepted, "run_id")

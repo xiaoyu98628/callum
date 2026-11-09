@@ -72,7 +72,7 @@ func validateSchema(tx *gorm.DB, tables []any) error {
 			return err
 		}
 	}
-	for _, validate := range []func(*gorm.DB) error{validateCatalog, validateContextIndex, validateApprovals, validateSettings} {
+	for _, validate := range []func(*gorm.DB) error{validateCatalog, validateWorkspaceFolders, validateContextIndex, validateApprovals, validateSettings} {
 		if err := validate(tx); err != nil {
 			return err
 		}

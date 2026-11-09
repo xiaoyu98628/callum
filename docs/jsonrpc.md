@@ -457,10 +457,12 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 `create`、`get` 返回工作区对象：
 
 ```json
-{"id":"<workspace_id>","name":"JSON-RPC 测试工作区","root_path":"<workspace_path>","pinned_at":null,"archived_at":null,"deleted_at":null,"created_at":1700000000000,"updated_at":1700000000000}
+{"id":"<workspace_id>","name":"JSON-RPC 测试工作区","root_path":"<workspace_path>","other_paths":[],"pinned_at":null,"archived_at":null,"deleted_at":null,"created_at":1700000000000,"updated_at":1700000000000}
 ```
 
-`list` 返回对象数组。过滤与分页默认值同会话列表；`limit` 为 1 至 200。工作区根路径必须是绝对路径，重复的规范化路径返回冲突。
+`list` 返回对象数组，`limit` 为 1 至 200。主目录必须是绝对路径，已存在的主目录返回冲突。创建时可附带 `other_paths`，最多 15 个其他目录。多目录创建会解析符号链接、检查所有目录实际存在，并拒绝同项目内重复的目录。项目和其他目录在同一事务保存。
+
+工作区对象中的 `other_paths` 按路径排序，无其他目录时返回空数组。同主目录重新添加已软删除的项目时，省略 `other_paths` 保留原目录，显式提供该字段时以新列表为准，包括空数组。
 
 ### workspace.update
 
@@ -471,7 +473,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"jsonrpc":"2.0","id":"workspace-unarchive","method":"workspace.update","params":{"id":"<workspace_id>","archived":false}}
 ```
 
-返回更新后的工作区对象；本接口不接受 `root_path`。工作区有关联活动执行时，归档或删除状态变更会返回 `1006`。
+返回更新后的工作区对象，目录通过创建接口设置。工作区有关联活动执行时，归档或删除状态变更会返回 `1006`。
 
 ### workspace.delete / workspace.restore
 
