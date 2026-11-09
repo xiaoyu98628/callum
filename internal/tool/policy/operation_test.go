@@ -8,7 +8,7 @@ import (
 )
 
 func TestOperationDecisionPrecedenceAndDirectoryGrant(t *testing.T) {
-	sandboxed := &tool.CommandBoundary{Sandboxed: true, Mode: tool.SandboxWorkspaceWrite}
+	sandboxed := &tool.CommandBoundary{Sandboxed: true, Mode: tool.SandboxReadOnly}
 	for _, tt := range []struct {
 		name      string
 		policy    policy.ApprovalPolicy

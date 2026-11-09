@@ -76,8 +76,12 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 		name, policy, decision, mode string
 		bound, stream                bool
 	}{
-		{"sandbox_automatic", "on-request", "", "write", true, false},
-		{"sandbox_never_automatic", "never", "", "write", true, false},
+		{"sandbox_automatic", "on-request", "", "read", true, false},
+		{"sandbox_never_automatic", "never", "", "read", true, false},
+		{"sandbox_unlink", "on-request", "", "unlink", true, false},
+		{"sandbox_script_unlink", "on-request", "", "script_unlink", true, false},
+		{"sandbox_workspace_approve", "on-request", "approved", "write", true, false},
+		{"sandbox_workspace_never", "never", "", "write", true, false},
 		{"workspace_approve", "on-request", "approved", "write", true, false},
 		{"absolute_cwd_stream", "on-request", "approved", "stream", false, true},
 		{"always_reject", "always", "rejected", "write", true, true},
@@ -89,8 +93,10 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 		{"shutdown_children", "on-request", "approved", "shutdown", true, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			automatic := strings.HasPrefix(test.name, "sandbox_")
-			if automatic && runtime.GOOS != "darwin" {
+			sandboxed := strings.HasPrefix(test.name, "sandbox_")
+			deletion := test.mode == "unlink" || test.mode == "script_unlink"
+			automatic := test.mode == "read" || deletion
+			if sandboxed && runtime.GOOS != "darwin" {
 				t.Skip("该平台尚未接入自动命令沙箱")
 			}
 			cwd := t.TempDir()
@@ -98,7 +104,18 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 			release := filepath.Join(cwd, "release")
 			heartbeat := filepath.Join(cwd, "heartbeat")
 			command := []string{helper, "write", marker}
+			if deletion {
+				if err := os.WriteFile(marker, []byte("preserved"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
 			switch test.mode {
+			case "unlink":
+				command = []string{"/bin/unlink", marker}
+			case "script_unlink":
+				command = []string{"/bin/sh", "-c", `/bin/unlink "$1"`, "sh", marker}
+			case "read":
+				command = []string{"/bin/pwd"}
 			case "stream":
 				command = []string{helper, "stream", release}
 			case "exit":
@@ -113,6 +130,8 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 			if automatic {
 				delete(args, "sandbox_permissions")
 				delete(args, "justification")
+			} else if sandboxed {
+				args["sandbox_permissions"] = "workspace_write"
 			}
 			if !test.bound {
 				args["cwd"] = cwd
@@ -211,7 +230,7 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !filepath.IsAbs(details.Executable) || details.Cwd != actual || details.Sandboxed || len(operation.Tool.Effects) != 1 || operation.Tool.Effects[0] != tool.EffectUnknown {
+				if !filepath.IsAbs(details.Executable) || details.Cwd != actual || details.Sandboxed != sandboxed || len(operation.Tool.Effects) != 1 || operation.Tool.Effects[0] != tool.EffectUnknown {
 					t.Fatalf("命令审批详情不完整: %s", event.Approval.Request)
 				}
 				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
@@ -320,6 +339,11 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 					t.Fatal("未批准的命令产生副作用")
 				}
 			}
+			if deletion {
+				if data, err := os.ReadFile(marker); err != nil || string(data) != "preserved" || saved.Result.ExitCode == nil || *saved.Result.ExitCode == 0 {
+					t.Fatal("只读沙箱没有阻止删除")
+				}
+			}
 			if test.mode == "write" && want == tool.OutcomeApplied {
 				if data, err := os.ReadFile(marker); err != nil || string(data) != "executed" {
 					t.Fatal("命令未执行")
@@ -340,4 +364,80 @@ func TestCommandToolsThroughStdio(t *testing.T) {
 			p.stop(t)
 		})
 	}
+}
+
+func TestDefaultCommandCannotReadApplicationCredentials(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("验证 macOS 自动命令的文件隔离")
+	}
+	const fixtureKey = "fixture-other-provider-private-key"
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawArgs, err := json.Marshal(map[string]any{
+		"command": []string{"/usr/bin/sqlite3", "-readonly", cfg.DatabasePath, "SELECT api_key FROM model_providers WHERE name='fixture-only'"},
+		"cwd":     t.TempDir(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var results atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var input struct {
+			Tools    []json.RawMessage
+			Messages []struct{ Role, Content string }
+		}
+		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || len(input.Messages) == 0 {
+			t.Errorf("请求无效: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		last := input.Messages[len(input.Messages)-1]
+		switch {
+		case len(input.Tools) == 0:
+			writeFileToolResponse(t, w, false, map[string]any{"content": "权限核对"}, "stop")
+		case last.Role == "tool":
+			if strings.Contains(last.Content, fixtureKey) {
+				t.Error("凭据进入模型工具消息")
+			}
+			results.Add(1)
+			writeFileToolResponse(t, w, false, map[string]any{"content": "核对完成"}, "stop")
+		default:
+			call := map[string]any{"id": "protected-db", "type": "function", "function": map[string]any{"name": "run_command", "arguments": string(rawArgs)}}
+			writeFileToolResponse(t, w, false, map[string]any{"tool_calls": []any{call}}, "tool_calls")
+		}
+	}))
+	defer upstream.Close()
+	p := startApp(t, cfg, io.Discard)
+	requireOK(t, p.call(t, "provider.create", map[string]any{"name": "fixture-only", "protocol": "chatcompletions", "base_url": upstream.URL + "/v1", "api_key": fixtureKey}))
+	mid := setupConversationModel(t, p, upstream.URL)
+	runID := resultString(t, p.call(t, "conversation.send", map[string]any{"model_id": mid, "stream": false, "content": messageBlocks("核对权限")}), "run_id")
+	p.event(t, "run.completed")
+	_, raw := commandStepOutput(t, p, runID)
+	var output struct {
+		Result struct {
+			ExitCode *int `json:"exit_code"`
+		}
+	}
+	if err := json.Unmarshal(raw, &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Result.ExitCode == nil || *output.Result.ExitCode == 0 || results.Load() != 1 || strings.Contains(string(raw), fixtureKey) {
+		t.Fatalf("应用数据库的隔离未生效: %s", raw)
+	}
+	for _, event := range p.pending {
+		if event.Method != "tool.output" {
+			continue
+		}
+		var chunk struct{ Output agent.ToolOutput }
+		if err := json.Unmarshal(event.Params, &chunk); err != nil {
+			t.Fatal(err)
+		}
+		data, err := base64.StdEncoding.DecodeString(chunk.Output.Data)
+		if err != nil || strings.Contains(string(data), fixtureKey) {
+			t.Fatal("命令事件包含无效输出或凭据")
+		}
+	}
+	p.stop(t)
 }

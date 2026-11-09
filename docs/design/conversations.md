@@ -117,9 +117,9 @@ HTTP、WebSocket 和 CLI 接入尚未实现，后续入口复用业务服务及�
 
 创建、编辑和状态变更按业务动作定义事务，不在等待模型、工具、用户输入时占用事务。
 关闭时停止接收、取消并等待任务、结束待审批记录，再关闭通信、HTTP 连接池和数据库。恢复中断执行前确认数据目录实例所有权。
-建表文件为 000001_create_model_config.go、000002_create_conversation_core.go、000003_create_run_approvals.go、000004_create_app_settings.go、000005_create_context_versions.go、000006_create_directory_grants.go；当前结构版本 6，版本 1 至 5 经校验后保留数据升级。独立压缩设置组直接初始化当前 Token 配置，revision 为 1；不提供旧条数、字节阈值及其执行快照的数据转换。
-开发阶段不转换旧 model_type 功能标签；模型配置使用内容类型规则校验。
-版本判断同时验证实际结构，兼容当前版本 1 的 UUIDv7 配置库；迁移失败回滚，不重建用户数据库。
+建表按业务分组，`000001_01_create_catalog.go` 管理厂商和模型，`000001_02_create_conversations.go` 管理对话及执行表，`000001_03_create_approvals.go` 管理审批和目录授权，`000001_04_create_settings.go` 管理应用设置。文件名前缀对应结构版本，组内序号表示建表顺序。空库在一个事务内直接建成版本 `1`，默认执行和压缩设置组的 revision 均为 `1`。
+
+打开已有库同时验证版本和实际结构。旧结构或不支持的版本保留原数据并返回错误。初始化失败整体回滚。开发联调可指定独立数据目录建库。
 验证包括迁移、约束、事务回滚、多会话隔离、取消、重发、标题竞争、流式异常、资源关闭及 usage 保存，并运行项目规定的完整检查。
 
 
@@ -208,11 +208,11 @@ internal/agent/transcript 负责执行轨迹配对校验、失败回答过滤、
 
 `SnapshotInvocation` 是可选的工具契约，详情保存到审批 request.details，最多 16 KiB 非空 JSON 对象。命令准备仅固定句柄和元数据，详情记录实际可执行文件及身份、大小和修改时间、cwd 及身份、环境配置名单与摘要，不保存环境值；固定参数及可选工作区仍使用原字段。执行器复制快照并纳入 request_hash，执行前比较；命令再次核对请求路径、目标与工作区身份。未实现此接口的工具不新增字段，旧文件审批指纹保持原样。元数据校验不是依赖图锁定或原子执行保证。
 
-环境由 app 传入并按 base-v1 白名单筛选，只保留基础路径和语言变量，不允许模型覆盖，不继承模型 Key、令牌或任意代理配置。命令 effects 固定 unknown；PermissionTool 接收服务端快照中的 SandboxMode，CommandInvocation 返回固定执行边界，执行器将其纳入快照并在执行前复核。命令 effects 仍为 unknown，不按 ls、cat 等命令文字伪装为读取。服务端另固定实际执行边界：macOS 的新任务默认通过 /usr/bin/sandbox-exec 使用 Seatbelt；命令及后代可读取当前用户可读的文件，网络关闭，workspace-write 仅开放真实项目及每次命令的私有临时目录写入，read-only 或未绑定项目仅开放该临时目录写入。项目路径下 .git、.codex、.agents、.aws 的直接写入被拒绝。常用 Go/npm 缓存定向到私有临时目录，结束后删除；未安装的依赖不能通过命令联网下载。模型客户端的网络请求不受命令沙箱限制。
+环境由 app 传入并按 base-v1 白名单筛选，只保留基础路径和语言变量，不允许模型覆盖，不继承模型 Key、令牌或任意代理配置。PermissionTool 接收服务端快照中的 SandboxMode，CommandInvocation 返回固定执行边界，执行器将其纳入快照并在执行前复核。命令 effects 固定为 `unknown`。macOS 使用 `/usr/bin/sandbox-exec` 启动 Seatbelt，默认只读，网络关闭，仅本次命令的私有临时目录可写。内置文件工具和 Seatbelt 命令禁止访问 Callum 自身数据目录，目录搜索跳过该目录。沙箱内项目写入也限制重命名该目录在项目内的祖先路径。文件工具拒绝以其他路径访问 SQLite 文件及附属文件。SQLite 文件存在硬链接时拒绝启动 Seatbelt 命令。项目中的 `.git`、`.codex`、`.agents`、`.aws` 仍受写入限制。Go/npm 临时缓存使用本次命令的私有临时目录。
 
-on-request 自动执行普通沙箱命令；已识别的删除、权限修改及敏感 Git 命令仍询问，批准后也保留原沙箱。该识别不保证分析任意脚本的业务影响。always 对有效调用逐次询问；never 执行允许的沙箱调用并拒绝仍需审批的操作。沙箱执行失败直接保留退出码及错误，不自动在沙箱外重试。系统沙箱无法启动时明确失败，不降级为无隔离执行。
+`on-request` 自动执行普通只读沙箱命令，已识别的高风险命令逐次询问。`always` 对有效调用逐次询问，`never` 拒绝需要审批的调用。沙箱失败保留退出码及错误，任何更高权限都需要新的明确请求。
 
-确需扩大权限时，模型必须提交 sandbox_permissions: "require_escalated" 及非空 justification。服务端生成本次沙箱外执行快照并请求独立审批；批准只允许本次固定命令使用当前系统用户的文件和网络权限，不保存命令前缀或目录授权。never 拒绝该请求。可选 sandbox_permissions: "use_default" 与省略一致。Linux/Windows 尚未接入系统沙箱，仍对每次命令请求审批，不宣称具有 macOS 的隔离能力。
+`sandbox_permissions` 省略或为 `use_default` 时，macOS 命令保持只读沙箱。需要项目写入时，提交 `workspace_write` 及非空 `justification`。服务端要求绑定工作区、受理快照允许项目写入和单次审批。批准后，命令可修改或删除真实工作区内的文件，网络仍关闭。请求 `require_escalated` 同样需要说明和单次审批，批准后使用当前系统用户的文件和网络权限。Linux/Windows 当前命令逐次审批，`workspace_write` 在没有系统沙箱时不可用。
 
 Seatbelt 是共享文件系统上的路径访问边界，不是容器或独立文件系统：项目内既有文件的其他硬链接会共享修改，项目内已可写的别名也不构成独立副本；新建硬链接被默认拒绝。路径固定及执行前复核不保证抵抗同时发生的外部重命名，也不锁定程序的完整依赖图。应将项目根目录设为实际任务目录，而非整个用户目录。
 

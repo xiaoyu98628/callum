@@ -7,6 +7,6 @@ import (
 )
 
 // Tools 返回独立的工具实例，将装配层环境交给具体工具筛选并固定。
-func Tools(environment []string) []tool.Tool {
-	return []tool.Tool{run.New(environment)}
+func Tools(environment []string, protection tool.ProtectedData) []tool.Tool {
+	return []tool.Tool{run.New(environment, protection)}
 }

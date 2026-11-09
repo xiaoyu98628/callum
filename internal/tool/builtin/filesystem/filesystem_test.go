@@ -25,7 +25,7 @@ func TestWorkspaceToolsAndPermissionBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := registry.New()
-	for _, instance := range filesystem.Tools() {
+	for _, instance := range filesystem.Tools(tool.ProtectedData{}) {
 		if err := r.Register(instance); err != nil {
 			t.Fatal(err)
 		}
@@ -75,7 +75,7 @@ func TestReadVersionCanAuthorizePatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := registry.New()
-	for _, instance := range filesystem.Tools() {
+	for _, instance := range filesystem.Tools(tool.ProtectedData{}) {
 		if err := r.Register(instance); err != nil {
 			t.Fatal(err)
 		}
@@ -135,7 +135,7 @@ func TestFileTargetsWithAndWithoutWorkspace(t *testing.T) {
 		}
 	}
 	r := registry.New()
-	for _, instance := range filesystem.Tools() {
+	for _, instance := range filesystem.Tools(tool.ProtectedData{}) {
 		if err := r.Register(instance); err != nil {
 			t.Fatal(err)
 		}
@@ -247,7 +247,7 @@ func TestPreparedTargetCannotBeRedirected(t *testing.T) {
 				path = link
 			}
 			r := registry.New()
-			for _, instance := range filesystem.Tools() {
+			for _, instance := range filesystem.Tools(tool.ProtectedData{}) {
 				if err := r.Register(instance); err != nil {
 					t.Fatal(err)
 				}
@@ -325,7 +325,7 @@ func TestDirectorySearchStaysWithinApprovedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := registry.New()
-	for _, instance := range filesystem.Tools() {
+	for _, instance := range filesystem.Tools(tool.ProtectedData{}) {
 		if err := r.Register(instance); err != nil {
 			t.Fatal(err)
 		}
@@ -363,4 +363,88 @@ func TestDirectorySearchStaysWithinApprovedTarget(t *testing.T) {
 	if err != nil || output.Matches[0].Path != want {
 		t.Fatalf("搜索了相邻目录: %s %v", result.Output, err)
 	}
+}
+
+func TestToolsProtectApplicationDirectoryAndSQLiteAliases(t *testing.T) {
+	root := t.TempDir()
+	data := filepath.Join(root, "private")
+	if err := os.Mkdir(data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = filepath.Join(root, "private")
+	secret, normal := filepath.Join(data, "secret.txt"), filepath.Join(root, "ordinary.txt")
+	database := filepath.Join(data, "callum.db")
+	for path, value := range map[string]string{secret: "needle private", database: "needle database", normal: "needle ordinary"} {
+		if err := os.WriteFile(path, []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := registry.New()
+	for _, instance := range filesystem.Tools(tool.ProtectedData{Directory: data, Database: database}) {
+		if err := r.Register(instance); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e, err := executor.New(r, time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := tool.Scope{ID: "test-workspace", RootPath: root}
+	prepare := func(name string, args any) (*executor.Prepared, error) {
+		t.Helper()
+		raw, err := json.Marshal(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return e.Prepare(t.Context(), scope, name, raw)
+	}
+	denied := func(t *testing.T, name string, args any) {
+		t.Helper()
+		call, err := prepare(name, args)
+		if call != nil {
+			if err := call.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !errors.Is(err, tool.ErrDenied) {
+			t.Fatalf("%s 没有拒绝受保护目标: %v", name, err)
+		}
+	}
+	denied(t, "read_file", map[string]string{"path": secret})
+	denied(t, "list_directory", map[string]string{"path": data})
+	denied(t, "search_text", map[string]string{"path": data, "query": "needle"})
+	denied(t, "apply_patch", map[string]any{"patch": "*** Begin Patch\n*** Add File: private/new.txt\n+blocked\n*** End Patch", "base_versions": []any{}})
+	call, err := prepare("search_text", map[string]string{"path": root, "query": "needle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := e.Execute(t.Context(), call, call.Hash())
+	if closeErr := call.Close(); err != nil || closeErr != nil {
+		t.Fatal(errors.Join(err, closeErr))
+	}
+	var found struct{ Matches []struct{ Path string } }
+	if err := json.Unmarshal(result.Output, &found); err != nil {
+		t.Fatal(err)
+	}
+	if len(found.Matches) != 1 || found.Matches[0].Path != normal {
+		t.Fatalf("搜索未隔离应用数据: %s", result.Output)
+	}
+	t.Run("hard_link", func(t *testing.T) {
+		alias := filepath.Join(root, "linked-database")
+		if err := os.Link(database, alias); err != nil {
+			t.Skipf("测试文件系统不支持硬链接: %v", err)
+		}
+		denied(t, "read_file", map[string]string{"path": alias})
+	})
+	t.Run("symbolic_link", func(t *testing.T) {
+		alias := filepath.Join(root, "linked-secret")
+		if err := os.Symlink(secret, alias); err != nil {
+			t.Skipf("无法创建测试符号链接: %v", err)
+		}
+		denied(t, "read_file", map[string]string{"path": alias})
+	})
 }

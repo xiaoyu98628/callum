@@ -20,7 +20,7 @@ import (
 func patchTestExecutor(t *testing.T) *executor.Executor {
 	t.Helper()
 	r := registry.New()
-	if err := r.Register(New()); err != nil {
+	if err := r.Register(New(tool.ProtectedData{})); err != nil {
 		t.Fatal(err)
 	}
 	e, err := executor.New(r, 5*time.Second)
@@ -270,7 +270,7 @@ func TestPatchCancellationPreservesAppliedFilesAndRecoveryCopies(t *testing.T) {
 	for _, path := range []string{first, second} {
 		patchTestWrite(t, path, before)
 	}
-	instance := New()
+	instance := New(tool.ProtectedData{})
 	raw := patchTestArgs(t, "*** Update File: one\n@@\n head\n-old\n+new\n tail\n*** Update File: two\n@@\n head\n-old\n+new\n tail", patchVersion{"one", textSHA256([]byte(before))}, patchVersion{"two", textSHA256([]byte(before))})
 	normalized, err := instance.Validate(raw)
 	if err != nil {
@@ -318,7 +318,7 @@ func TestPatchLargeReplacementRequiresApproval(t *testing.T) {
 }
 
 func TestPatchValidationRejectsMissingOrExtraVersions(t *testing.T) {
-	instance := New()
+	instance := New(tool.ProtectedData{})
 	for _, raw := range []json.RawMessage{
 		patchTestArgs(t, "*** Update File: a\n@@\n-x\n+y"),
 		patchTestArgs(t, "*** Add File: a\n+x", patchVersion{"a", strings.Repeat("0", 64)}),
@@ -335,7 +335,7 @@ func TestPatchValidationRejectsMissingOrExtraVersions(t *testing.T) {
 }
 
 func TestPatchArgumentsRejectAmbiguousJSON(t *testing.T) {
-	instance := New()
+	instance := New(tool.ProtectedData{})
 	valid := string(patchTestArgs(t, "*** Update File: a\n@@\n-x\n+y", patchVersion{"a", strings.Repeat("0", 64)}))
 	for _, raw := range []string{
 		valid + ` {}`,
@@ -482,7 +482,7 @@ func (c *replaceCreatedPatchParent) Err() error {
 }
 func TestPatchDoesNotContinueThroughReplacedCreatedParent(t *testing.T) {
 	dir := t.TempDir()
-	instance := New()
+	instance := New(tool.ProtectedData{})
 	raw, err := instance.Validate(patchTestArgs(t, "*** Add File: created/nested/note\n+data"))
 	if err != nil {
 		t.Fatal(err)

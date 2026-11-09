@@ -117,7 +117,10 @@ func EvaluateCommand(p ApprovalPolicy, boundary tool.CommandBoundary) Decision {
 	if boundary.Risk != "" {
 		return RequiresApproval(p, boundary.Risk)
 	}
-	if boundary.Sandboxed && boundary.Mode.Valid() {
+	if boundary.Sandboxed && boundary.Mode == tool.SandboxWorkspaceWrite {
+		return RequiresApproval(p, "sandbox_workspace_write")
+	}
+	if boundary.Sandboxed && boundary.Mode == tool.SandboxReadOnly {
 		if p == Always {
 			return Decision{Ask, "policy_always"}
 		}

@@ -136,7 +136,7 @@ func (p *patchInvocation) prepareTarget(ctx context.Context, entry *patchTarget,
 		requested = filepath.Join(p.scope.RootPath, requested)
 	}
 	if entry.patch.action == "update" {
-		fixed, err := fileaccess.Prepare(ctx, p.scope, requested, fileaccess.File)
+		fixed, err := fileaccess.Prepare(ctx, p.scope, requested, fileaccess.File, p.owner.protection)
 		if err != nil {
 			return err
 		}
@@ -160,6 +160,9 @@ func (p *patchInvocation) prepareTarget(ctx context.Context, entry *patchTarget,
 		}
 		entry.target = tool.Target{RequestedPath: requested, Path: actual, Kind: "file"}
 		entry.basePath, entry.baseInfo, entry.missing = base, info, missing
+	}
+	if p.owner.protection.Contains(entry.target.Path) {
+		return tool.ErrDenied
 	}
 	if len(entry.target.Path) > 1024 {
 		return tool.ErrLimit

@@ -21,13 +21,15 @@ func prepareSandboxTest(t *testing.T, root string, command []string, mode tool.S
 	t.Helper()
 	a := arguments{Command: command, Cwd: root}
 	if elevated {
-		a.SandboxPermissions, a.Justification = "require_escalated", "在临时测试目录验证本次明确授权"
+		a.SandboxPermissions, a.Justification = sandboxEscalated, "在临时测试目录验证本次明确授权"
+	} else if mode == tool.SandboxWorkspaceWrite {
+		a.SandboxPermissions, a.Justification = sandboxProjectWrite, "验证临时项目的沙箱写入边界"
 	}
 	raw, err := json.Marshal(a)
 	if err != nil {
 		t.Fatal(err)
 	}
-	call, err := New(os.Environ()).(*commandTool).PrepareWithPermissions(t.Context(), tool.Scope{ID: "test-workspace", RootPath: root}, raw, tool.ExecutionPermissions{SandboxMode: mode})
+	call, err := New(os.Environ(), tool.ProtectedData{}).(*commandTool).PrepareWithPermissions(t.Context(), tool.Scope{ID: "test-workspace", RootPath: root}, raw, tool.ExecutionPermissions{SandboxMode: mode})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +65,7 @@ func TestSeatbeltEnforcesWritesProcessesAndNetwork(t *testing.T) {
 		mode    tool.SandboxMode
 		success bool
 	}{
-		{"pwd", []string{"/bin/pwd"}, tool.SandboxWorkspaceWrite, true},
+		{"pwd", []string{"/bin/pwd"}, tool.SandboxReadOnly, true},
 		{"workspace-write", []string{helper, "write", filepath.Join(root, "ordinary")}, tool.SandboxWorkspaceWrite, true},
 		{"outside-write", []string{helper, "write", filepath.Join(outside, "blocked")}, tool.SandboxWorkspaceWrite, false},
 		{"symlink-write", []string{helper, "write", filepath.Join(root, "linked", "blocked")}, tool.SandboxWorkspaceWrite, false},
@@ -78,8 +80,12 @@ func TestSeatbeltEnforcesWritesProcessesAndNetwork(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			call, tmp := prepareSandboxTest(t, root, test.command, test.mode, false)
-			if decision := policy.EvaluateCommand(policy.OnRequest, call.CommandBoundary()); decision.Action != policy.Allow {
-				t.Fatalf("普通沙箱命令未自动放行: %+v", decision)
+			want := policy.Allow
+			if test.mode == tool.SandboxWorkspaceWrite {
+				want = policy.Ask
+			}
+			if decision := policy.EvaluateCommand(policy.OnRequest, call.CommandBoundary()); decision.Action != want {
+				t.Fatalf("沙箱审批判定错误: %+v", decision)
 			}
 			result, err := call.Execute(t.Context())
 			if err != nil {
@@ -174,5 +180,69 @@ func TestSeatbeltEscalationAndStableOperationIdentity(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outside, "explicitly-approved")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestSeatbeltProtectsApplicationData(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "private")
+	data := filepath.Join(parent, "app-data")
+	if err := os.MkdirAll(data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	database, alias := filepath.Join(data, "callum.db"), filepath.Join(root, "alias")
+	if err := os.WriteFile(database, []byte("fixture-only"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(database, alias); err != nil {
+		t.Fatal(err)
+	}
+	protection := tool.ProtectedData{Directory: data, Database: database}
+	instance := New(os.Environ(), protection).(*commandTool)
+	prepare := func(command []string, access string) (tool.Invocation, error) {
+		t.Helper()
+		raw, err := json.Marshal(arguments{Command: command, Cwd: root, SandboxPermissions: access, Justification: "验证受控临时数据目录"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return instance.PrepareWithPermissions(t.Context(), tool.Scope{ID: "test-workspace", RootPath: root}, raw, tool.ExecutionPermissions{SandboxMode: tool.SandboxWorkspaceWrite})
+	}
+	for _, test := range []struct {
+		command []string
+		access  string
+	}{
+		{[]string{"/bin/cat", database}, sandboxDefault},
+		{[]string{"/bin/cat", alias}, sandboxDefault},
+		{[]string{"/bin/sh", "-c", `printf altered > "$1"`, "sh", database}, sandboxProjectWrite},
+		{[]string{"/bin/mv", parent, filepath.Join(root, "relocated")}, sandboxProjectWrite},
+	} {
+		call, err := prepare(test.command, test.access)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := call.Execute(t.Context())
+		if closeErr := call.Close(); err != nil || closeErr != nil {
+			t.Fatal(errors.Join(err, closeErr))
+		}
+		report := decodeReport(t, result)
+		if report.ExitCode == nil || *report.ExitCode == 0 || strings.Contains(string(result.Output), "fixture-only") {
+			t.Fatalf("应用数据可以被命令访问: %s", result.Output)
+		}
+	}
+	if content, err := os.ReadFile(database); err != nil || string(content) != "fixture-only" {
+		t.Fatalf("应用数据已被改变: %v", err)
+	}
+	hardlink := filepath.Join(root, "linked-database")
+	if err := os.Link(database, hardlink); err != nil {
+		t.Fatal(err)
+	}
+	call, err := prepare([]string{"/bin/cat", hardlink}, sandboxDefault)
+	if call != nil {
+		if err := call.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !errors.Is(err, tool.ErrDenied) {
+		t.Fatalf("存在数据库硬链接时启动了命令: %v", err)
 	}
 }

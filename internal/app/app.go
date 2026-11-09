@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -28,6 +29,7 @@ import (
 	conversationstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/conversation"
 	settingsstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/settings"
 	workspacestore "github.com/xiaoyu98628/callum/internal/storage/sqlite/workspace"
+	"github.com/xiaoyu98628/callum/internal/tool"
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/command"
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem"
 	toolexecutor "github.com/xiaoyu98628/callum/internal/tool/executor"
@@ -149,8 +151,13 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	if err != nil {
 		return nil, err
 	}
+	protectedDir, err := filepath.EvalSymlinks(filepath.Dir(cfg.DatabasePath))
+	if err != nil {
+		return nil, fmt.Errorf("解析应用数据目录: %w", err)
+	}
+	protection := tool.ProtectedData{Directory: protectedDir, Database: filepath.Join(protectedDir, filepath.Base(cfg.DatabasePath))}
 	registry := registry.New()
-	for _, instance := range append(filesystem.Tools(), command.Tools(os.Environ())...) {
+	for _, instance := range append(filesystem.Tools(protection), command.Tools(os.Environ(), protection)...) {
 		if err := registry.Register(instance); err != nil {
 			return nil, err
 		}

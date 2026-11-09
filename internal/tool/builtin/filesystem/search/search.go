@@ -15,10 +15,10 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem/internal/fileaccess"
 )
 
-type searchTool struct{}
+type searchTool struct{ protection tool.ProtectedData }
 
 // New 返回独立的字面文本搜索工具。
-func New() tool.Tool { return searchTool{} }
+func New(protection tool.ProtectedData) tool.Tool { return searchTool{protection} }
 
 func (searchTool) Definition() tool.Definition {
 	return tool.Definition{Name: "search_text", Description: "在目录或文件中搜索字面文本。path 支持绝对路径；相对路径需要绑定工作区。只读访问不受工作区写入边界限制，审批由服务端策略判断", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":100}},"required":["path","query"],"additionalProperties":false}`), Source: "builtin", Version: "3", Effects: []tool.Effect{tool.EffectRead}}
@@ -32,21 +32,22 @@ func (searchTool) Validate(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(a)
 }
 
-func (searchTool) Prepare(ctx context.Context, scope tool.Scope, raw json.RawMessage) (tool.Invocation, error) {
+func (t searchTool) Prepare(ctx context.Context, scope tool.Scope, raw json.RawMessage) (tool.Invocation, error) {
 	a, err := decodeArguments(raw)
 	if err != nil {
 		return nil, err
 	}
-	handle, err := fileaccess.Prepare(ctx, scope, a.Path, fileaccess.FileOrDirectory)
+	handle, err := fileaccess.Prepare(ctx, scope, a.Path, fileaccess.FileOrDirectory, t.protection)
 	if err != nil {
 		return nil, err
 	}
-	return &invocation{Handle: handle, args: a}, nil
+	return &invocation{Handle: handle, args: a, protection: t.protection}, nil
 }
 
 type invocation struct {
 	*fileaccess.Handle
-	args arguments
+	args       arguments
+	protection tool.ProtectedData
 }
 
 func (p *invocation) Execute(ctx context.Context) (tool.Result, error) {
@@ -55,7 +56,7 @@ func (p *invocation) Execute(ctx context.Context) (tool.Result, error) {
 	}
 	a := p.args
 	a.Path = "."
-	output, err := search(ctx, p.Root(), p.File(), a, p.Target().Path)
+	output, err := search(ctx, p.Root(), p.File(), a, p.Target().Path, p.protection)
 	return tool.Result{Output: output, Outcome: tool.OutcomeNone}, err
 }
 
@@ -65,17 +66,20 @@ type match struct {
 	Text string `json:"text"`
 }
 
-func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base string) (json.RawMessage, error) {
+func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base string, protection tool.ProtectedData) (json.RawMessage, error) {
 	out := make([]match, 0)
 	visited, bytesRead := 0, 0
 	truncated := false
-	var walk func(string, int) error
-	walk = func(path string, depth int) error {
+	var walk func(*os.Root, string, string, int) error
+	walk = func(parent *os.Root, name, path string, depth int) (retErr error) {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if depth > 32 || visited >= 1000 || bytesRead >= 8<<20 || len(out) >= a.Limit {
 			truncated = true
+			return nil
+		}
+		if protection.Contains(filepath.Join(base, path)) {
 			return nil
 		}
 		visited++
@@ -84,7 +88,7 @@ func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base
 		if file != nil {
 			stat, err = file.Stat()
 		} else {
-			stat, err = root.Lstat(path)
+			stat, err = parent.Lstat(name)
 		}
 		if err != nil {
 			return tool.ErrDenied
@@ -94,7 +98,13 @@ func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base
 			return nil
 		}
 		if stat.IsDir() {
-			f, err := fileaccess.OpenRead(root, path)
+			// 每层使用已打开的父目录句柄，避免递归时重新经过可被替换的祖先路径。
+			child, err := parent.OpenRoot(name)
+			if err != nil {
+				return tool.ErrDenied
+			}
+			defer func() { retErr = errors.Join(retErr, child.Close()) }()
+			f, err := fileaccess.OpenRead(child, ".", stat)
 			if err != nil {
 				return err
 			}
@@ -115,7 +125,7 @@ func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base
 				if entry.Name() == ".git" {
 					continue
 				}
-				if err := walk(filepath.Join(path, entry.Name()), depth+1); err != nil {
+				if err := walk(child, entry.Name(), filepath.Join(path, entry.Name()), depth+1); err != nil {
 					return err
 				}
 			}
@@ -131,7 +141,7 @@ func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base
 		if file != nil {
 			data, err = fileaccess.ReadText(ctx, file)
 		} else {
-			data, err = fileaccess.ReadTextFile(ctx, root, path)
+			data, err = fileaccess.ReadTextFile(ctx, parent, name, stat, protection)
 		}
 		if errors.Is(err, tool.ErrLimit) || errors.Is(err, tool.ErrUnavailable) {
 			truncated = true
@@ -159,7 +169,7 @@ func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base
 		}
 		return nil
 	}
-	if err := walk(a.Path, 0); err != nil {
+	if err := walk(root, a.Path, a.Path, 0); err != nil {
 		return nil, err
 	}
 	return json.Marshal(struct {

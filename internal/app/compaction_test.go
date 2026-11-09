@@ -20,6 +20,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/tokens"
 	"github.com/xiaoyu98628/callum/internal/settings"
+	"github.com/xiaoyu98628/callum/internal/tool"
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/command"
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem"
 )
@@ -308,7 +309,7 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 		t.Fatal("主对话缺少固定过程沟通提示")
 	}
 	definitions := []model.ToolDefinition{agent.UserInputDefinition()}
-	for _, instance := range append(filesystem.Tools(), command.Tools(nil)...) {
+	for _, instance := range append(filesystem.Tools(tool.ProtectedData{}), command.Tools(nil, tool.ProtectedData{})...) {
 		definitions = append(definitions, instance.Definition().ToolDefinition)
 	}
 	compression.TokenBudget, compression.RetainTurns = tokens.Estimate(fixed, definitions, compression.ImageTokenEstimate)+5700, 1

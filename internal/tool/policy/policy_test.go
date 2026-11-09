@@ -45,7 +45,7 @@ func TestCommandBoundaryIsIndependentOfApprovalPolicy(t *testing.T) {
 		boundary         tool.CommandBoundary
 		onRequest, never policy.Action
 	}{
-		{"workspace", tool.CommandBoundary{Sandboxed: true, Mode: tool.SandboxWorkspaceWrite}, policy.Allow, policy.Allow},
+		{"workspace", tool.CommandBoundary{Sandboxed: true, Mode: tool.SandboxWorkspaceWrite}, policy.Ask, policy.Deny},
 		{"readonly", tool.CommandBoundary{Sandboxed: true, Mode: tool.SandboxReadOnly}, policy.Allow, policy.Allow},
 		{"elevated", tool.CommandBoundary{Escalated: true, Mode: tool.SandboxWorkspaceWrite}, policy.Ask, policy.Deny},
 		{"destructive", tool.CommandBoundary{Sandboxed: true, Mode: tool.SandboxWorkspaceWrite, Risk: "destructive_command"}, policy.Ask, policy.Deny},

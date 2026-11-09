@@ -17,6 +17,7 @@ import (
 type Handle struct {
 	target        tool.Target
 	info          os.FileInfo
+	protection    tool.ProtectedData
 	root          *os.Root
 	file          *os.File
 	scope         tool.Scope
@@ -36,7 +37,7 @@ const (
 )
 
 // Prepare 固定已校验路径的目标及可选工作区身份，不读取正文。成功后由调用方关闭句柄。
-func Prepare(ctx context.Context, scope tool.Scope, path string, kind Kind) (_ *Handle, retErr error) {
+func Prepare(ctx context.Context, scope tool.Scope, path string, kind Kind, protection tool.ProtectedData) (_ *Handle, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -54,11 +55,14 @@ func Prepare(ctx context.Context, scope tool.Scope, path string, kind Kind) (_ *
 	if err != nil {
 		return nil, tool.ErrUnavailable
 	}
+	if protection.Contains(resolved) {
+		return nil, tool.ErrDenied
+	}
 	info, err := os.Stat(resolved)
 	if err != nil {
 		return nil, tool.ErrUnavailable
 	}
-	p := &Handle{info: info, scope: scope,
+	p := &Handle{info: info, scope: scope, protection: protection,
 		target: tool.Target{RequestedPath: requested, Path: resolved, Kind: "file"}}
 	defer func() {
 		if retErr != nil {
@@ -155,6 +159,9 @@ func (p *Handle) Check(ctx context.Context) error {
 	current, err := os.Stat(resolved)
 	if err != nil || !os.SameFile(current, p.info) {
 		return tool.ErrDenied
+	}
+	if err := p.protection.CheckFile(current); err != nil {
+		return err
 	}
 	if p.scope.ID != "" {
 		workspace, err := filepath.EvalSymlinks(p.scope.RootPath)

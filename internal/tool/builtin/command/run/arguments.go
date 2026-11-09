@@ -9,6 +9,12 @@ import (
 	toolargs "github.com/xiaoyu98628/callum/internal/tool/builtin/internal/arguments"
 )
 
+const (
+	sandboxDefault      = "use_default"
+	sandboxProjectWrite = "workspace_write"
+	sandboxEscalated    = "require_escalated"
+)
+
 type arguments struct {
 	Command            []string `json:"command"`
 	Cwd                string   `json:"cwd,omitempty"`
@@ -43,13 +49,13 @@ func decodeArguments(raw json.RawMessage) (arguments, error) {
 		}
 		a.Cwd = path
 	}
-	if seen["sandbox_permissions"] && a.SandboxPermissions != "use_default" && a.SandboxPermissions != "require_escalated" {
+	if seen["sandbox_permissions"] && a.SandboxPermissions != sandboxDefault && a.SandboxPermissions != sandboxProjectWrite && a.SandboxPermissions != sandboxEscalated {
 		return a, tool.ErrInvalid
 	}
 	if seen["justification"] && (!utf8.ValidString(a.Justification) || strings.ContainsRune(a.Justification, 0) || strings.TrimSpace(a.Justification) == "" || len(a.Justification) > 2048) {
 		return a, tool.ErrInvalid
 	}
-	if a.SandboxPermissions == "require_escalated" && strings.TrimSpace(a.Justification) == "" {
+	if (a.SandboxPermissions == sandboxEscalated || a.SandboxPermissions == sandboxProjectWrite) && strings.TrimSpace(a.Justification) == "" {
 		return a, tool.ErrInvalid
 	}
 	return a, nil

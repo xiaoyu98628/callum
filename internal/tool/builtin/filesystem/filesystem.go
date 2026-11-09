@@ -10,6 +10,6 @@ import (
 )
 
 // Tools 返回独立的工具实例，不读取工作区或注册全局状态。
-func Tools() []tool.Tool {
-	return []tool.Tool{patch.New(), list.New(), read.New(), search.New()}
+func Tools(protection tool.ProtectedData) []tool.Tool {
+	return []tool.Tool{patch.New(protection), list.New(protection), read.New(protection), search.New(protection)}
 }

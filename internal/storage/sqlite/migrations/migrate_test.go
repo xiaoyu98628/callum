@@ -86,13 +86,13 @@ func TestMigrationRollback(t *testing.T) {
 	if err := pool.QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_schema WHERE name IN ('model_providers', 'models')").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 || tables != 2 {
+	if version != 1 || tables != 2 {
 		t.Fatalf("具体迁移未完整提交: version=%d tables=%d", version, tables)
 	}
 }
 
-func TestFutureVersionPreserved(t *testing.T) {
-	for _, rejectedVersion := range []int{7, 99} {
+func TestUnsupportedVersionsPreserveData(t *testing.T) {
+	for _, rejectedVersion := range []int{2, 3, 4, 5, 6, 7, 99} {
 		t.Run(fmt.Sprintf("version_%d", rejectedVersion), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "data", "callum.db")
 			db, err := sqlite.Open(t.Context(), path)
@@ -108,7 +108,7 @@ func TestFutureVersionPreserved(t *testing.T) {
 			if err := db.DB.Raw("PRAGMA user_version").Scan(&initializedVersion).Error; err != nil {
 				t.Fatal(err)
 			}
-			if initializedVersion != 6 {
+			if initializedVersion != 1 {
 				t.Fatalf("新库结构版本错误: %d", initializedVersion)
 			}
 			if err := db.DB.WithContext(t.Context()).Exec(fmt.Sprintf("PRAGMA user_version = %d", rejectedVersion)).Error; err != nil {
@@ -124,7 +124,7 @@ func TestFutureVersionPreserved(t *testing.T) {
 				}
 			}
 			if openErr == nil || !strings.Contains(openErr.Error(), fmt.Sprintf("不支持数据库结构版本 %d", rejectedVersion)) {
-				t.Fatalf("未明确拒绝未来版本: %v", openErr)
+				t.Fatalf("未明确拒绝不支持的版本: %v", openErr)
 			}
 			pool, err := sql.Open("sqlite", path)
 			if err != nil {
@@ -153,7 +153,7 @@ func TestUnsupportedExistingSchemaPreservesData(t *testing.T) {
 		wantError string
 	}{
 		{name: "缺少结构版本", version: 0, wantError: "缺少结构版本"},
-		{name: "整数主键结构", version: 1, wantError: "数据库主键结构与 UUIDv7 版本 1 不匹配"},
+		{name: "整数主键结构", version: 1, wantError: "数据库结构与当前版本 1 不匹配"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			path, pool := fixtureDatabase(t)

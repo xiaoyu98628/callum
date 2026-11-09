@@ -24,14 +24,15 @@ type fixedPath struct {
 }
 
 type fixedCommand struct {
-	command                            []string
-	environment                        []string
-	executable, directory, workspace   *fixedPath
-	snapshot                           json.RawMessage
-	boundary                           tool.CommandBoundary
-	sandboxExecutable, temporaryParent *fixedPath
-	temporaryPath, profile             string
-	launchArguments                    []string
+	protection                                             tool.ProtectedData
+	command                                                []string
+	environment                                            []string
+	executable, directory, workspace                       *fixedPath
+	snapshot                                               json.RawMessage
+	boundary                                               tool.CommandBoundary
+	sandboxExecutable, temporaryParent, protectedDirectory *fixedPath
+	temporaryPath, profile                                 string
+	launchArguments                                        []string
 }
 
 func cleanDirectory(path string) (string, error) {
@@ -96,14 +97,14 @@ func (p *fixedPath) check(executable bool) error {
 	return nil
 }
 
-func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []string, permissions tool.ExecutionPermissions) (_ tool.Invocation, retErr error) {
+func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []string, permissions tool.ExecutionPermissions, protection tool.ProtectedData) (_ tool.Invocation, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		return nil, tool.ErrUnavailable
 	}
-	fixed := &fixedCommand{command: a.Command, environment: slices.Clone(environment)}
+	fixed := &fixedCommand{command: a.Command, protection: protection, environment: slices.Clone(environment)}
 	defer func() {
 		if retErr != nil {
 			retErr = errors.Join(retErr, fixed.close())
@@ -147,7 +148,7 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 	}
 	fixed.command[0] = fixed.executable.actual
 	fixed.environment = append(fixed.environment, "PWD="+fixed.directory.actual)
-	if err := fixed.configureSandbox(a, permissions); err != nil {
+	if err := fixed.configureSandbox(a, permissions, protection); err != nil {
 		return nil, err
 	}
 	digest := sha256.New()
@@ -213,11 +214,16 @@ func (p *fixedCommand) check(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, path := range []*fixedPath{p.sandboxExecutable, p.temporaryParent} {
+	for _, path := range []*fixedPath{p.sandboxExecutable, p.temporaryParent, p.protectedDirectory} {
 		if path != nil {
 			if err := path.check(path == p.sandboxExecutable); err != nil {
 				return err
 			}
+		}
+	}
+	if p.boundary.Sandboxed {
+		if err := checkSQLiteLinks(p.protection); err != nil {
+			return err
 		}
 	}
 	if err := p.directory.check(false); err != nil {
@@ -228,7 +234,7 @@ func (p *fixedCommand) check(ctx context.Context) error {
 
 func (p *fixedCommand) close() error {
 	var err error
-	for _, path := range []*fixedPath{p.executable, p.directory, p.workspace, p.sandboxExecutable, p.temporaryParent} {
+	for _, path := range []*fixedPath{p.executable, p.directory, p.workspace, p.sandboxExecutable, p.temporaryParent, p.protectedDirectory} {
 		if path != nil {
 			err = errors.Join(err, path.file.Close())
 		}

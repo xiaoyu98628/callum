@@ -18,24 +18,34 @@ func OpenFile(root *os.Root, path string, flags int, perm os.FileMode) (*os.File
 }
 
 // OpenRead 使用非阻塞标志打开路径，避免命名管道阻塞取消；只读普通文件和目录才可使用。
-func OpenRead(root *os.Root, path string) (*os.File, error) {
+func OpenRead(root *os.Root, path string, expected os.FileInfo) (*os.File, error) {
 	f, err := OpenFile(root, path, os.O_RDONLY, 0)
 	if err != nil {
 		return nil, tool.ErrDenied
+	}
+	// 搜索先用 Lstat 跳过符号链接；打开后复核身份，拒绝遍历期间的路径替换。
+	if expected != nil {
+		opened, err := f.Stat()
+		if err != nil || !os.SameFile(expected, opened) {
+			return nil, errors.Join(tool.ErrDenied, f.Close())
+		}
 	}
 	return f, nil
 }
 
 // ReadTextFile 读取固定目录内的文本，并在返回前关闭本次打开的文件。
-func ReadTextFile(ctx context.Context, root *os.Root, path string) (data []byte, retErr error) {
+func ReadTextFile(ctx context.Context, root *os.Root, path string, expected os.FileInfo, protection tool.ProtectedData) (data []byte, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	f, err := OpenRead(root, path)
+	f, err := OpenRead(root, path, expected)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { retErr = errors.Join(retErr, f.Close()) }()
+	if err := protection.CheckFile(expected); err != nil {
+		return nil, err
+	}
 	return ReadText(ctx, f)
 }
 
