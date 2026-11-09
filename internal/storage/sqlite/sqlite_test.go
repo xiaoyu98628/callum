@@ -7,10 +7,29 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestDatabaseURI(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"C:/Callum profile/测试 #1%/callum.db", "file:///C:/Callum%20profile/%E6%B5%8B%E8%AF%95%20%231%25/callum.db"},
+		{"/var/tmp/Callum profile/callum.db", "file:///var/tmp/Callum%20profile/callum.db"},
+		{"//server/share/callum.db", "file:////server/share/callum.db"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			got, _, _ := strings.Cut(databaseURI(tc.path), "?")
+			if got != tc.want {
+				t.Fatalf("数据库 URI = %q，期望 %q", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestOpenHonorsDeadlineWhileLocked(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "data", "callum.db")
