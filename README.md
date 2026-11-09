@@ -330,7 +330,7 @@ go run ./cmd/callum --max-concurrent-runs 2 --call-timeout 3m
 | `workspace.create` | `name`、绝对主目录 `root_path`、可选的其他目录 `other_paths`，返回工作区；同主目录已软删除时恢复原记录 |
 | `workspace.get` / `delete` / `restore` | `id`，删除和恢复保留关联会话的独立状态 |
 | `workspace.list` | 可选 `archived`、`deleted`、`limit`、`offset` |
-| `workspace.update` | `id` 及可选 `name`、`pinned`、`archived` |
+| `workspace.update` | `id` 及可选 `name`、`root_path`、`pinned`、`archived`；`root_path` 仅用于切换已有源目录 |
 | `conversation.send` | `content` 内容块数组，可选 `conversation_id`、`model_id`、`stream`；新会话还可提供 `workspace_id` |
 | `conversation.resend` | `conversation_id`、最后一条用户 `message_id`、新 `content`，可选 `model_id`、`stream` |
 | `conversation.get` / `delete` / `restore` | `id`，软删除保留历史 |
@@ -553,6 +553,7 @@ Go 服务支持 `conversation.compact` 手动压缩，并在每次回答模型�
 
 文件工具支持绝对路径；相对路径必须是工作区内的本地路径，不接受 `..` 越界，工作区内的绝对路径采用相同审批规则。
 多目录工作区的主目录仍是相对路径基准。主对话模型请求会包含主目录和其他目录的路径，访问其他目录使用绝对路径，写入按实际路径走现有审批规则。
+可通过 `workspace.update.root_path` 将已有源目录切换为主目录，原主目录保留为其他目录。切换与名称更新在同一事务保存，保留项目标识和已有会话，不移动磁盘文件；后续相对路径以新主目录为基准。有未结束执行时拒绝切换；目标必须仍是实际存在的目录，且不能占用其他项目（包括已软删除项目）的主目录。源目录的增删仍通过创建及重新添加项目设置。
 无工作区时不会使用服务进程当前目录解析相对路径，而是返回 `path_base_required`，要求绝对路径或绑定工作区。
 符号链接按解析后的实际目标分类。纯读取不受工作区写入边界限制，`on-request` 和 `never` 下无需逐次审批，可访问当前系统用户可读的本地路径；`always` 仍逐次询问。普通修改在工作区外或无工作区时需要审批，已有匹配的会话目录写授权可复用；`never` 拒绝仍需审批的修改。
 准备调用时只固定句柄和元数据，不读取正文或目录条目；单文件固定文件句柄，目录通过 `os.Root` 限制在此次目标目录内。

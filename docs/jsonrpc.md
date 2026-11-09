@@ -471,9 +471,12 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"jsonrpc":"2.0","id":"workspace-unpin","method":"workspace.update","params":{"id":"<workspace_id>","pinned":false}}
 {"jsonrpc":"2.0","id":"workspace-archive","method":"workspace.update","params":{"id":"<workspace_id>","archived":true}}
 {"jsonrpc":"2.0","id":"workspace-unarchive","method":"workspace.update","params":{"id":"<workspace_id>","archived":false}}
+{"jsonrpc":"2.0","id":"workspace-primary","method":"workspace.update","params":{"id":"<workspace_id>","name":"修改后的工作区名称","root_path":"<existing_source_directory>"}}
 ```
 
-返回更新后的工作区对象，目录通过创建接口设置。工作区有关联活动执行时，归档或删除状态变更会返回 `1006`。
+返回更新后的工作区对象。`root_path` 可将已有源目录切换为主目录；服务端解析实际路径并检查目录存在，目标必须属于该项目，原主目录转为其他目录。切换与名称在同一事务提交，保留项目 ID、对话及所有源目录，不移动磁盘文件，后续相对路径使用新主目录。若目标是其他项目（包括软删除项目）的主目录，返回 `1003`，不保存名称或目录变更。已删除项目不能切换主目录。源目录的增删仍通过创建接口设置。
+
+工作区有关联活动执行（运行中、等待审批或等待用户输入）时，切换主目录、归档或删除状态变更会返回 `1006`；只改名称或提交未变化的主目录不触发切换限制。
 
 ### workspace.delete / workspace.restore
 

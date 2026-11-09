@@ -126,7 +126,12 @@ func (r *Repository) Update(ctx context.Context, id string, change domain.Change
 			}
 			return err
 		}
-		if change.Archived != nil || change.Deleted != nil {
+		switchingRoot := change.RootPath != nil && *change.RootPath != row.RootPath
+		if switchingRoot && row.DeletedAt != nil {
+			return domain.ErrNotFound
+		}
+		// 与执行受理共用写事务边界，避免工具运行期间改变相对路径及审批范围。
+		if switchingRoot || change.Archived != nil || change.Deleted != nil {
 			var count int64
 			if err := tx.Model(&schema.Run{}).Joins("JOIN conversations ON conversations.id = conversation_runs.conversation_id").Where("conversations.workspace_id = ? AND conversation_runs.status IN ?", id, []string{"running", "awaiting_approval", "awaiting_user_input"}).Count(&count).Error; err != nil {
 				return err
@@ -140,6 +145,12 @@ func (r *Repository) Update(ctx context.Context, id string, change domain.Change
 		if change.Name != nil {
 			row.Name = *change.Name
 			updates["name"] = row.Name
+		}
+		if switchingRoot {
+			if err := swapRoot(tx, row, *change.RootPath); err != nil {
+				return err
+			}
+			updates["root_path"] = *change.RootPath
 		}
 		for key, flag := range map[string]*bool{"pinned_at": change.Pinned, "archived_at": change.Archived, "deleted_at": change.Deleted} {
 			if flag != nil {
@@ -160,6 +171,25 @@ func (r *Repository) Update(ctx context.Context, id string, change domain.Change
 		return err
 	})
 	return out, err
+}
+
+// swapRoot 在同一事务中交换主目录与已有附加目录，不增删源目录或改变项目标识。
+func swapRoot(tx *gorm.DB, row schema.Workspace, path string) error {
+	var folder schema.WorkspaceAdditionalFolder
+	if err := tx.Where("workspace_id = ? AND path = ?", row.ID, path).Take(&folder).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return domain.ErrInvalid
+		}
+		return err
+	}
+	var count int64
+	if err := tx.Model(&schema.Workspace{}).Where("root_path = ? AND id <> ?", path, row.ID).Count(&count).Error; err != nil {
+		return err
+	}
+	if count != 0 {
+		return domain.ErrConflict
+	}
+	return tx.Model(&folder).Update("path", row.RootPath).Error
 }
 
 func workspaceFromRow(row schema.Workspace) domain.Workspace {

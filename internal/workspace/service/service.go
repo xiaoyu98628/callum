@@ -111,5 +111,12 @@ func (s *Service) Update(ctx context.Context, id string, change workspace.Change
 		}
 		change.Name = &value
 	}
+	if change.RootPath != nil {
+		path, _, err := realDirectory(*change.RootPath)
+		if err != nil {
+			return workspace.Workspace{}, err
+		}
+		change.RootPath = &path
+	}
 	return s.repository.Update(ctx, id, change)
 }

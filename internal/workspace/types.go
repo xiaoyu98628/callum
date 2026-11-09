@@ -13,9 +13,10 @@ type Workspace struct {
 	UpdatedAt  int64    `json:"updated_at"`
 }
 
-// Change 只更新明确提供的字段；false 清除对应状态时间。
+// Change 只更新明确提供的字段；RootPath 只能选择已有源目录，false 清除对应状态时间。
 type Change struct {
 	Name     *string `json:"name,omitempty"`
+	RootPath *string `json:"root_path,omitempty"`
 	Pinned   *bool   `json:"pinned,omitempty"`
 	Archived *bool   `json:"archived,omitempty"`
 	Deleted  *bool   `json:"-"`
