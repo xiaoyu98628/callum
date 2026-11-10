@@ -12,10 +12,10 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem/internal/fileaccess"
 )
 
-type readTool struct{}
+type readTool struct{ protection tool.ProtectedData }
 
 // New 返回独立的按行文本读取工具。
-func New() tool.Tool { return readTool{} }
+func New(protection tool.ProtectedData) tool.Tool { return readTool{protection} }
 
 func (readTool) Definition() tool.Definition {
 	return tool.Definition{Name: "read_file", Description: "按行读取 UTF-8 文本文件。path 支持绝对路径；相对路径需要绑定工作区。只读访问不受工作区写入边界限制，审批由服务端策略判断", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1}},"required":["path"],"additionalProperties":false}`), Source: "builtin", Version: "3", Effects: []tool.Effect{tool.EffectRead}}
@@ -29,12 +29,12 @@ func (readTool) Validate(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(a)
 }
 
-func (readTool) Prepare(ctx context.Context, scope tool.Scope, raw json.RawMessage) (tool.Invocation, error) {
+func (t readTool) Prepare(ctx context.Context, scope tool.Scope, raw json.RawMessage) (tool.Invocation, error) {
 	a, err := decodeArguments(raw)
 	if err != nil {
 		return nil, err
 	}
-	handle, err := fileaccess.Prepare(ctx, scope, a.Path, fileaccess.File)
+	handle, err := fileaccess.Prepare(ctx, scope, a.Path, fileaccess.File, t.protection)
 	if err != nil {
 		return nil, err
 	}

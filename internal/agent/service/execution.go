@@ -14,6 +14,8 @@ import (
 // Execute 只在受理响应已排队后运行；标题任务在终态前取消并等待退出。
 func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved) {
 	err := e.initialEvents(ex)
+	e.beginContextUsage(ex, resolved)
+	defer e.endContextUsage(ex)
 	if ex.Run.SettingsSnapshot == nil || !ex.Run.SettingsSnapshot.Valid() {
 		err = errors.Join(err, agent.ErrInvalid)
 	}
@@ -49,6 +51,7 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 		e.logger.Error("保存执行终态失败", "module", "run", "run_id", ex.Run.ID)
 		ex.Run.Status, ex.Run.ErrorKind, ex.Run.ErrorMessage = agent.Failed, new("internal"), new("保存执行状态失败")
 		// 无法保存终态时只报告执行失败及持久化未确认，不能宣称数据库已进入终态。
+		e.endContextUsage(ex)
 		_ = e.emit(agent.Event{Type: "run.failed", ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, Data: ex.Run, StatePersisted: new(false)})
 		return
 	} else if errors.Is(err, agent.ErrStorage) {
@@ -62,6 +65,8 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 		}
 	}
 	// 终态已持久化；发布器关闭后不递归发布错误，查询仍可获取已保存状态。
+	// 用量刷新先于终态通知，连接可在终态后排空并结束。
+	e.endContextUsage(ex)
 	_ = e.event(ex, "run."+ex.Run.Status, "", "", ex.Run)
 }
 

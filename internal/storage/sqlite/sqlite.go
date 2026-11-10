@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strings"
 
 	gormsqlite "gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -14,7 +15,6 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/migrations"
-	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
 
 // Database 持有 GORM 实例及其底层连接池；创建者负责调用 Close。
@@ -38,13 +38,7 @@ func Open(ctx context.Context, path string) (*Database, error) {
 	if err := prepareFile(path); err != nil {
 		return nil, err
 	}
-	u := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
-	q := url.Values{}
-	q.Add("_pragma", "foreign_keys(1)")
-	q.Add("_pragma", "busy_timeout(5000)")
-	q.Set("_txlock", "immediate")
-	u.RawQuery = q.Encode()
-	pool, err := sql.Open("sqlite", u.String())
+	pool, err := sql.Open("sqlite", databaseURI(filepath.ToSlash(path)))
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库: %w", err)
 	}
@@ -62,9 +56,23 @@ func Open(ctx context.Context, path string) (*Database, error) {
 	if err != nil {
 		return nil, errors.Join(err, pool.Close())
 	}
-	if err := migrations.Run(ctx, db, &schema.Provider{}, &schema.Model{}, &schema.Workspace{}, &schema.Conversation{}, &schema.Run{}, &schema.Message{}, &schema.Step{}, &schema.Approval{}, &schema.Settings{}, &schema.ContextVersion{}, &schema.DirectoryGrant{}); err != nil {
+	if err := migrations.Run(ctx, db); err != nil {
 		return nil, errors.Join(err, pool.Close())
 	}
 	// 不将初始化上下文绑定在返回的 GORM 实例上。
 	return &Database{DB: db, pool: pool}, nil
+}
+
+func databaseURI(slashPath string) string {
+	// Windows 盘符属于 URI 路径。补上前导斜杠，避免 SQLite 将盘符解析为主机名。
+	if !strings.HasPrefix(slashPath, "/") {
+		slashPath = "/" + slashPath
+	}
+	u := url.URL{Scheme: "file", Path: slashPath}
+	q := url.Values{}
+	q.Add("_pragma", "foreign_keys(1)")
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Set("_txlock", "immediate")
+	u.RawQuery = q.Encode()
+	return u.String()
 }

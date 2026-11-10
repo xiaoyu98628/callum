@@ -71,6 +71,9 @@ func (s *Service) Update(ctx context.Context, key string, revision int64, raw js
 				}
 			}
 		}
+		if err == nil && !execution.Valid() {
+			err = settings.ErrInvalid
+		}
 		value = execution
 	} else {
 		value, err = settings.DecodeCompaction(raw)

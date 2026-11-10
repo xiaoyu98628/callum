@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -130,7 +131,7 @@ func TestRuntimeWithoutProtocol(t *testing.T) {
 		t.Fatalf("完整结果无法查询: %+v %v", step, err)
 	}
 	title := "手动标题"
-	_, err = runtime.Conversations().Update(t.Context(), accepted.Conversation.ID, conversation.Change{Title: &title}, "")
+	_, err = runtime.Conversations().Update(t.Context(), accepted.Conversation.ID, conversation.Update{Title: &title})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,16 +308,6 @@ func TestOwnershipPrecedesMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := sqlite.Open(t.Context(), cfg.DatabasePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	for _, sql := range []string{"DROP TABLE conversation_directory_grants", "DROP TABLE conversation_context_versions", "DROP TABLE app_settings", "DROP TABLE conversation_run_approvals", "DROP INDEX uq_step_run", "PRAGMA user_version=2"} {
-		if err := db.DB.Exec(sql).Error; err != nil {
-			t.Fatal(err)
-		}
-	}
 	ownership, err := sqlite.AcquireOwnership(cfg.DatabasePath)
 	if err != nil {
 		t.Fatal(err)
@@ -327,12 +318,8 @@ func TestOwnershipPrecedesMigration(t *testing.T) {
 		duplicate.Close()
 		t.Fatal("重复实例取得了锁")
 	}
-	var version int
-	if err := db.DB.Raw("PRAGMA user_version").Scan(&version).Error; err != nil {
-		t.Fatal(err)
-	}
-	if version != 2 || db.DB.Migrator().HasTable("conversation_run_approvals") || db.DB.Migrator().HasTable("app_settings") {
-		t.Fatal("未取得锁就迁移了活动实例的数据")
+	if _, err := os.Stat(cfg.DatabasePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("未取得实例锁就访问了数据库: %v", err)
 	}
 	if err := ownership.Close(); err != nil {
 		t.Fatal(err)

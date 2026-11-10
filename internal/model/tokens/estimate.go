@@ -13,25 +13,33 @@ const Method = "unicode-v1"
 // Text 对 ASCII 字母、数字、空白按三字符一 Token 估算，标点单独计数；
 // 非 ASCII 按每码点二 Token、四字节码点四 Token 预留。它不是厂商 tokenizer。
 func Text(value string) int64 {
-	var total, run int64
-	flush := func() { total += (run + 2) / 3; run = 0 }
+	var counter TextCounter
+	counter.Add(value)
+	return counter.Tokens()
+}
+
+// TextCounter 按完整 UTF-8 文本分片增量计算同一段文本，不因分片边界重复取整。
+type TextCounter struct{ total, run int64 }
+
+func (c *TextCounter) Add(value string) {
 	for _, r := range value {
 		if r < 128 && ((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == ' ' || r == '\n' || r == '\r' || r == '\t') {
-			run++
+			c.run++
 			continue
 		}
-		flush()
+		c.total += (c.run + 2) / 3
+		c.run = 0
 		if r < 128 {
-			total++
+			c.total++
 		} else if utf8.RuneLen(r) == 4 {
-			total += 4
+			c.total += 4
 		} else {
-			total += 2
+			c.total += 2
 		}
 	}
-	flush()
-	return total
 }
+
+func (c *TextCounter) Tokens() int64 { return c.total + (c.run+2)/3 }
 
 // Estimate 统计有效消息内容、工具参数及定义，图片使用明确配置的单图估算，忽略路径长度。
 func Estimate(messages []model.Message, tools []model.ToolDefinition, imageTokens int64) int64 {

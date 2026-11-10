@@ -12,7 +12,7 @@ import (
 )
 
 func TestDirectoryArguments(t *testing.T) {
-	instance := list.New()
+	instance := list.New(tool.ProtectedData{})
 	for _, test := range []struct{ input, want string }{
 		{`{"path":"."}`, `{"path":".","limit":100}`},
 		{`{"path":"a/../notes","limit":0}`, `{"path":"notes","limit":100}`},
@@ -56,7 +56,7 @@ func TestDirectoryLimitAndTargetType(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	instance := list.New()
+	instance := list.New(tool.ProtectedData{})
 	scope := tool.Scope{ID: "w", RootPath: dir}
 	args, err := instance.Validate(json.RawMessage(`{"path":".","limit":1}`))
 	if err != nil {

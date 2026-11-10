@@ -68,13 +68,14 @@ func (r *Repository) readCheckpoints(ctx context.Context, conversationID string,
 	if len(runIDs) == 0 {
 		return out, nil
 	}
-	rows, err := r.db.WithContext(ctx).Raw(`SELECT output FROM (
- SELECT output,ROW_NUMBER() OVER (
- PARTITION BY json_extract(output,'$.checkpoint.source_run_id')
- ORDER BY CAST(json_extract(output,'$.checkpoint.through_sequence') AS INTEGER) DESC) AS ordinal
- FROM conversation_run_steps WHERE conversation_id=? AND type='context_compression' AND status='completed'
- AND json_extract(output,'$.checkpoint.source_run_id') IN ?
- ) WHERE ordinal=1`, conversationID, runIDs).Rows()
+	ranked := r.db.WithContext(ctx).Model(&schema.Step{}).
+		Select(`output,ROW_NUMBER() OVER (
+			PARTITION BY json_extract(output,'$.checkpoint.source_run_id')
+			ORDER BY CAST(json_extract(output,'$.checkpoint.through_sequence') AS INTEGER) DESC) AS ordinal`).
+		Where("conversation_id=? AND type=? AND status=?", conversationID, "context_compression", domain.Completed).
+		Where("json_extract(output,'$.checkpoint.source_run_id') IN ?", runIDs)
+	rows, err := r.db.WithContext(ctx).Table("(?) AS checkpoints", ranked).
+		Select("output").Where("ordinal=?", 1).Rows()
 	if err != nil {
 		return nil, err
 	}
@@ -208,14 +209,14 @@ func (r *Repository) ContextBatch(ctx context.Context, conversationID, runID str
 			}
 		}
 	}
-	messages, err := runTranscript(projected)
+	messages, err := restoreTranscript(projected)
 	if err != nil {
 		return nil, err
 	}
 	if len(messages) > 248 {
 		return nil, &model.InputLimitError{Dimension: "单个工具批次消息数量", Actual: int64(len(messages)), Limit: 248}
 	}
-	return &domain.ContextBatch{BatchSource: domain.BatchSource{StepID: parent.ID, Through: through, Fingerprint: hex.EncodeToString(digest[:])}, Messages: messages}, nil
+	return &domain.ContextBatch{StepID: parent.ID, Through: through, Fingerprint: hex.EncodeToString(digest[:]), Messages: messages}, nil
 }
 
 func (r *Repository) SaveCheckpoint(ctx context.Context, c domain.ContextCheckpoint) error {

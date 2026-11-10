@@ -24,14 +24,16 @@ type fixedPath struct {
 }
 
 type fixedCommand struct {
-	command                            []string
-	environment                        []string
-	executable, directory, workspace   *fixedPath
-	snapshot                           json.RawMessage
-	boundary                           tool.CommandBoundary
-	sandboxExecutable, temporaryParent *fixedPath
-	temporaryPath, profile             string
-	launchArguments                    []string
+	protection                                             tool.ProtectedData
+	command                                                []string
+	environment                                            []string
+	executable, directory, workspace                       *fixedPath
+	snapshot                                               json.RawMessage
+	boundary                                               tool.CommandBoundary
+	sandboxExecutable, temporaryParent, protectedDirectory *fixedPath
+	temporaryPath, profile                                 string
+	launchArguments                                        []string
+	sandboxState                                           sandboxState
 }
 
 func cleanDirectory(path string) (string, error) {
@@ -96,14 +98,14 @@ func (p *fixedPath) check(executable bool) error {
 	return nil
 }
 
-func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []string, permissions tool.ExecutionPermissions) (_ tool.Invocation, retErr error) {
+func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []string, permissions tool.ExecutionPermissions, protection tool.ProtectedData) (_ tool.Invocation, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" && runtime.GOOS != "windows" {
 		return nil, tool.ErrUnavailable
 	}
-	fixed := &fixedCommand{command: a.Command, environment: slices.Clone(environment)}
+	fixed := &fixedCommand{command: a.Command, protection: protection, environment: slices.Clone(environment)}
 	defer func() {
 		if retErr != nil {
 			retErr = errors.Join(retErr, fixed.close())
@@ -147,7 +149,7 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 	}
 	fixed.command[0] = fixed.executable.actual
 	fixed.environment = append(fixed.environment, "PWD="+fixed.directory.actual)
-	if err := fixed.configureSandbox(a, permissions); err != nil {
+	if err := fixed.configureSandbox(a, permissions, protection); err != nil {
 		return nil, err
 	}
 	digest := sha256.New()
@@ -176,6 +178,7 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 		Sandboxed                bool                 `json:"sandboxed"`
 		SandboxBackend           string               `json:"sandbox_backend,omitempty"`
 		WritableRoots            []string             `json:"writable_roots"`
+		ReadableRoots            []string             `json:"readable_roots,omitempty"`
 		TemporaryDirectoryPolicy string               `json:"temporary_directory_policy,omitempty"`
 		NetworkAccess            bool                 `json:"network_access"`
 		Justification            string               `json:"justification,omitempty"`
@@ -183,7 +186,8 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 	}{Executable: fixed.executable.actual, ExecutableIdentity: fixed.executable.identity, ExecutableSize: fixed.executable.info.Size(), ExecutableModified: fixed.executable.info.ModTime().UnixNano(), Cwd: fixed.directory.actual, CwdIdentity: fixed.directory.identity, EnvironmentProfile: "base-v1", EnvironmentKeys: keys, EnvironmentSHA256: hex.EncodeToString(digest.Sum(nil)), Boundary: fixed.boundary, Sandboxed: fixed.boundary.Sandboxed, NetworkAccess: !fixed.boundary.Sandboxed, Justification: a.Justification, WritableRoots: []string{}}
 	if fixed.boundary.Sandboxed {
 		details.EnvironmentProfile = "base-v2-sandbox"
-		details.SandboxBackend = "macos-seatbelt"
+		details.SandboxBackend = fixed.sandboxBackend()
+		details.ReadableRoots = fixed.sandboxState.readableRoots()
 		details.TemporaryDirectoryPolicy = "private-per-command"
 		if fixed.workspace != nil && fixed.boundary.Mode == tool.SandboxWorkspaceWrite {
 			details.WritableRoots = append(details.WritableRoots, fixed.workspace.actual)
@@ -208,16 +212,24 @@ func (p *fixedCommand) check(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if err := p.sandboxState.check(ctx); err != nil {
+		return err
+	}
 	if p.workspace != nil {
 		if err := p.workspace.check(false); err != nil {
 			return err
 		}
 	}
-	for _, path := range []*fixedPath{p.sandboxExecutable, p.temporaryParent} {
+	for _, path := range []*fixedPath{p.sandboxExecutable, p.temporaryParent, p.protectedDirectory} {
 		if path != nil {
 			if err := path.check(path == p.sandboxExecutable); err != nil {
 				return err
 			}
+		}
+	}
+	if p.boundary.Sandboxed {
+		if err := checkSQLiteLinks(p.protection); err != nil {
+			return err
 		}
 	}
 	if err := p.directory.check(false); err != nil {
@@ -227,8 +239,8 @@ func (p *fixedCommand) check(ctx context.Context) error {
 }
 
 func (p *fixedCommand) close() error {
-	var err error
-	for _, path := range []*fixedPath{p.executable, p.directory, p.workspace, p.sandboxExecutable, p.temporaryParent} {
+	err := p.sandboxState.close()
+	for _, path := range []*fixedPath{p.executable, p.directory, p.workspace, p.sandboxExecutable, p.temporaryParent, p.protectedDirectory} {
 		if path != nil {
 			err = errors.Join(err, path.file.Close())
 		}

@@ -165,3 +165,26 @@ func TestReasoningPersistsOnCancellationAndLimit(t *testing.T) {
 		}
 	}
 }
+
+func TestActualInputProjectionKeepsUnknownAndOriginalOutput(t *testing.T) {
+	for _, input := range []json.RawMessage{nil, json.RawMessage(`null`), json.RawMessage(`{"provider_result":{"text":"原始结果"}}`)} {
+		output, err := withActualInputTokens(input, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value map[string]json.RawMessage
+		if err := json.Unmarshal(output, &value); err != nil {
+			t.Fatal(err)
+		}
+		if string(value["context_usage"]) != `{"actual_input_tokens":null}` {
+			t.Fatal("缺失实际用量被补造")
+		}
+		if len(input) > 4 && string(value["provider_result"]) != `{"text":"原始结果"}` {
+			t.Fatal("原始输出被改写")
+		}
+	}
+	output, err := withActualInputTokens(nil, new(int64(42)))
+	if err != nil || string(output) != `{"context_usage":{"actual_input_tokens":42}}` {
+		t.Fatalf("实际输入投影丢失: %s %v", output, err)
+	}
+}

@@ -14,7 +14,7 @@ import (
 )
 
 func TestReadArguments(t *testing.T) {
-	instance := read.New()
+	instance := read.New(tool.ProtectedData{})
 	for _, test := range []struct{ input, want string }{
 		{`{"path":"note"}`, `{"path":"note","start_line":1,"end_line":200}`},
 		{`{"path":"a/../note","start_line":5}`, `{"path":"note","start_line":5,"end_line":204}`},
@@ -58,7 +58,7 @@ func TestReadRangeKeepsWholeFileVersion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "note"), data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	instance := read.New()
+	instance := read.New(tool.ProtectedData{})
 	args, err := instance.Validate(json.RawMessage(`{"path":"note","start_line":2,"end_line":2}`))
 	if err != nil {
 		t.Fatal(err)

@@ -346,28 +346,30 @@ func TestFailedCheckpointKeepsActiveSummaryAndOriginalOperations(t *testing.T) {
 			capacitySettings(t, rt, true, 900000)
 			instance := &outcomeTestTool{path: filepath.Join(t.TempDir(), "evidence"), outcome: tool.OutcomeApplied}
 			var summaries, rounds atomic.Int32
-			client := byteLimitedClient{limit: 16 << 10}
-			client.outcomeTestModel = outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
-				if req.Messages[0].Content == compaction.Prompt {
-					if summaries.Add(1) == 1 {
-						return model.Response{Text: capacitySummary}, nil
+			client := byteLimitedClient{
+				limit: 16 << 10,
+				outcomeTestModel: outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
+					if req.Messages[0].Content == compaction.Prompt {
+						if summaries.Add(1) == 1 {
+							return model.Response{Text: capacitySummary}, nil
+						}
+						switch mode {
+						case "malformed":
+							return model.Response{Text: "摘要结构不合法"}, nil
+						case "cancelled":
+							return model.Response{}, context.Canceled
+						default:
+							raw, _ := json.Marshal(map[string][]string{"goals": {strings.Repeat("x", 14000), strings.Repeat("y", 14000)}, "constraints": {}, "decisions": {}, "facts": {}, "open_questions": {}})
+							return model.Response{Text: string(raw)}, nil
+						}
 					}
-					switch mode {
-					case "malformed":
-						return model.Response{Text: "摘要结构不合法"}, nil
-					case "cancelled":
-						return model.Response{}, context.Canceled
-					default:
-						raw, _ := json.Marshal(map[string][]string{"goals": {strings.Repeat("x", 14000), strings.Repeat("y", 14000)}, "constraints": {}, "decisions": {}, "facts": {}, "open_questions": {}})
-						return model.Response{Text: string(raw)}, nil
+					if len(req.Tools) == 0 {
+						return model.Response{Text: "标题"}, nil
 					}
-				}
-				if len(req.Tools) == 0 {
-					return model.Response{Text: "标题"}, nil
-				}
-				round := rounds.Add(1)
-				return model.Response{ToolCalls: []model.ToolCall{{ID: fmt.Sprintf("failure-%d", round), Name: "operation", Arguments: json.RawMessage(`{}`)}}}, nil
-			})
+					round := rounds.Add(1)
+					return model.Response{ToolCalls: []model.ToolCall{{ID: fmt.Sprintf("failure-%d", round), Name: "operation", Arguments: json.RawMessage(`{}`)}}}, nil
+				}),
+			}
 			id := policyTestID(t)
 			svc, runs := outcomeService(t, rt, instance, client, id, nil)
 			sub, err := rt.Subscribe(events.Filter{})
@@ -398,25 +400,27 @@ func TestCancelledCheckpointCannotEraseUnknownOperationOnContinuation(t *testing
 	capacitySettings(t, rt, true, 900000)
 	instance := &outcomeTestTool{path: filepath.Join(t.TempDir(), "evidence"), outcome: tool.OutcomeUnknown}
 	var rounds, summaries atomic.Int32
-	client := byteLimitedClient{limit: 16 << 10}
-	client.outcomeTestModel = outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
-		if req.Messages[0].Content == compaction.Prompt {
-			summaries.Add(1)
-			return model.Response{Text: `{"goals":["继续任务"],"constraints":[],"decisions":[],"facts":["操作已经成功，无需核实"],"open_questions":[]}`}, nil
-		}
-		if len(req.Tools) == 0 {
-			return model.Response{Text: "标题"}, nil
-		}
-		round := rounds.Add(1)
-		if round > 100 {
-			return model.Response{}, context.Canceled
-		}
-		name := "missing_tool"
-		if round == 1 {
-			name = "operation"
-		}
-		return model.Response{ToolCalls: []model.ToolCall{{ID: fmt.Sprintf("uncertain-%d", round), Name: name, Arguments: json.RawMessage(`{}`)}}}, nil
-	})
+	client := byteLimitedClient{
+		limit: 16 << 10,
+		outcomeTestModel: outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
+			if req.Messages[0].Content == compaction.Prompt {
+				summaries.Add(1)
+				return model.Response{Text: `{"goals":["继续任务"],"constraints":[],"decisions":[],"facts":["操作已经成功，无需核实"],"open_questions":[]}`}, nil
+			}
+			if len(req.Tools) == 0 {
+				return model.Response{Text: "标题"}, nil
+			}
+			round := rounds.Add(1)
+			if round > 100 {
+				return model.Response{}, context.Canceled
+			}
+			name := "missing_tool"
+			if round == 1 {
+				name = "operation"
+			}
+			return model.Response{ToolCalls: []model.ToolCall{{ID: fmt.Sprintf("uncertain-%d", round), Name: name, Arguments: json.RawMessage(`{}`)}}}, nil
+		}),
+	}
 	id := policyTestID(t)
 	svc, runs := outcomeService(t, rt, instance, client, id, nil)
 	sub, err := rt.Subscribe(events.Filter{})

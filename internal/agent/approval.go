@@ -13,6 +13,7 @@ const ApprovalPending = "pending"
 const ApprovalApproved = "approved"
 const ApprovalRejected = "rejected"
 const ApprovalCancelled = "cancelled"
+const ApprovalAutoReviewer = "auto_review"
 
 var ErrConflict = errors.New("执行或审批状态冲突")
 var ErrApprovalInvalid = errors.New("审批参数无效")
@@ -26,6 +27,7 @@ type Approval struct {
 	RequestHash    string               `json:"request_hash"`
 	Status         string               `json:"status"`
 	DecidedBy      *string              `json:"decided_by"`
+	Review         *ApprovalReview      `json:"review,omitempty"`
 	DecisionNote   *string              `json:"decision_note"`
 	CreatedAt      int64                `json:"created_at"`
 	UpdatedAt      int64                `json:"updated_at"`
@@ -33,6 +35,13 @@ type Approval struct {
 	DirectoryScope *tool.DirectoryScope `json:"directory_scope,omitempty"`
 	DecisionScope  string               `json:"decision_scope,omitempty"`
 	DirectoryGrant *DirectoryGrant      `json:"directory_grant,omitempty"`
+}
+
+// ApprovalReview 关联审核模型步骤。转人工时仍保留原始审核结论。
+type ApprovalReview struct {
+	StepID   string `json:"step_id"`
+	Decision string `json:"decision"`
+	Reason   string `json:"reason"`
 }
 
 type ApprovalFilter struct {

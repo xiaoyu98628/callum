@@ -71,10 +71,11 @@ func (s *Service) Messages(ctx context.Context, id string, before int64, limit i
 	return s.repository.Messages(ctx, id, before, limit)
 }
 
-func (s *Service) Update(ctx context.Context, id string, change conversation.Change, modelID string) (conversation.Conversation, error) {
-	if !validID(id) || (change.WorkspaceID != nil && !validID(*change.WorkspaceID)) || (change.DetachWorkspace && change.WorkspaceID != nil) {
+func (s *Service) Update(ctx context.Context, id string, in conversation.Update) (conversation.Conversation, error) {
+	if !validID(id) || (in.WorkspaceID != nil && !validID(*in.WorkspaceID)) || (in.DetachWorkspace && in.WorkspaceID != nil) {
 		return conversation.Conversation{}, conversation.ErrInvalid
 	}
+	change := conversation.Change{Title: in.Title, WorkspaceID: in.WorkspaceID, DetachWorkspace: in.DetachWorkspace, Pinned: in.Pinned, Archived: in.Archived, Deleted: in.Deleted}
 	if change.Title != nil {
 		value := strings.TrimSpace(*change.Title)
 		if value == "" || len(value) > 1024 || !utf8.ValidString(value) {
@@ -82,11 +83,11 @@ func (s *Service) Update(ctx context.Context, id string, change conversation.Cha
 		}
 		change.Title = &value
 	}
-	if modelID != "" {
-		if !validID(modelID) {
+	if in.ModelID != "" {
+		if !validID(in.ModelID) {
 			return conversation.Conversation{}, conversation.ErrInvalid
 		}
-		resolved, err := s.resolve(ctx, modelID)
+		resolved, err := s.resolve(ctx, in.ModelID)
 		if err != nil {
 			return conversation.Conversation{}, err
 		}

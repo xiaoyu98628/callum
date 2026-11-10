@@ -36,35 +36,39 @@ func directoryGrant(row schema.DirectoryGrant) agent.DirectoryGrant {
 	return agent.DirectoryGrant{ID: row.ID, ConversationID: row.ConversationID, ApprovalID: row.ApprovalID, Scope: row.Scope, CreatedAt: row.CreatedAt, RevokedAt: row.RevokedAt}
 }
 
-// approvalDirectory 从服务端步骤与固定快照推导选项，不改变旧审批的决定。
-func approvalDirectory(tx *gorm.DB, a schema.Approval) (*tool.DirectoryScope, error) {
+// approvalDetails 从固定步骤读取审核投影并推导目录授权选项。
+func approvalDetails(tx *gorm.DB, a schema.Approval, out *agent.Approval) error {
 	var row schema.Step
 	if err := tx.Select("input").Where("id=? AND run_id=?", a.StepID, a.RunID).Take(&row).Error; err != nil {
-		return nil, err
+		return err
 	}
 	var input struct {
 		Policy        policy.ApprovalPolicy `json:"approval_policy"`
 		Authorization policy.Decision       `json:"authorization"`
+		Review        *agent.ApprovalReview `json:"approval_review"`
 	}
 	var request directoryRequest
 	if json.Unmarshal(row.Input, &input) != nil || json.Unmarshal(a.Request, &request) != nil {
-		return nil, agent.ErrApprovalInvalid
+		return agent.ErrApprovalInvalid
+	}
+	out.Review = input.Review
+	if out.Status != agent.ApprovalPending && out.DecidedBy != nil && *out.DecidedBy == agent.ApprovalAutoReviewer {
+		return nil
 	}
 	if input.Policy != policy.OnRequest || input.Authorization.Action != policy.Ask || input.Authorization.Reason != "outside_workspace" {
-		return nil, nil
+		return nil
 	}
-	return policy.DirectoryOption(request.targets(), request.Tool.Effects), nil
+	out.DirectoryScope = policy.DirectoryOption(request.targets(), request.Tool.Effects)
+	return nil
 }
 
 func decorateApproval(tx *gorm.DB, row schema.Approval) (agent.Approval, error) {
 	out := approval(row)
-	var err error
-	out.DirectoryScope, err = approvalDirectory(tx, row)
-	if err != nil {
+	if err := approvalDetails(tx, row, &out); err != nil {
 		return out, err
 	}
 	var grant schema.DirectoryGrant
-	err = tx.Where("approval_id=?", row.ID).Take(&grant).Error
+	err := tx.Where("approval_id=?", row.ID).Take(&grant).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return out, nil
 	}

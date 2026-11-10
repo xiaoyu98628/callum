@@ -19,6 +19,8 @@ import (
 // ExecuteCompaction 不创建或更新回答正文；连接取消和应用退出仍经统一调度器收敛。
 func (e *Engine) ExecuteCompaction(ctx context.Context, lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved) {
 	err := e.event(ex, "run.started", "", "", ex.Run)
+	e.beginContextUsage(ex, resolved)
+	defer e.endContextUsage(ex)
 	if err == nil {
 		err = e.event(ex, "step.created", ex.Step.ID, "", ex.Step)
 	}
@@ -47,9 +49,12 @@ func (e *Engine) ExecuteCompaction(ctx context.Context, lease *executor.Lease, e
 	if finishErr := e.repository.Finish(cleanup, ex.Run); finishErr != nil {
 		e.logger.Error("保存压缩执行终态失败", "module", "compaction", "run_id", ex.Run.ID)
 		ex.Run.Status, ex.Run.ErrorKind, ex.Run.ErrorMessage = agent.Failed, new("internal"), new("保存执行状态失败")
+		e.endContextUsage(ex)
 		_ = e.emit(agent.Event{Type: "run.failed", ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, Data: ex.Run, StatePersisted: new(false)})
 		return
 	}
+	// 用量刷新先于终态通知，连接可在终态后排空并结束。
+	e.endContextUsage(ex)
 	_ = e.event(ex, "run."+ex.Run.Status, "", "", ex.Run)
 }
 

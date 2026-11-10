@@ -21,6 +21,8 @@ func publicError(err error) *protocol.Error {
 		return &protocol.Error{Code: 1006, Message: "工作区有未结束执行"}
 	case errors.Is(err, domain.ErrConflict):
 		return &protocol.Error{Code: 1003, Message: "工作区路径已存在"}
+	case errors.Is(err, domain.ErrChanged):
+		return &protocol.Error{Code: 1003, Message: "工作区文件夹已更新，请重新打开项目编辑"}
 	case errors.Is(err, context.Canceled):
 		return &protocol.Error{Code: 1007, Message: "操作已取消"}
 	case errors.Is(err, context.DeadlineExceeded):

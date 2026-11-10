@@ -1,13 +1,14 @@
 # JSON-RPC 通信与手工测试
 
-本文按当前代码整理已实现的 stdio JSON-RPC 接口，共 42 个方法。协议版本为 `1`，数据库结构版本为 `5`，两者含义不同。
+本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `3`，两者含义不同。
+
+运行参数和开发检查见 [运行与开发](development.md)，配置空值和持久化规则见 [存储与模型配置](storage.md)，工具策略见 [Agent 工具与审批](tools-and-approvals.md)，Token 估算及压缩规则见 [上下文统计与压缩](context-compaction.md)。
 
 ## 1. 启动及输入约定
 
 在项目根目录执行。以下命令创建独立临时数据目录和测试工作区，避免使用日常应用数据：
 
 ```sh
-cd /Users/xiaoyu/www/go/works/callum
 CALLUM_RPC_TEST_ROOT="$(mktemp -d /private/tmp/callum-jsonrpc.XXXXXX)"
 mkdir "$CALLUM_RPC_TEST_ROOT/workspace"
 printf '%s\n' 'Callum JSON-RPC test file' > "$CALLUM_RPC_TEST_ROOT/workspace/note.txt"
@@ -17,10 +18,10 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 保存终端显示的工作区路径，作为后文的 `<workspace_path>`。上面的准备命令由 Shell 输出提示，Go 服务本身的 stdout 只输出协议消息。
 
-- stdin 每行输入一个完整 JSON 对象，按回车发送；下文请求示例均可逐行复制。
+- stdin 每行输入一个完整 UTF-8 JSON 对象，按回车发送，空行忽略；下文请求示例均可逐行复制。
 - stdout 每行输出一个 JSON 对象；诊断日志写入 stderr。
 - 不支持批量请求数组，也不支持 `params` 数组；未知参数字段会被拒绝。
-- 测试时建议每个请求携带不同的字符串 `id`，用于匹配响应。
+- 测试时建议每个请求携带不同的非空字符串 `id`，响应保留原请求 ID；合法通知不返回接口响应。
 - `<provider_id>` 等字符串是占位值，必须替换为实际响应返回的 ID；它们不会自动插值。
 - 业务记录 ID 为服务端生成的 UUIDv7；请求的 `id` 可以自行填写，不是业务 ID。
 - 保持 stdin 打开直到任务终态。输入结束、关闭终端或执行 `system.shutdown`，会取消该连接发起且尚未结束的执行。
@@ -54,8 +55,24 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"jsonrpc":"2.0","method":"system.ready","params":{"service":"callum","protocol_version":1,"max_concurrent_runs":4,"call_timeout_ms":300000,"max_request_bytes":1048576,"max_response_bytes":8388608,"max_text_bytes":1048576}}
 ```
 
-所有输入输出都是逐行 JSON，不带 SSE 的 `data:` 前缀。单条请求最多 1 MiB，单条响应最多 8 MiB；文本累计限制为 1 MiB，与 Token 容量无关。
+所有输入输出都是逐行 JSON，不带 SSE 的 `data:` 前缀。
+
+请求每行最多 1 MiB（不含换行），响应最多 8 MiB，单次累计模型文本最多 1 MiB，
+单次上游原始 HTTP 响应最多 16 MiB（包含流式协议开销），这些字节限制不等同于 Token 限制。
+stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒会中断该连接并清理它发起的执行。
+事件订阅还有独立的 64 条队列；订阅溢出会立即断开对应连接，避免慢消费者占用共享执行资源。
+输入超长、输出写入失败均会退出，不会无限缓存消息。
 普通对话的文本限制累计覆盖同一执行的所有回答轮次。流式超限后以 `run.failed` 结束，消息及 `message.updated` 只保留通过检查的部分正文；步骤仍保存原始响应和实际返回的 usage。
+
+### 1.2 连接关闭与资源清理
+
+独立 stdio 进程的关闭行为如下；共享 Runtime 只取消并等待当前连接发起的执行，其他调用方继续运行。
+
+模型执行是异步的，stdin EOF、关闭请求、Ctrl+C 或 SIGTERM 会停止接收并取消、等待全部执行，
+随后关闭 HTTP 空闲连接和数据库。EOF 与正常关闭会排空可发送的事件；外部取消或通信失败会直接关闭管道。
+因此，单次 `echo ... | callum` 在输入结束后会取消尚未完成的调用；联调时保持输入打开直到取得终态。
+
+启动失败时不发送 `system.ready`，向 stderr 记录错误并以非零状态退出。`--help` 将帮助文本写入 stderr 后退出，不打开数据库。
 
 ## 2. 接口总览
 
@@ -68,10 +85,12 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | 无历史调用 | `model.invoke` |
 | 工作区 | `workspace.create`、`workspace.update`、`workspace.get`、`workspace.list`、`workspace.delete`、`workspace.restore` |
 | 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.messages`、`conversation.delete`、`conversation.restore` |
-| 上下文压缩 | `conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
+| 上下文压缩 | `conversation.context_usage`、`conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
 | 执行 | `run.get`、`run.list`、`run.cancel` |
 | 步骤 | `step.get`、`step.list`、`step.data` |
 | 审批 | `approval.get`、`approval.list`、`approval.decide` |
+| 会话目录授权 | `approval.directory.list`、`approval.directory.revoke` |
+| 用户补充输入 | `user_input.get`、`user_input.list`、`user_input.submit` |
 
 不存在 `conversation.create` 或客户端直接执行工具的 JSON-RPC 方法。首次提问创建会话，工具由模型自主选择。
 
@@ -123,10 +142,10 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 | 字段 | 支持值 | 默认值 |
 | --- | --- | --- |
 | `approval_policy` | `on-request`、`always`、`never` | `on-request` |
-| `approvals_reviewer` | 当前仅 `user` | `user` |
-| `sandbox_mode` | `workspace-write`、`read-only` | `workspace-write` |
+| `approvals_reviewer` | `user`、`auto_review` | `user` |
+| `sandbox_mode` | `workspace-write`、`read-only`、`danger-full-access` | `workspace-write` |
 
-`on-request` 按操作类别判断；`always` 逐次询问；`never` 不询问，并拒绝需要审批的操作。`never` 不扩大工作区或工具权限，不是完全访问模式。
+`on-request` 按操作类别判断；`always` 逐次询问；`never` 不询问，并拒绝需要审批的操作。`never` 在只读和项目写入模式下不会扩大工具权限。完全访问要求显式设置 `sandbox_mode: "danger-full-access"`，同时使用 `approval_policy: "never"` 和 `approvals_reviewer: "user"`。
 
 ### settings.get
 
@@ -148,13 +167,17 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"jsonrpc":"2.0","id":"settings-update","method":"settings.update","params":{"key":"execution","revision":1,"value":{"approval_policy":"always","approvals_reviewer":"user"}}}
 ```
 
-成功返回更新后的完整设置记录，`revision` 加一。再次携带旧版本保存，返回 `1003`；重新读取后再保存。`auto_review`、未知配置字段、缺少字段、重复键或错误类型返回 `-32602`。
+成功返回更新后的完整设置记录，`revision` 加一。再次携带旧版本保存，返回 `1003`；重新读取后再保存。非法审批人与沙箱组合、未知字段、缺少必要字段、重复键或错误类型返回 `-32602`。
+
+审批人为 `auto_review` 时策略须为 `on-request` 或 `always`，并保留沙箱。服务端按固定操作判断是否适合 AI 审核，符合范围时创建工具步骤的 `model_call` 子步骤，`input.purpose` 为 `approval_review`，`input.request_hash` 与工具操作一致。模型、结论、理由及实际 usage 可用步骤接口查询。AI 决定直接发布 `approval.updated`，`decided_by` 为 `auto_review`，审批对象的 `review` 包含 `step_id`、`decision`、`reason`。转人工时发出 `approval.requested`，`review.decision` 为 `handoff`。客户端通过 `approval.decide` 提交人工决定，服务端将身份记为 `local_user`。
 
 修改成功后发起的新执行无需重启即可使用新设置。已受理、正在执行或等待审批的任务继续使用自己的快照，可通过 `run.get.result.settings_snapshot` 查看。设置更新当前不推送专门的 `settings.updated` 事件，其他窗口通过 `settings.get` 读取最新值。
 
 审批设置不再接受启动参数 `--approval-mode`、`--approval-policy` 或 `--approvals-reviewer`。
 
 ## 6. 厂商配置
+
+厂商、模型查询结果均使用 snake_case 字段，并包含 `created_at`、`updated_at`。修改和删除接口成功返回记录 ID，不会将不存在的记录自动创建出来。模型元数据和空值语义见 [存储与模型配置](storage.md#表结构与校验)。
 
 ### provider.create
 
@@ -264,7 +287,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"jsonrpc":"2.0","id":"model-enable","method":"model.set_enabled","params":{"id":"<model_id>","enabled":true}}
 ```
 
-禁用后，新调用返回 `1004`。进行正常对话测试前恢复启用。成功返回 `result.id`。
+禁用后，新调用返回 `1004`，已经受理的执行继续使用其配置快照。进行正常对话测试前恢复启用。成功返回 `result.id`。
 
 ### model.delete
 
@@ -289,10 +312,13 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 ```
 
 - `user_message_id` 是用户问题的 ID；`message_id` 是模型回答消息的 ID。
-- 首次提问不提供 `conversation_id`；服务同时创建会话、消息、执行和初始步骤。
+- 首次提问不提供 `conversation_id`，必须提供 `model_id`；服务在同一事务原子创建会话、消息、执行和初始步骤。客户端“新会话”按钮只建立输入界面。
 - `stream:false` 表示向模型发非流式请求，Callum 仍然异步受理，回答不在这条 RPC 的 `result` 中。
 - 等待 `message.updated` 获取完整回答，并以 `run.completed`、`run.failed`、`run.cancelled` 判断终态。
-- 默认标题来自首条问题前 30 个 Unicode 码点；辅助标题与回答并行，事件可能交错。
+
+默认标题为首条问题文字去首尾空白后前 30 个 Unicode 码点，英文按字母、空格、标点计数，仅图片默认“新对话”。
+标题调用与首次回答并行，使用当前模型，最多 10 秒且受模型请求超时约束；容量不足时跳过，主回答结束即取消并等待尚未完成的标题任务。
+标题成功通过 conversation.updated 更新；人工改名和问题内容变化会阻止旧标题覆盖。标题失败不导致回答失败。
 
 ### conversation.send：继续同一会话，流式回答
 
@@ -302,7 +328,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"jsonrpc":"2.0","id":"chat-next","method":"conversation.send","params":{"conversation_id":"<conversation_id>","stream":true,"content":[{"type":"text","text":"我叫什么名字？"}]}}
 ```
 
-服务自动读取历史；客户端只传当前问题。`stream` 省略时默认为 `true`。已有会话可以省略 `model_id`；显式传入另一个可用模型时，会更新会话采用的模型。
+服务自动读取历史；客户端只传当前问题。`stream` 省略时默认为 `true`。已有会话可以省略 `model_id`，服务从会话选定模型重新解析当前有效配置；显式传入另一个可用模型时，会更新会话采用的模型。不存在的会话 ID 不会被当作新会话创建。
 
 文本增量事件示例：
 
@@ -319,7 +345,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"jsonrpc":"2.0","id":"messages-before","method":"conversation.messages","params":{"conversation_id":"<conversation_id>","before_sequence":3,"limit":100}}
 ```
 
-返回消息数组。`before_sequence` 为严格小于该顺序号，省略时读取最近一页；每页内部按 `sequence` 升序排列。`limit` 默认 100，范围 1 至 200；受内容字节限制影响，一页可能少于请求数量。
+返回消息数组。`before_sequence` 为严格小于该顺序号，省略时读取最近一页；每页内部按 `sequence` 升序排列。`limit` 默认 100，范围 1 至 200；消息页还有 7 MiB 保护，可能少于请求数量。使用当前页最小 `sequence` 作为下一次 `before_sequence`，直到空数组。
 
 消息对象示例：
 
@@ -327,7 +353,7 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"id":"<message_id>","conversation_id":"<conversation_id>","run_id":"<run_id>","sequence":2,"role":"assistant","content":[{"type":"text","text":"好的，我记住了，你叫小雨。"}],"status":"completed","created_at":1700000000000,"updated_at":1700000001000,"completed_at":1700000001000}
 ```
 
-顺序从 1 开始：用户问题为 1、模型回答为 2、下一条问题为 3。工具调用和审批保存在步骤表，不作为对话消息插入。
+顺序从 1 开始：用户问题为 1、模型回答为 2、下一条问题为 3，不使用 `parent_message_id`。工具调用和审批保存在步骤表，不作为对话消息插入，跨表关系使用外键、唯一约束和事务校验。
 
 ### conversation.resend
 
@@ -338,6 +364,8 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 ```
 
 受理结果仍返回会话、执行及消息 ID。用户消息 ID 和顺序保持，回答消息及执行使用新 ID；`removed_message_ids` 列出被清除的旧回答消息 ID。旧消息分支不保留，实际工具和审批审计保留；旧模型响应副本清理。
+
+`run.started` 通知同样携带 `removed_message_ids`，供其他窗口清理旧回答。旧执行身份及 usage 等审计信息保留。
 
 编辑较早的用户消息、在执行中重发、把回答消息 ID 当作用户消息 ID，均不会正常受理。`conversation.send` 不接受 `message_id`，重发必须使用 `conversation.resend`。
 
@@ -402,6 +430,21 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 
 估算方法 unicode-v1 按有效文本字符、代码标点和封装开销计算，图片使用可配置单图估算；不是厂商 tokenizer。仅在同一执行的请求前缀和工具定义未变时，可参考上一轮实际 prompt_tokens 并估算增量；不以累计 usage 判断当前上下文，估算不写入 usage。无效预算使异步执行以 token_budget_unconfigured 失败；必须保留的输入或单个源轮次超预算时为 token_budget_exceeded。远端仍负责最终容量校验，失败不自动重发。context_compaction 直接初始化当前 Token 配置，revision 为 1；旧条数/字节设置及相应执行快照不做自动转换，版本 6 数据库不受支持。拒绝时保留已有数据和版本，不删除或重建数据库。
 
+#### conversation.context_usage
+
+```json
+{"jsonrpc":"2.0","id":"usage-new","method":"conversation.context_usage","params":{"model_id":"<model_id>","draft":"尚未发送的草稿"}}
+{"jsonrpc":"2.0","id":"usage-chat","method":"conversation.context_usage","params":{"conversation_id":"<conversation_id>","model_id":"<model_id>","draft":""}}
+```
+
+新对话可指定 workspace_id；已有对话从会话读取项目，不可另传 workspace_id。model_id 可在已有对话省略，使用会话模型。草稿只参与本次计算，不保存、不发送到模型；单条 RPC 仍受 1 MiB 输入边界限制。查询不会创建会话、运行或摘要，也不会触发自动压缩。
+
+result 包含 conversation_id（新对话为空）、model_id、可选 run_id、进程内递增 revision、updated_at（毫秒）、state、可选 reason、estimated_tokens、draft_tokens、input_limit、context_window、output_reserve、safety_margin、estimation_method 与 actual_input_tokens。state 为 ready 时 estimated_tokens 是非负整数；preparing（准备中）、refresh_required（来源变化需重查）、unavailable（reason=history_limit，历史无法安全恢复）时为 null。input_limit 是可用输入预算，context_window 是已配置模型窗口，未知保持 null；不能用未知值计算百分比。估算计入系统提示、工具定义、有效摘要、未覆盖历史与工具调用结果；执行中还计入已接受的生成内容，草稿单独叠加。预览沿有界完整轮次分页，检查消息边界、最后用户执行、有效摘要和设置版本，变化时不返回混合快照。
+
+实际输入 actual_input_tokens 只来自同一模型最近主调用的统一结果投影，缺失保持 null；与当前估算独立。新增主模型步骤将该标量保存在 output.context_usage.actual_input_tokens，原始 usage 不改写；旧记录不反向解析厂商私有响应。执行缓存使用受理时模型和设置，空闲查询使用当前配置；活动执行选择其他模型返回 busy。
+
+通知 conversation.context_usage.updated 的 params 含 conversation_id、run_id 与 context_usage（同一 DTO，不带草稿）。流式通知最多每 100ms 一次，最新数字仍可查询；工具结果、请求边界强制发布，终态持久化后、执行终态通知前发布 refresh_required。revision 只在当前进程有序，服务重连后客户端清空旧快照再查询。缓存仅在执行期间持有数字，无新增数据库表、计时 goroutine 或模型调用。
+
 #### conversation.compact
 
 ```json
@@ -457,10 +500,12 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 `create`、`get` 返回工作区对象：
 
 ```json
-{"id":"<workspace_id>","name":"JSON-RPC 测试工作区","root_path":"<workspace_path>","pinned_at":null,"archived_at":null,"deleted_at":null,"created_at":1700000000000,"updated_at":1700000000000}
+{"id":"<workspace_id>","name":"JSON-RPC 测试工作区","root_path":"<workspace_path>","other_paths":[],"pinned_at":null,"archived_at":null,"deleted_at":null,"created_at":1700000000000,"updated_at":1700000000000}
 ```
 
-`list` 返回对象数组。过滤与分页默认值同会话列表；`limit` 为 1 至 200。工作区根路径必须是绝对路径，重复的规范化路径返回冲突。
+`list` 返回对象数组，`limit` 为 1 至 200。提供非空主目录时必须是绝对路径，已存在的主目录返回冲突。省略主目录或使用空字符串可创建无目录项目，此时 `other_paths` 必须为空；多个无目录项目不会合并。创建时可附带 `other_paths`，最多 15 个其他目录。多目录创建会解析符号链接、检查所有目录实际存在，并拒绝同项目内重复的目录。项目和其他目录在同一事务保存。
+
+工作区对象中的 `other_paths` 按路径排序，无其他目录时返回空数组。同一非空主目录重新添加已软删除的项目时，省略 `other_paths` 保留原目录，显式提供该字段时以新列表为准，包括空数组。
 
 ### workspace.update
 
@@ -469,9 +514,19 @@ go run ./cmd/callum --data-dir "$CALLUM_RPC_TEST_ROOT/data"
 {"jsonrpc":"2.0","id":"workspace-unpin","method":"workspace.update","params":{"id":"<workspace_id>","pinned":false}}
 {"jsonrpc":"2.0","id":"workspace-archive","method":"workspace.update","params":{"id":"<workspace_id>","archived":true}}
 {"jsonrpc":"2.0","id":"workspace-unarchive","method":"workspace.update","params":{"id":"<workspace_id>","archived":false}}
+{"jsonrpc":"2.0","id":"workspace-primary","method":"workspace.update","params":{"id":"<workspace_id>","name":"修改后的工作区名称","root_path":"<existing_source_directory>"}}
 ```
 
-返回更新后的工作区对象；本接口不接受 `root_path`。工作区有关联活动执行时，归档或删除状态变更会返回 `1006`。
+返回更新后的工作区对象。仅更新 `root_path` 时可将已有源目录切换为主目录；服务端解析实际路径并检查目录存在，目标必须属于该项目，原主目录转为其他目录。切换与名称在同一事务提交，保留项目 ID、对话及所有源目录，不移动磁盘文件，后续相对路径使用新主目录。若目标是其他项目（包括软删除项目）的主目录，返回 `1003`，不保存名称或目录变更。已删除项目不能切换主目录。完整目录更新同时提供 `root_path`、`other_paths` 和 `expected_folders`，支持添加和移除源目录。后者为打开编辑时的原目录快照，第一项必须是原主目录，其余为原附加目录；无目录项目使用空数组。服务校验每个实际目录并拒绝重复身份，在事务内复核原快照、活动执行、主目录唯一约束后一次保存目录及名称。原快照已变化返回 `1003`，不覆盖并发修改。移除目录只解除关联，保留磁盘文件、项目 ID 和历史对话。
+
+```json
+{"jsonrpc":"2.0","id":"workspace-folders","method":"workspace.update","params":{"id":"<workspace_id>","root_path":"<main_path>","other_paths":["<new_folder>"],"expected_folders":["<old_main>","<old_other>"]}}
+{"jsonrpc":"2.0","id":"workspace-no-folders","method":"workspace.update","params":{"id":"<workspace_id>","root_path":"","other_paths":[],"expected_folders":["<main_path>","<other_path>"]}}
+```
+
+无目录项目返回 `root_path:""` 和 `other_paths:[]`，其对话仍归属原项目，工具使用未绑定目录时的路径规则；相对路径不可用，不回退服务进程当前目录。
+
+工作区有关联活动执行（运行中、等待审批或等待用户输入）时，增删源目录、切换主目录、归档或删除状态变更会返回 `1006`；只改名称或提交未变化的主目录不触发切换限制。
 
 ### workspace.delete / workspace.restore
 
@@ -520,7 +575,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 | `read_file` | `path`，可选 `start_line`、`end_line` | 按行读取 UTF-8 文本，例如 `path:"note.txt"` |
 | `search_text` | `path`、`query`，可选 `limit` | 搜索字面文本 |
 | `apply_patch` | `patch`、`base_versions` | 创建或修改 UTF-8 文本文件；修改需提供原文件 SHA-256 |
-| `run_command` | `command` 数组，可选 `cwd` | 非交互命令执行，实时推送输出并保存最终结果；根据服务端固定的沙箱边界和审批策略判定 |
+| `run_command` | `command` 数组，可选 `cwd`、`sandbox_permissions`、`justification` | 非交互命令执行，实时推送输出并保存最终结果。根据服务端固定的沙箱边界和审批策略判定 |
 
 四个文件工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
 纯读取在 `on-request` 与 `never` 下自动执行，包括无工作区和工作区外路径，仍受当前系统用户访问权限及文件工具的校验约束；`always` 逐次询问。无工作区或工作区外普通修改在 `on-request` 下需要审批，`never` 拒绝仍需审批的操作。默认批准只授权该次固定目标；具备目录选项时，用户可明确选择当前会话的目录及子目录授权。
@@ -561,7 +616,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 {"jsonrpc":"2.0","id":"approval-reject","method":"approval.decide","params":{"approval_id":"<approval_id>","decision":"rejected","decision_note":"不允许本次操作"}}
 ```
 
-二选一进行测试；同一决定重复提交保持幂等，提交相反决定返回 `1003`。说明可省略，提供时必须是最多 4096 字节的 UTF-8 文本。
+二选一进行测试。同一人工决定按原授权范围重复提交保持幂等。提交相反决定或尝试改动已完成的 AI 决定时返回 `1003`。说明可省略，提供时必须是最多 4096 字节的 UTF-8 文本。
 
 返回保存后的完整审批记录；用户身份由服务写入为 `local_user`。不能由客户端提供或修改 `request`、`request_hash`、`decided_by`。
 
@@ -569,7 +624,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 待审批时可使用 `run.cancel` 取消整个执行，审批随之进入 `cancelled`。`approval.decide` 不接受 `cancelled`、`expired` 或 `user_input` 作为决定。
 
-### 11.4 三种策略的测试区别
+### 11.4 受限沙箱下三种策略的测试区别
 
 | 策略 | 纯读取（含无工作区／工作区外绝对路径）及工作区内普通修改 | 工作区外普通修改及其他需要审批的操作 |
 | --- | --- | --- |
@@ -595,7 +650,9 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 {"jsonrpc":"2.0","id":"chat-image","method":"conversation.send","params":{"model_id":"<model_id>","stream":true,"content":[{"type":"text","text":"请描述这张图片。"},{"type":"image","path":"<absolute_image_path>"}]}}
 ```
 
-图片由适配器读取并转换，客户端不传 Base64 或远端协议格式。文本块使用 `text`，图片块使用 `path`；图片输出尚未启用。
+图片要求使用规范绝对路径、普通对话启用 image_input，并由具体端点支持；服务读取 PNG、JPEG、GIF、WebP 为内联数据发送，不把本地路径直接交给远端。
+单图最多 4 MiB，实际请求 JSON 上限 12 MiB；图片读取失败、格式不支持、超限均明确失败，不静默丢弃内容块。
+当前适配器不生成图片，附件管理未接入，编辑或删除消息不删除图片源文件。图片原文件不复制、不版本化，历史再次调用仍依赖该路径指向的可读文件。客户端不传 Base64 或远端协议格式。
 读取只接受核对身份后的普通文件，使用已打开的固定句柄。Unix 使用非阻塞打开；路径在检查后被替换为命名管道时明确失败，不等待管道写端。
 
 ## 13. 执行查询和取消
@@ -678,11 +735,18 @@ usage 片段响应示例：
 
 `fragment` 是字符串，拼接完整后再作为 JSON 解析。未读完时，把返回的 `next_offset` 原样作为下一次请求的 `offset`；不要按 Unicode 字符数自行计算偏移。字段缺失时 `present:false`、片段为空，不生成估算用量。
 
-- 模型调用步骤的 `output` 保存协议适配后的完整结果及相关原始响应数据；使用返回的 JSON 格式标识解释内容。
-- 模型调用步骤的 `usage` 原样保存厂商返回的用量；主回答、每轮继续调用及辅助标题分别记录，不能只看第一条步骤。
+- 模型调用步骤的 `output` 保存协议适配后的完整结果及相关原始响应数据；格式和保存时机见本节后文。
+- 模型调用步骤的 `usage` 原样保存厂商返回的用量；主回答、每轮继续调用及辅助标题分别记录，缺失保持未知。
 - 工具步骤的 `input` 保存规范化请求、哈希、审批策略、审批人、`settings_revision` 和权限判定。
 - `authorization.action` 为 `allow`、`ask`、`deny`；它是规则判定，实际批准或拒绝通过审批记录查询。
 - 新工具步骤的 `input.operation_version` 为 `1`。`output` 保存 `result`、`operation`、可选的独立受控 `error`，以及上下文恢复所需的统一消息。错误时仍保留已获得的有效实际输出；没有有效输出的失败保持 `result.error` 结构。
+
+正文与消息状态保存在 conversation_messages，模型原始结果和 usage 保存在具体 model_call 步骤。
+非流式 output 包含协议标识、json_response 格式和原响应对象；流式为 stream_result，标准字段组装，未知 delta 扩展按字段保留片段。
+未取得可用模型响应时，以 request_error 保存受控 HTTP 状态、调用阶段和供应商请求标识，不保存可能回显凭据的错误体。
+usage 原样保留供应商字段，缺失为 NULL；不把零值或估算值当作已返回的用量。标题单独计入其模型步骤，不在父执行重复累计。
+流式正文分批保存，终态前保存最终或部分结果；异常进程退出可能丢失尚未落库的最后增量。
+消息正文及其更新通知只采用通过累计文本上限检查的增量。超限时执行失败，并保留已接收的部分正文；步骤中的原始响应和实际 usage 独立保存，不会把被拒收的片段重新写入消息。
 
 工具结果中的 `operation` 由服务端保存，例如：
 
@@ -700,7 +764,9 @@ usage 片段响应示例：
 
 ## 15. 无历史模型调用 model.invoke
 
-此接口用于兼容调用，不创建会话、消息或持久化执行。客户端自己提交完整文本上下文；只接受 `system`、`user`、`assistant` 角色及字符串 `content`。
+此接口用于兼容调用，不创建会话、消息或持久化执行。客户端自己提交完整文本上下文，最多 256 条消息；只接受 `system`、`user`、`assistant` 角色及字符串 `content`。
+
+每次调用重新查询厂商和模型配置，不在网络等待期间占用数据库连接。受理后使用独立的配置快照、消息副本及取消上下文；后续配置修改只影响新调用。
 
 ```json
 {"jsonrpc":"2.0","id":"invoke-stream","method":"model.invoke","params":{"model_id":"<model_id>","stream":true,"messages":[{"role":"system","content":"请用中文回答。"},{"role":"user","content":"你好，请介绍一下你自己。"}]}}
@@ -738,6 +804,8 @@ usage 片段响应示例：
 
 ## 16. 服务端事件与界面处理
 
+通知没有顶层 `id`，`method` 为事件类型；`params` 按需携带会话、执行、步骤和消息标识。普通对话与兼容的 `model.invoke` 共用输出连接，通过 `conversation_id` 区分。每个受理的执行只确定一次终态，收到部分文本不能视为成功；断连不保证终态送达，不提供逐事件重放。
+
 ### 16.1 普通对话事件
 
 | 事件 | 主要 `params` 字段 | 处理方式 |
@@ -745,6 +813,7 @@ usage 片段响应示例：
 | `system.ready` | 服务信息 | 当前连接已就绪 |
 | `conversation.created` | `conversation_id`、`run_id`、`conversation` | 首次问题创建会话 |
 | `conversation.updated` | `conversation_id`、`conversation`，执行内通常还有 `run_id` | 更新会话属性或标题 |
+| `conversation.context_usage.updated` | `conversation_id`、`run_id`、`context_usage` | 更新当前执行数字快照；refresh_required 时重新查询有效历史 |
 | `run.started` | `conversation_id`、`run_id`、`run` | 记录受理执行及设置快照 |
 | `run.updated` | `conversation_id`、`run_id`、`run` | 更新运行／等待审批状态 |
 | `message.created` | 会话、执行、消息标识及 `message` | 新增用户或回答消息 |
@@ -761,6 +830,10 @@ usage 片段响应示例：
 | `run.failed` | 标识、`run`、通常还有 `error` | 展示失败；最终持久化失败时可能含 `persisted:false` |
 | `run.cancelled` | 标识、`run`、通常还有 `error` | 本次执行取消 |
 
+状态落库后通知；若终态持久化失败，run.failed 明确附带 persisted=false，表示数据库终态未确认，不能按成功保存处理。
+原始大结果不随每次步骤通知重复发送。重新打开会话通过消息、运行和步骤查询恢复展示。
+工作区、会话有未结束执行时，禁止归档、删除和移动等影响执行的操作；标题及置顶可在执行中修改。
+
 普通对话失败事件中，`params.error` 形状是 `{"kind":"incomplete","message":"模型输出未完整完成"}`；与无历史调用的错误对象不同。
 
 对于同一次执行，受理响应排在该执行事件之前；不同会话、标题任务和多个连接的事件可能交错。通过 `conversation_id`、`run_id`、`message_id`、`step_id` 区分，不依赖所有步骤的固定到达顺序。
@@ -769,11 +842,15 @@ usage 片段响应示例：
 
 ### 16.2 无历史调用事件
 
-`model.invoke` 使用 `run.text_delta`、`run.completed`、`run.failed`、`run.cancelled`，其 `params` 不包含持久化 `run` 对象或 `conversation_id`。
+`model.invoke` 使用 `run.text_delta`、`run.completed`、`run.failed`、`run.cancelled`，其 `params` 不包含持久化 `run` 对象或 `conversation_id`。生成事件可带 `provider_request_id`，它与接口请求 ID、执行 ID 分开管理；非流式调用失败时可能附带不完整文本，不能按成功结果处理。
 
 当前不发送 `step.output_delta`、`run.interrupted` 或独立的上下文压缩通知。压缩复用 step.created/step.updated 与执行事件。重启恢复中断状态及新工具步骤的保守操作事实，客户端查询执行记录获取结果，不承诺重放旧事件。
 
 ## 17. 错误码与负向测试
+
+请求格式错误、参数错误、接口不存在以及接受前的业务错误通过接口响应的 `error` 返回；
+接受后的生成错误通过 `run.failed` / `run.cancelled` 返回。错误只包含受控描述及必要的供应商请求标识、
+HTTP 状态，不暴露凭据、原始供应商响应体或底层错误链。
 
 | 错误码 | 常见含义 |
 | --- | --- |
@@ -802,7 +879,7 @@ usage 片段响应示例：
 {"jsonrpc":"2.0","id":"bad-method","method":"missing.method","params":{}}
 {"jsonrpc":"2.0","id":"bad-field","method":"system.info","params":{"unknown":true}}
 {"jsonrpc":"2.0","id":"bad-id","method":"model.get","params":{"id":"not-a-uuid"}}
-{"jsonrpc":"2.0","id":"bad-reviewer","method":"settings.update","params":{"key":"execution","revision":1,"value":{"approval_policy":"always","approvals_reviewer":"auto_review"}}}
+{"jsonrpc":"2.0","id":"bad-reviewer","method":"settings.update","params":{"key":"execution","revision":1,"value":{"approval_policy":"never","approvals_reviewer":"auto_review"}}}
 ```
 
 预期依次为 `-32601`、`-32602`、`-32602`、`-32602`。另可手动输入不完整 JSON 验证 `-32700`。
@@ -830,10 +907,10 @@ usage 片段响应示例：
 
 ## 18. 实现依据
 
-- 请求、参数和逐行协议：[protocol](/Users/xiaoyu/www/go/works/callum/internal/stdio/protocol)、[transport](/Users/xiaoyu/www/go/works/callum/internal/stdio/transport)。
-- 路由及就绪信息：[router.go](/Users/xiaoyu/www/go/works/callum/internal/stdio/router.go)、[server.go](/Users/xiaoyu/www/go/works/callum/internal/stdio/server.go)。
-- 配置接口：[catalog](/Users/xiaoyu/www/go/works/callum/internal/stdio/catalog)、[settings](/Users/xiaoyu/www/go/works/callum/internal/stdio/settings)。
-- 对话及执行接口：[conversation](/Users/xiaoyu/www/go/works/callum/internal/stdio/conversation)、[execution](/Users/xiaoyu/www/go/works/callum/internal/stdio/execution)、[approval](/Users/xiaoyu/www/go/works/callum/internal/stdio/approval)、[workspace](/Users/xiaoyu/www/go/works/callum/internal/stdio/workspace)。
+- 请求、参数和逐行协议：[protocol](../internal/stdio/protocol)、[transport](../internal/stdio/transport)。
+- 路由及就绪信息：[router.go](../internal/stdio/router.go)、[server.go](../internal/stdio/server.go)。
+- 配置接口：[catalog](../internal/stdio/catalog)、[settings](../internal/stdio/settings)。
+- 对话及执行接口：[conversation](../internal/stdio/conversation)、[execution](../internal/stdio/execution)、[approval](../internal/stdio/approval)、[workspace](../internal/stdio/workspace)。
 - 进一步的数据与执行约定见 [对话设计](design/conversations.md)。
 
 ## 19. 文件补丁工具参数与结果
@@ -872,11 +949,13 @@ usage 片段响应示例：
 ```
 
 command 是 1 至 256 项字符串数组，整个参数 JSON 不超过 16 KiB。cwd 省略或相对时以绑定工作区为基准；无工作区必须提供绝对 cwd，不使用 Callum 进程目录。可执行文件解析为绝对路径并记录身份；Windows 直接启动 exe/com，脚本需显式指定解释器。stdin 为空，无 PTY、后续输入或后台会话。
-命令 effects 仍为 `unknown`，不按 `ls`、`cat` 等命令文字伪装为读取。服务端另固定实际执行边界：macOS 的新任务默认通过 `/usr/bin/sandbox-exec` 使用 Seatbelt；命令及后代可读取当前用户可读的文件，网络关闭，`workspace-write` 仅开放真实项目及每次命令的私有临时目录写入，`read-only` 或未绑定项目仅开放该临时目录写入。项目路径下 `.git`、`.codex`、`.agents`、`.aws` 的直接写入被拒绝。常用 Go/npm 缓存定向到私有临时目录，结束后删除；未安装的依赖不能通过命令联网下载。模型客户端的网络请求不受命令沙箱限制。
+命令 effects 固定为 `unknown`。macOS 使用 `/usr/bin/sandbox-exec` 启动 Seatbelt，默认只读，网络关闭，仅本次命令的私有临时目录可写。内置文件工具和 Seatbelt 命令禁止访问 Callum 自身数据目录，目录搜索跳过该目录。沙箱内项目写入也限制重命名该目录在项目内的祖先路径。文件工具拒绝以其他路径访问 SQLite 文件及附属文件。SQLite 文件存在硬链接时拒绝启动 Seatbelt 命令。项目中的 `.git`、`.codex`、`.agents`、`.aws` 仍受写入限制。Go/npm 临时缓存使用本次命令的私有临时目录。
 
-`on-request` 自动执行普通沙箱命令；已识别的删除、权限修改及敏感 Git 命令仍询问，批准后也保留原沙箱。该识别不保证分析任意脚本的业务影响。`always` 对有效调用逐次询问；`never` 执行允许的沙箱调用并拒绝仍需审批的操作。沙箱执行失败直接保留退出码及错误，不自动在沙箱外重试。系统沙箱无法启动时明确失败，不降级为无隔离执行。
+`on-request` 自动执行普通只读沙箱命令，已识别的高风险命令逐次询问。`always` 对有效调用逐次询问，`never` 拒绝需要审批的调用。沙箱失败保留退出码及错误，任何更高权限都需要新的明确请求。
 
-确需扩大权限时，模型必须提交 `sandbox_permissions: "require_escalated"` 及非空 `justification`。服务端生成本次沙箱外执行快照并请求独立审批；批准只允许本次固定命令使用当前系统用户的文件和网络权限，不保存命令前缀或目录授权。`never` 拒绝该请求。可选 `sandbox_permissions: "use_default"` 与省略一致。Linux/Windows 尚未接入系统沙箱，仍对每次命令请求审批，不宣称具有 macOS 的隔离能力。
+`sandbox_permissions` 省略或为 `use_default` 时，macOS 与 Windows 命令保持只读沙箱。需要项目写入时，提交 `workspace_write` 及非空 `justification`。服务端要求绑定工作区、受理快照允许项目写入和单次审批。批准后，命令可修改或删除真实工作区内的文件，网络仍关闭。请求 `require_escalated` 同样需要说明和单次审批，批准后使用当前系统用户的文件和网络权限。Linux 当前命令逐次审批，`workspace_write` 在没有系统沙箱时不可用。Windows 的 AppContainer 实现尚待原生运行验收。
+
+程序解析、环境白名单、Windows AppContainer、ACL 恢复与平台原生验收范围见 [非交互命令执行](tools-and-approvals.md#非交互命令执行)。
 
 Seatbelt 是共享文件系统上的路径访问边界，不是容器或独立文件系统：项目内既有文件的其他硬链接会共享修改，项目内已可写的别名也不构成独立副本；新建硬链接被默认拒绝。路径固定及执行前复核不保证抵抗同时发生的外部重命名，也不锁定程序的完整依赖图。应将项目根目录设为实际任务目录，而非整个用户目录。
 
@@ -919,7 +998,7 @@ sequence 在单个步骤内递增，从 1 开始；按 step_id 分流后解码 b
 
 文字最多 4096 个 UTF-8 字节；非跳过时必须选中有效选项或填写非空文字，允许选择后附加说明。跳过时必须没有选项和文字。相同回复重复提交幂等，不重复触发模型调用；不同回复、跨执行、取消或中断后的提交会被拒绝。提交失败或结果未知时先查询，不自动重新执行。
 
-请求在现有 `user_input` 类型的步骤中持久化；问题、步骤、执行和回答的等待状态在同一事务中改变。等待期间不持有事务或模型请求槽位，不设置用户回复期限。提交成功后固定结果作为对应工具结果继续送给模型，调用与结果保持配对。`run.cancel`、连接关闭或应用退出结束等待；重启恢复把未结束步骤和执行标为 `interrupted`，不自动恢复调用。客户端收起卡片不对应任何决定或取消接口。
+请求在现有 `user_input` 类型的步骤中持久化；问题、步骤、执行和回答的等待状态在同一事务中改变。等待期间不持有事务或模型请求槽位，不设置用户回复期限，仍受全局活动执行上限和会话互斥保护。提交成功后固定结果作为对应工具结果继续送给模型，调用与结果保持配对。`run.cancel`、连接关闭或应用退出结束等待；重启恢复把未结束步骤和执行标为 `interrupted`，不自动恢复调用。客户端收起卡片不对应任何决定或取消接口。
 
 ## 会话目录授权
 
@@ -937,7 +1016,7 @@ sequence 在单个步骤内递增，从 1 开始；按 step_id 分流后解码 b
 
 scope 仅接受 once、conversation_directory；拒绝决定不能授予目录权限。不支持选项的审批提交目录授权返回 -32602，已决定审批以不同范围重复提交返回 1003，同一决定与范围保持幂等；重复批准不能重新激活已撤销授权。客户端不允许提交 root_path、access 或其他自定义授权字段。
 
-### 独立推理内容
+## 独立推理内容
 
 主对话支持 `reasoning.delta` 通知，参数为 `conversation_id`、`run_id`、`step_id` 与字符串 `text`，绑定一个 `model_call` 步骤，不写入回答正文。仅在供应商实际提供推理字段时发送，可能包含显式空字符串；通知不表示步骤成功。结束、取消或失败后通过 `step.data` 的 `output` 字段读取统一的 `reasoning` 字符串。活动期间定期保存已接受的片段；进程异常退出可能丢失最近未落盘片段，恢复不会自动重试。失败和取消的推理可能不完整，客户端应结合步骤状态展示。
 

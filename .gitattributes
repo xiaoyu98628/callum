@@ -1,0 +1,2 @@
+# 各平台检出 Go 源文件时使用 LF，保持 gofmt 检查结果一致。
+*.go text eol=lf

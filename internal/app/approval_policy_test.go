@@ -260,7 +260,8 @@ func TestInvalidApprovalSettingsKeepRevision(t *testing.T) {
 	}
 	for _, raw := range []string{
 		`{}`, `{"approval_policy":"never"}`, `{"approval_policy":"invalid","approvals_reviewer":"user"}`,
-		`{"approval_policy":"on-request","approvals_reviewer":"auto_review"}`,
+		`{"approval_policy":"never","approvals_reviewer":"auto_review"}`,
+		`{"approval_policy":"always","approvals_reviewer":"user","sandbox_mode":"danger-full-access"}`,
 		`{"approval_policy":"on-request","approvals_reviewer":"user","api_key":"forbidden-test-value"}`,
 	} {
 		if _, err := runtime.Settings().Update(t.Context(), settings.ExecutionKey, current.Revision, json.RawMessage(raw)); !errors.Is(err, settings.ErrInvalid) {

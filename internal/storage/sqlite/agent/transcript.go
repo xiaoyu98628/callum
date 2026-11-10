@@ -6,9 +6,9 @@ import (
 
 	"gorm.io/gorm"
 
+	"github.com/xiaoyu98628/callum/internal/agent/transcript"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
-	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
 type transcriptRow struct {
@@ -62,10 +62,11 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 		return nil, model.ErrInvalidResponse
 	}
 	visible := func() *gorm.DB {
-		return base().Where(`r.status='completed' OR EXISTS (
- SELECT 1 FROM conversation_run_steps t WHERE t.run_id=r.id AND t.type='tool_call'
- AND json_extract(t.input,'$.operation_version')=1 AND json_extract(t.output,'$.operation.version')=1
- AND json_extract(t.output,'$.operation.outcome') IN ('applied','partially_applied','unknown'))`)
+		effects := r.db.WithContext(ctx).Model(&schema.Step{}).Table("conversation_run_steps AS t").Select("1").
+			Where("t.run_id=r.id AND t.type=?", "tool_call").
+			Where("json_extract(t.input,'$.operation_version')=1 AND json_extract(t.output,'$.operation.version')=1").
+			Where("json_extract(t.output,'$.operation.outcome') IN ?", []string{"applied", "partially_applied", "unknown"})
+		return base().Where("(r.status=? OR EXISTS (?))", "completed", effects)
 	}
 	var runIDs []string
 	if err := visible().Distinct("r.id").Limit(maxMessages+1).Pluck("r.id", &runIDs).Error; err != nil {
@@ -119,7 +120,7 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 		for end < len(rows) && rows[end].RunID == rows[start].RunID {
 			end++
 		}
-		messages, err := runTranscript(rows[start:end])
+		messages, err := restoreTranscript(rows[start:end])
 		if err != nil {
 			return nil, err
 		}
@@ -140,92 +141,18 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 	return out, nil
 }
 
-func runTranscript(rows []transcriptRow) ([]model.Message, error) {
-	decoded := make([]model.Message, len(rows))
-	results := map[string]map[string]int{}
+// restoreTranscript 仅将查询投影转换为业务输入，恢复规则由 transcript 统一实现。
+func restoreTranscript(rows []transcriptRow) ([]model.Message, error) {
+	entries := make([]transcript.Entry, len(rows))
 	for i, row := range rows {
-		if json.Unmarshal([]byte(row.Message), &decoded[i]) != nil {
-			return nil, model.ErrInvalidResponse
-		}
-		m := decoded[i]
-		if m.Role == model.RoleTool {
-			if row.ParentStepID == nil || row.ToolCallID == nil || m.ToolCallID != *row.ToolCallID {
-				return nil, model.ErrInvalidResponse
-			}
-			if results[*row.ParentStepID] == nil {
-				results[*row.ParentStepID] = map[string]int{}
-			}
-			if _, exists := results[*row.ParentStepID][m.ToolCallID]; exists {
-				return nil, model.ErrInvalidResponse
-			}
-			results[*row.ParentStepID][m.ToolCallID] = i
+		entries[i] = transcript.Entry{StepID: row.ID, ParentStepID: row.ParentStepID, ToolCallID: row.ToolCallID, Message: json.RawMessage(row.Message)}
+		if row.Operation != nil {
+			entries[i].Operation = json.RawMessage(*row.Operation)
 		}
 	}
-	if rows[0].RunStatus == "completed" {
-		return decoded, checkTranscript(decoded)
+	status := ""
+	if len(rows) > 0 {
+		status = rows[0].RunStatus
 	}
-	out := []model.Message{}
-	used := map[int]bool{}
-	for i, row := range rows {
-		message := decoded[i]
-		if message.Role != model.RoleAssistant || len(message.ToolCalls) == 0 {
-			continue
-		}
-		// 未成功完成的回答正文不进入后续上下文，只恢复调用及事实。
-		message.Content, message.Blocks = "", nil
-		out = append(out, message)
-		for _, call := range message.ToolCalls {
-			if index, ok := results[row.ID][call.ID]; ok {
-				out = append(out, decoded[index])
-				used[index] = true
-			} else {
-				// 同轮剩余调用尚未建立步骤，未进入执行边界，补齐未执行结果。
-				body, err := json.Marshal(map[string]any{"operation": tool.OutcomeRecord{Version: tool.OperationVersion, Outcome: tool.OutcomeNotApplied, Recovered: true}, "result": nil,
-					"error": map[string]string{"kind": "not_executed", "message": "执行已结束，该调用尚未执行"}})
-				if err != nil {
-					return nil, err
-				}
-				out = append(out, model.Message{Role: model.RoleTool, ToolCallID: call.ID, Content: string(body)})
-			}
-		}
-	}
-	for i, row := range rows {
-		if row.Operation == nil {
-			continue
-		}
-		var facts tool.OutcomeRecord
-		if json.Unmarshal([]byte(*row.Operation), &facts) != nil || !facts.Valid() || (facts.Outcome.MayHaveEffects() && !used[i]) {
-			return nil, model.ErrInvalidResponse
-		}
-	}
-	return out, checkTranscript(out)
-}
-
-func checkTranscript(messages []model.Message) error {
-	pending := map[string]bool{}
-	for _, message := range messages {
-		switch message.Role {
-		case model.RoleAssistant:
-			if len(pending) != 0 {
-				return model.ErrInvalidResponse
-			}
-			for _, call := range message.ToolCalls {
-				if call.ID == "" || pending[call.ID] {
-					return model.ErrInvalidResponse
-				}
-				pending[call.ID] = true
-			}
-		case model.RoleTool:
-			if !pending[message.ToolCallID] {
-				return model.ErrInvalidResponse
-			}
-			delete(pending, message.ToolCallID)
-		default:
-			return model.ErrInvalidResponse
-		}
-	}
-	if len(pending) != 0 {
-		return model.ErrInvalidResponse
-	}
-	return nil
+	return transcript.Restore(status, entries)
 }

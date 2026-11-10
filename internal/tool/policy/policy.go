@@ -19,13 +19,15 @@ const (
 // Valid 用于在启动或装配时拒绝未支持的审批策略。
 func (p ApprovalPolicy) Valid() bool { return p == OnRequest || p == Always || p == Never }
 
-// Reviewer 独立指定审批人，当前只有本机用户审批可用。
+// Reviewer 独立指定审批请求由本机用户或独立的模型调用处理。
 type Reviewer string
 
-const User Reviewer = "user"
+const (
+	User       Reviewer = "user"
+	AutoReview Reviewer = "auto_review"
+)
 
-// Valid 不接受尚未实现的自动审查，避免静默切换审批人。
-func (r Reviewer) Valid() bool { return r == User }
+func (r Reviewer) Valid() bool { return r == User || r == AutoReview }
 
 // Action 是执行前的权限判定，不代表用户已经作出审批决定。
 type Action string
@@ -117,7 +119,10 @@ func EvaluateCommand(p ApprovalPolicy, boundary tool.CommandBoundary) Decision {
 	if boundary.Risk != "" {
 		return RequiresApproval(p, boundary.Risk)
 	}
-	if boundary.Sandboxed && boundary.Mode.Valid() {
+	if boundary.Sandboxed && boundary.Mode == tool.SandboxWorkspaceWrite {
+		return RequiresApproval(p, "sandbox_workspace_write")
+	}
+	if boundary.Sandboxed && boundary.Mode == tool.SandboxReadOnly {
 		if p == Always {
 			return Decision{Ask, "policy_always"}
 		}

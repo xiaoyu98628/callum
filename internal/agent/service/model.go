@@ -44,6 +44,7 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 		return result, err
 	}
 	var text, reasoning strings.Builder
+	usageStream := e.contextStream(ex)
 	reasoningSeen := false
 	defer func() {
 		if ex.Run.Stream {
@@ -77,6 +78,17 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 				retErr = errors.Join(retErr, err)
 			}
 		}
+		var usageErr error
+		result.Output, usageErr = withActualInputTokens(result.Output, result.InputTokens)
+		retErr = errors.Join(retErr, usageErr)
+		e.observeInputTokens(ex, result.InputTokens)
+		finalMessages := append([]model.Message(nil), messages...)
+		if result.Text != "" || result.Reasoning != nil || len(result.ToolCalls) > 0 {
+			finalMessages = append(finalMessages, model.Message{Role: model.RoleAssistant, Content: result.Text, Reasoning: result.Reasoning, ToolCalls: result.ToolCalls})
+		}
+		var finalMeter tokens.Meter
+		finalMeter.Observe(messages, tools, result.InputTokens)
+		e.recordContext(ex, resolved, finalMessages, tools, &finalMeter, true)
 		status := agent.Completed
 		if retErr != nil {
 			var kind, message string
@@ -122,6 +134,7 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 					*totalText += len(event.Text)
 					reasoningSeen = true
 					reasoning.WriteString(event.Text)
+					usageStream.add(event.Text, true)
 					// 等待正文前也定期保存推理，进程中断后仍可查询已接受的片段。
 					if reasoning.Len() == len(event.Text) || time.Since(lastPersist) >= 100*time.Millisecond {
 						var err error
@@ -144,6 +157,7 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 				}
 				*totalText += len(event.Text)
 				text.WriteString(event.Text)
+				usageStream.add(event.Text, false)
 				if persisted == 0 || text.Len()-persisted >= 4096 || time.Since(lastPersist) >= 100*time.Millisecond {
 					if err := e.repository.SaveMessage(callCtx, ex.Assistant.ID, []model.Block{{Type: "text", Text: text.String()}}, agent.Running); err != nil {
 						// 取消可能恰好打断正文写入；只将同一上下文错误视为取消/超时。
@@ -176,6 +190,28 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 		retErr = errors.Join(callCtx.Err(), retErr)
 	}
 	return
+}
+
+// withActualInputTokens 持久化统一的实际输入投影；缺失时保留 null，不估算补齐 usage。
+func withActualInputTokens(output json.RawMessage, input *int64) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if len(output) > 0 {
+		if err := json.Unmarshal(output, &fields); err != nil {
+			return nil, err
+		}
+	}
+	if fields == nil {
+		fields = map[string]json.RawMessage{}
+	}
+	if input != nil && (*input < 0 || *input > 1_000_000_000_000) {
+		input = nil
+	}
+	value, err := json.Marshal(map[string]*int64{"actual_input_tokens": input})
+	if err != nil {
+		return nil, err
+	}
+	fields["context_usage"] = value
+	return json.Marshal(fields)
 }
 
 // modelMetadata 保存实际请求参数、工具定义与上下文指纹，不重复保存整套历史或凭据。

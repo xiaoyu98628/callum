@@ -227,6 +227,11 @@ func loadContextHistory(tx *gorm.DB, id string, before int64) ([]domain.Message,
 	if current != nil {
 		floor = current.ThroughSequence
 	}
+	rows, more, err := loadContextPage(tx, id, floor, before)
+	return rows, current, more, err
+}
+
+func loadContextPage(tx *gorm.DB, id string, floor, before int64) ([]domain.Message, bool, error) {
 	query := func() *gorm.DB {
 		q := tx.Model(&schema.Message{}).Where("conversation_id=? AND sequence>? AND (role='user' OR status='completed')", id, floor)
 		if before > 0 {
@@ -241,7 +246,7 @@ func loadContextHistory(tx *gorm.DB, id string, before int64) ([]domain.Message,
 		Size     int64
 	}
 	if err := query().Select("sequence,role,length(CAST(content AS BLOB)) AS size").Order("sequence").Limit(512).Scan(&metadata).Error; err != nil {
-		return nil, nil, false, err
+		return nil, false, err
 	}
 	end, size := len(metadata), int64(0)
 	for i, row := range metadata {
@@ -258,21 +263,21 @@ func loadContextHistory(tx *gorm.DB, id string, before int64) ([]domain.Message,
 			end--
 		}
 		if end == 0 {
-			return nil, nil, false, &model.InputLimitError{Dimension: "单轮历史字节", Actual: size, Limit: 12 << 20}
+			return nil, false, &model.InputLimitError{Dimension: "单轮历史字节", Actual: size, Limit: 12 << 20}
 		}
 	}
 	if end == 0 {
-		return nil, current, false, nil
+		return nil, false, nil
 	}
 	var rows []schema.Message
 	if err := query().Where("sequence<=?", metadata[end-1].Sequence).Order("sequence").Find(&rows).Error; err != nil {
-		return nil, nil, false, err
+		return nil, false, err
 	}
 	out := make([]domain.Message, len(rows))
 	for i, row := range rows {
 		out[i] = message(row)
 	}
-	return out, current, more, nil
+	return out, more, nil
 }
 
 // invalidateContexts 与重发事务一起清理失效摘要及其模型结果，不删除操作审计和实际 usage。

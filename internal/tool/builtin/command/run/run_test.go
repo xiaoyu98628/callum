@@ -36,7 +36,7 @@ func buildHelper(t *testing.T) string {
 func testExecutor(t *testing.T, environment []string) *executor.Executor {
 	t.Helper()
 	r := registry.New()
-	if err := r.Register(New(environment)); err != nil {
+	if err := r.Register(New(environment, tool.ProtectedData{})); err != nil {
 		t.Fatal(err)
 	}
 	e, err := executor.New(r, 3*time.Second)
@@ -74,7 +74,7 @@ func decodeReport(t *testing.T, result tool.Result) processReport {
 }
 
 func TestCommandValidation(t *testing.T) {
-	instance := New(nil)
+	instance := New(nil, tool.ProtectedData{})
 	for _, raw := range []string{`{}`, `null`, `[]`, `{"command":[]}`, `{"command":[""]}`, `{"command":["go",null]}`, `{"command":["go",1]}`, `{"command":"go"}`, `{"command":["go"],"cwd":null}`, `{"command":["go"],"cwd":""}`, `{"command":["go"],"cwd":"../escape"}`, `{"command":["go"],"env":{}}`, `{"command":["go"],"command":["other"]}`, `{"command":["go"]} {}`, `{"command":["a\u0000b"]}`, `{"Command":["go"]}`, `{"command":["go"],"cwd":".","cwd":"other"}`} {
 		if _, err := instance.Validate(json.RawMessage(raw)); !errors.Is(err, tool.ErrInvalid) {
 			t.Fatalf("接受无效参数: %s %v", raw, err)
@@ -99,7 +99,7 @@ func TestCommandValidation(t *testing.T) {
 }
 
 func TestEscalationRequiresExplicitScopeAndReason(t *testing.T) {
-	instance := New(nil)
+	instance := New(nil, tool.ProtectedData{})
 	for _, raw := range []string{
 		`{"command":["pwd"],"sandbox_permissions":"full-access"}`,
 		`{"command":["pwd"],"sandbox_permissions":"require_escalated"}`,
@@ -258,7 +258,7 @@ func TestCommandCancellationTimeoutAndClose(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			inv, err := New(os.Environ()).Prepare(t.Context(), tool.Scope{}, raw)
+			inv, err := New(os.Environ(), tool.ProtectedData{}).Prepare(t.Context(), tool.Scope{}, raw)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -328,7 +328,7 @@ func TestCommandCancellationTimeoutAndClose(t *testing.T) {
 func TestCommandPathsAreExplicitAndRechecked(t *testing.T) {
 	helper := buildHelper(t)
 	cwd := t.TempDir()
-	instance := New([]string{"PATH=" + filepath.Dir(helper)})
+	instance := New([]string{"PATH=" + filepath.Dir(helper)}, tool.ProtectedData{})
 	raw, err := json.Marshal(arguments{Command: []string{filepath.Base(helper), "exit", "0"}})
 	if err != nil {
 		t.Fatal(err)

@@ -12,10 +12,10 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem/internal/fileaccess"
 )
 
-type directoryTool struct{}
+type directoryTool struct{ protection tool.ProtectedData }
 
 // New 返回独立的目录查看工具。
-func New() tool.Tool { return directoryTool{} }
+func New(protection tool.ProtectedData) tool.Tool { return directoryTool{protection} }
 
 func (directoryTool) Definition() tool.Definition {
 	return tool.Definition{Name: "list_directory", Description: "查看目录中的文件和子目录。path 支持绝对路径；相对路径需要绑定工作区。只读访问不受工作区写入边界限制，审批由服务端策略判断", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":200}},"required":["path"],"additionalProperties":false}`), Source: "builtin", Version: "3", Effects: []tool.Effect{tool.EffectRead}}
@@ -29,12 +29,12 @@ func (directoryTool) Validate(raw json.RawMessage) (json.RawMessage, error) {
 	return json.Marshal(a)
 }
 
-func (directoryTool) Prepare(ctx context.Context, scope tool.Scope, raw json.RawMessage) (tool.Invocation, error) {
+func (t directoryTool) Prepare(ctx context.Context, scope tool.Scope, raw json.RawMessage) (tool.Invocation, error) {
 	a, err := decodeArguments(raw)
 	if err != nil {
 		return nil, err
 	}
-	handle, err := fileaccess.Prepare(ctx, scope, a.Path, fileaccess.Directory)
+	handle, err := fileaccess.Prepare(ctx, scope, a.Path, fileaccess.Directory, t.protection)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +57,7 @@ func (p *invocation) Execute(ctx context.Context) (tool.Result, error) {
 }
 
 func list(ctx context.Context, root *os.Root, a arguments) (_ json.RawMessage, retErr error) {
-	f, err := fileaccess.OpenRead(root, a.Path)
+	f, err := fileaccess.OpenRead(root, a.Path, nil)
 	if err != nil {
 		return nil, err
 	}

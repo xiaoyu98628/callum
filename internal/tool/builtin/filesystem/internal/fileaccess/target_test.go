@@ -25,7 +25,7 @@ func TestFixedHandleOwnershipAndCancellation(t *testing.T) {
 		{"directory", ".", fileaccess.Directory},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			handle, err := fileaccess.Prepare(t.Context(), scope, test.path, test.kind)
+			handle, err := fileaccess.Prepare(t.Context(), scope, test.path, test.kind, tool.ProtectedData{})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -77,7 +77,7 @@ func TestFixedHandleOwnershipAndCancellation(t *testing.T) {
 		{"note", fileaccess.Directory},
 		{".", fileaccess.File},
 	} {
-		handle, err := fileaccess.Prepare(t.Context(), scope, test.path, test.kind)
+		handle, err := fileaccess.Prepare(t.Context(), scope, test.path, test.kind, tool.ProtectedData{})
 		if handle != nil {
 			if err := handle.Close(); err != nil {
 				t.Error(err)

@@ -15,7 +15,7 @@ import (
 )
 
 func TestSearchArguments(t *testing.T) {
-	instance := search.New()
+	instance := search.New(tool.ProtectedData{})
 	for _, test := range []struct{ input, want string }{
 		{`{"path":".","query":"needle"}`, `{"path":".","limit":50,"query":"needle"}`},
 		{`{"path":"a/../notes","query":"needle","limit":0}`, `{"path":"notes","limit":50,"query":"needle"}`},
@@ -65,7 +65,7 @@ func TestSearchHandlesEmptyDirectories(t *testing.T) {
 				}
 			}
 			r := registry.New()
-			if err := r.Register(search.New()); err != nil {
+			if err := r.Register(search.New(tool.ProtectedData{})); err != nil {
 				t.Fatal(err)
 			}
 			e, err := executor.New(r, time.Second)

@@ -48,6 +48,8 @@ func EmitPersistent(notify func(string, any) error, event agent.Event) error {
 		params["message_id"] = event.MessageID
 	}
 	switch value := event.Data.(type) {
+	case conversation.ContextUsage:
+		params["context_usage"] = value
 	case conversation.Conversation:
 		params["conversation"] = value
 	case conversation.Message:

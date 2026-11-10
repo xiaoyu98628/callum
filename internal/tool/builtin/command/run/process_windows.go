@@ -37,7 +37,15 @@ func openTargetPath(path string) (*os.File, error) {
 }
 
 func startProcess(fixed *fixedCommand, stdin, stdout, stderr *os.File) (started *process, retErr error) {
-	job, err := windows.CreateJobObject(nil, nil)
+	var jobName *uint16
+	var err error
+	if fixed.boundary.Sandboxed {
+		jobName, err = windows.UTF16PtrFromString(sandboxJobName(fixed.sandboxState.journal.Name))
+		if err != nil {
+			return nil, err
+		}
+	}
+	job, err := windows.CreateJobObject(nil, jobName)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +63,11 @@ func startProcess(fixed *fixedCommand, stdin, stdout, stderr *os.File) (started 
 	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation, uintptr(unsafe.Pointer(&limits)), uint32(unsafe.Sizeof(limits))); err != nil {
 		return nil, err
 	}
-	attributes, err := windows.NewProcThreadAttributeList(2)
+	attributeCount := uint32(2)
+	if fixed.boundary.Sandboxed {
+		attributeCount++
+	}
+	attributes, err := windows.NewProcThreadAttributeList(attributeCount)
 	if err != nil {
 		return nil, err
 	}
@@ -83,6 +95,18 @@ func startProcess(fixed *fixedCommand, stdin, stdout, stderr *os.File) (started 
 	if err := attributes.Update(procThreadAttributeJobList, unsafe.Pointer(&jobs[0]), unsafe.Sizeof(jobs[0])); err != nil {
 		return nil, err
 	}
+	capabilities := securityCapabilities{SID: fixed.sandboxState.sid}
+	if fixed.boundary.Sandboxed {
+		if !fixed.sandboxState.active || capabilities.SID == nil || fixed.sandboxState.token == 0 {
+			return nil, tool.ErrDenied
+		}
+		pinned.Pin(capabilities.SID)
+		pinned.Pin(&capabilities)
+		const procThreadAttributeSecurityCapabilities = 0x00020009
+		if err := attributes.Update(procThreadAttributeSecurityCapabilities, unsafe.Pointer(&capabilities), unsafe.Sizeof(capabilities)); err != nil {
+			return nil, err
+		}
+	}
 	application, err := windows.UTF16PtrFromString(fixed.executable.actual)
 	if err != nil {
 		return nil, err
@@ -101,12 +125,26 @@ func startProcess(fixed *fixedCommand, stdin, stdout, stderr *os.File) (started 
 	startup.Flags = windows.STARTF_USESTDHANDLES
 	startup.StdInput, startup.StdOutput, startup.StdErr = handles[0], handles[1], handles[2]
 	var native windows.ProcessInformation
-	err = windows.CreateProcess(application, line, nil, nil, true, windows.CREATE_UNICODE_ENVIRONMENT|windows.EXTENDED_STARTUPINFO_PRESENT|windows.CREATE_NO_WINDOW, &environment[0], cwd, &startup.StartupInfo, &native)
+	flags := uint32(windows.CREATE_UNICODE_ENVIRONMENT | windows.EXTENDED_STARTUPINFO_PRESENT | windows.CREATE_NO_WINDOW)
+	if fixed.boundary.Sandboxed {
+		err = windows.CreateProcessAsUser(fixed.sandboxState.token, application, line, nil, nil, true, flags|windows.CREATE_SUSPENDED, &environment[0], cwd, &startup.StartupInfo, &native)
+	} else {
+		err = windows.CreateProcess(application, line, nil, nil, true, flags, &environment[0], cwd, &startup.StartupInfo, &native)
+	}
 	runtime.KeepAlive(environment)
 	runtime.KeepAlive(handles)
 	runtime.KeepAlive(jobs)
 	if err != nil {
 		return nil, err
+	}
+	if fixed.boundary.Sandboxed {
+		verifyErr := verifySandboxProcess(native.Process, fixed.sandboxState.sid)
+		if verifyErr == nil {
+			_, verifyErr = windows.ResumeThread(native.Thread)
+		}
+		if verifyErr != nil {
+			return nil, errors.Join(verifyErr, windows.TerminateJobObject(job, 1), windows.CloseHandle(native.Thread), windows.CloseHandle(native.Process))
+		}
 	}
 	return &process{handle: native.Process, thread: native.Thread, job: job, pid: int(native.ProcessId)}, nil
 }
