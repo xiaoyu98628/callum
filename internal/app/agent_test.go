@@ -18,7 +18,6 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/agent/events"
 	"github.com/xiaoyu98628/callum/internal/config"
-	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/tool"
@@ -273,11 +272,8 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 				accepted := p.call(t, "conversation.send", map[string]any{"conversation_id": convID, "stream": false, "content": messageBlocks("继续")})
 				requireOK(t, accepted)
 				p.event(t, "run.completed")
-				messagesFrame := p.call(t, "conversation.messages", map[string]any{"conversation_id": convID})
-				requireOK(t, messagesFrame)
-				var rows []conversation.Message
-				if err := json.Unmarshal(messagesFrame.Result, &rows); err != nil || len(rows) != 4 {
-					t.Fatalf("消息与工具轨迹混存: %s %v", messagesFrame.Result, err)
+				if rows := readMessages(t, p, convID); len(rows) != 4 {
+					t.Fatalf("消息与工具轨迹混存: %+v", rows)
 				}
 			}
 			p.stop(t)

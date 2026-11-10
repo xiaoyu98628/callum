@@ -90,16 +90,6 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 			return reply(nil, rpcErr)
 		}
 		value, err = h.service.Update(ctx, p.ID, p.Update)
-	case "conversation.messages":
-		var p struct {
-			ConversationID string `json:"conversation_id"`
-			BeforeSequence int64  `json:"before_sequence,omitempty"`
-			Limit          int    `json:"limit,omitempty"`
-		}
-		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
-			return reply(nil, rpcErr)
-		}
-		value, err = h.service.Messages(ctx, p.ConversationID, p.BeforeSequence, p.Limit)
 	default:
 		return reply(nil, protocol.MethodNotFound())
 	}

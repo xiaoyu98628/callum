@@ -263,14 +263,14 @@ func TestAutomaticCompactionSurvivesLongHistoryAndKeepsConversationsIsolated(t *
 	if len(versions) < 2 || versions[0].Status != "active" || versions[0].BaseVersionID == nil || upstream.summaries.Load() < 2 {
 		t.Fatalf("长对话未连续压缩: %+v", versions)
 	}
-	page := p.call(t, "conversation.messages", map[string]any{"conversation_id": cid, "limit": 200})
-	requireOK(t, page)
-	var messages []conversation.Message
-	if err := json.Unmarshal(page.Result, &messages); err != nil {
-		t.Fatal(err)
-	}
-	if len(messages) != 200 || messages[len(messages)-1].Sequence != 258 {
+	messages := readMessages(t, p, cid)
+	if len(messages) != 258 {
 		t.Fatal("长对话丢失原文或超过旧上限后未继续")
+	}
+	for i, message := range messages {
+		if message.Sequence != int64(i+1) {
+			t.Fatalf("长对话消息缺失、重复或顺序错误: 第 %d 条的 sequence=%d", i+1, message.Sequence)
+		}
 	}
 	other := compactSend(t, p, mid, "", "独立会话问题")
 	upstream.mu.Lock()

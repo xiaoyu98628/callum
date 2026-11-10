@@ -46,13 +46,39 @@ func messageBlocks(text string) []map[string]string {
 
 func readMessages(t *testing.T, p *appPeer, id string) []conversation.Message {
 	t.Helper()
-	frame := p.call(t, "conversation.messages", map[string]any{"conversation_id": id})
-	requireOK(t, frame)
 	var rows []conversation.Message
-	if err := json.Unmarshal(frame.Result, &rows); err != nil {
+	before := ""
+	for {
+		frame := p.call(t, "conversation.history", map[string]any{"conversation_id": id, "before_run_id": before, "limit": 25})
+		requireOK(t, frame)
+		var page conversation.HistoryPage
+		if err := json.Unmarshal(frame.Result, &page); err != nil {
+			t.Fatal(err)
+		}
+		rows = append(page.Messages, rows...)
+		// 独立压缩页可能没有消息；只按服务端结束标记停止，并拒绝不推进的游标。
+		if !page.HasMore {
+			return rows
+		}
+		if page.BeforeRunID == "" || (before != "" && page.BeforeRunID >= before) {
+			t.Fatalf("历史分页游标未推进: %q -> %q", before, page.BeforeRunID)
+		}
+		before = page.BeforeRunID
+	}
+}
+
+func TestConversationMessagesMethodIsUnavailable(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	return rows
+	p := startApp(t, cfg, io.Discard)
+	frame := p.call(t, "conversation.messages", map[string]any{"conversation_id": "019a4f39-0000-7000-8000-000000000001"})
+	if frame.Error == nil || frame.Error.Code != -32601 {
+		t.Fatalf("已移除接口未返回 method not found: %+v", frame.Error)
+	}
+	p.stop(t)
 }
 
 func TestConversationLifecycleThroughStdio(t *testing.T) {

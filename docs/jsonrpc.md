@@ -84,7 +84,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | 模型配置 | `model.create`、`model.update`、`model.get`、`model.list`、`model.set_enabled`、`model.delete` |
 | 无历史调用 | `model.invoke` |
 | 工作区 | `workspace.create`、`workspace.update`、`workspace.get`、`workspace.list`、`workspace.delete`、`workspace.restore` |
-| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.messages`、`conversation.history`、`conversation.delete`、`conversation.restore` |
+| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.history`、`conversation.delete`、`conversation.restore` |
 | 上下文压缩 | `conversation.context_usage`、`conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
 | 执行 | `run.get`、`run.list`、`run.cancel` |
 | 步骤 | `step.get`、`step.list`、`step.data` |
@@ -338,23 +338,6 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 文本片段不保证按词、句或完整 JSON 切分，客户端按对应消息追加。收到 `message.updated` 时使用其中完整的 `message.content` 替换本地消息内容。
 
-### conversation.messages
-
-```json
-{"jsonrpc":"2.0","id":"messages-latest","method":"conversation.messages","params":{"conversation_id":"<conversation_id>","limit":100}}
-{"jsonrpc":"2.0","id":"messages-before","method":"conversation.messages","params":{"conversation_id":"<conversation_id>","before_sequence":3,"limit":100}}
-```
-
-返回消息数组。`before_sequence` 为严格小于该顺序号，省略时读取最近一页；每页内部按 `sequence` 升序排列。`limit` 默认 100，范围 1 至 200；消息页还有 7 MiB 保护，可能少于请求数量。使用当前页最小 `sequence` 作为下一次 `before_sequence`，直到空数组。
-
-消息对象示例：
-
-```json
-{"id":"<message_id>","conversation_id":"<conversation_id>","run_id":"<run_id>","sequence":2,"role":"assistant","content":[{"type":"text","text":"好的，我记住了，你叫小雨。"}],"status":"completed","created_at":1700000000000,"updated_at":1700000001000,"completed_at":1700000001000}
-```
-
-顺序从 1 开始：用户问题为 1、模型回答为 2、下一条问题为 3，不使用 `parent_message_id`。工具调用和审批保存在步骤表，不作为对话消息插入，跨表关系使用外键、唯一约束和事务校验。
-
 ### conversation.history
 
 ```json
@@ -364,7 +347,15 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 返回 `{"messages":[],"runs":[],"before_run_id":"","has_more":false}`。`limit` 默认和上限均为 25，按执行 ID 严格向前翻页；页内执行按 UUIDv7 升序、消息按 sequence 升序排列。每个执行的消息完整返回，消息 content 编码累计最多 4 MiB，超过时缩短页面；单轮超过边界明确报错。`runs` 使用既有执行对象格式。
 
-仅包含当前消息分支的执行和独立手动压缩执行，重发旧分支审计仍可单独查询，但不进入展示历史。压缩执行没有消息，因此空 messages 不表示历史结束；以 `has_more` 判断，用非空 `before_run_id` 继续查询。执行和消息在同一读事务内查询，客户端不必从最新 `run.list` 窗口推测旧消息的运行状态。`conversation.messages` 保持原有兼容语义。
+仅包含当前消息分支的执行和独立手动压缩执行，重发旧分支审计仍可单独查询，但不进入展示历史。压缩执行没有消息，因此空 messages 不表示历史结束；以 `has_more` 判断，用非空 `before_run_id` 继续查询。执行和消息在同一读事务内查询，客户端不必从最新 `run.list` 窗口推测旧消息的运行状态。
+
+`messages` 中的消息对象示例：
+
+```json
+{"id":"<message_id>","conversation_id":"<conversation_id>","run_id":"<run_id>","sequence":2,"role":"assistant","content":[{"type":"text","text":"好的，我记住了，你叫小雨。"}],"status":"completed","created_at":1700000000000,"updated_at":1700000001000,"completed_at":1700000001000}
+```
+
+顺序从 1 开始：用户问题为 1、模型回答为 2、下一条问题为 3，不使用 `parent_message_id`。工具调用和审批保存在步骤表，不作为对话消息插入，跨表关系使用外键、唯一约束和事务校验。
 
 ### conversation.resend
 
