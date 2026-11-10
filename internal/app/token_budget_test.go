@@ -53,6 +53,8 @@ func TestTokenBudgetMissingOrUncompressibleInputDoesNotCallModel(t *testing.T) {
 }
 
 func TestShortHistoryDoesNotCompressAtOldMessageThreshold(t *testing.T) {
+	// 各用例独占临时目录、运行时及受控端点，可与其他应用回归并行。
+	t.Parallel()
 	upstream, server := compactionEndpoint(t)
 	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
 	if err != nil {

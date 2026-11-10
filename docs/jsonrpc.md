@@ -84,7 +84,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | 模型配置 | `model.create`、`model.update`、`model.get`、`model.list`、`model.set_enabled`、`model.delete` |
 | 无历史调用 | `model.invoke` |
 | 工作区 | `workspace.create`、`workspace.update`、`workspace.get`、`workspace.list`、`workspace.delete`、`workspace.restore` |
-| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.messages`、`conversation.delete`、`conversation.restore` |
+| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.messages`、`conversation.history`、`conversation.delete`、`conversation.restore` |
 | 上下文压缩 | `conversation.context_usage`、`conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
 | 执行 | `run.get`、`run.list`、`run.cancel` |
 | 步骤 | `step.get`、`step.list`、`step.data` |
@@ -354,6 +354,17 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 ```
 
 顺序从 1 开始：用户问题为 1、模型回答为 2、下一条问题为 3，不使用 `parent_message_id`。工具调用和审批保存在步骤表，不作为对话消息插入，跨表关系使用外键、唯一约束和事务校验。
+
+### conversation.history
+
+```json
+{"jsonrpc":"2.0","id":"history-latest","method":"conversation.history","params":{"conversation_id":"<conversation_id>","limit":25}}
+{"jsonrpc":"2.0","id":"history-before","method":"conversation.history","params":{"conversation_id":"<conversation_id>","before_run_id":"<当前页最早执行 ID>","limit":25}}
+```
+
+返回 `{"messages":[],"runs":[],"before_run_id":"","has_more":false}`。`limit` 默认和上限均为 25，按执行 ID 严格向前翻页；页内执行按 UUIDv7 升序、消息按 sequence 升序排列。每个执行的消息完整返回，消息 content 编码累计最多 4 MiB，超过时缩短页面；单轮超过边界明确报错。`runs` 使用既有执行对象格式。
+
+仅包含当前消息分支的执行和独立手动压缩执行，重发旧分支审计仍可单独查询，但不进入展示历史。压缩执行没有消息，因此空 messages 不表示历史结束；以 `has_more` 判断，用非空 `before_run_id` 继续查询。执行和消息在同一读事务内查询，客户端不必从最新 `run.list` 窗口推测旧消息的运行状态。`conversation.messages` 保持原有兼容语义。
 
 ### conversation.resend
 
@@ -870,6 +881,7 @@ HTTP 状态，不暴露凭据、原始供应商响应体或底层错误链。
 | `1009` | 无历史模型调用的受控模型错误等，结合 `error.data.kind` 判断 |
 | `1010` | 输出超过字节限制 |
 | `1011` | 服务正在关闭 |
+| `1012` | 系统凭据不可用或凭据无法解密，`data.kind=credentials_unavailable` |
 
 错误码存在跨接口复用，应结合方法、`message` 和实际存在的 `data.kind` 解读。普通对话执行后的失败主要通过终态事件中的 `error.kind`、`run.error_kind` 表达，不把 RPC 受理成功当作模型调用成功。
 

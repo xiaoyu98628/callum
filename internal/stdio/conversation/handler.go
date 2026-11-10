@@ -28,6 +28,16 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 	var value any
 	var err error
 	switch req.Method {
+	case "conversation.history":
+		var p struct {
+			ConversationID string `json:"conversation_id"`
+			BeforeRunID    string `json:"before_run_id,omitempty"`
+			Limit          int    `json:"limit,omitempty"`
+		}
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		value, err = h.service.History(ctx, p.ConversationID, p.BeforeRunID, p.Limit)
 	case "conversation.context_usage":
 		var p domain.ContextUsageRequest
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {

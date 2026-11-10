@@ -18,6 +18,8 @@ import (
 	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
 	"github.com/xiaoyu98628/callum/internal/config"
 	conversationservice "github.com/xiaoyu98628/callum/internal/conversation/service"
+	"github.com/xiaoyu98628/callum/internal/credentials"
+	"github.com/xiaoyu98628/callum/internal/credentials/system"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
@@ -54,6 +56,7 @@ type Runtime struct {
 	engine        *agentservice.Engine
 	approvals     *approval.Service
 	settings      *settingsservice.Service
+	credentials   *credentials.Vault
 	calls         *executor.Manager
 	mu            sync.Mutex
 	closed        bool
@@ -65,6 +68,11 @@ type Runtime struct {
 // New 装配与协议无关的运行时；ctx 是应用运行上下文，初始化使用独立短超时。
 // 部分初始化失败时关闭此前取得的资源，且不覆盖原始错误。
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtime, retErr error) {
+	return newRuntime(ctx, cfg, logger, system.New())
+}
+
+// newRuntime 允许包内测试注入隔离凭据库，生产入口始终使用系统凭据库。
+func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, keyring credentials.Keyring) (_ *Runtime, retErr error) {
 	if ctx == nil || logger == nil || !filepath.IsAbs(cfg.DatabasePath) || cfg.MaxConcurrentRuns < 1 || cfg.MaxConcurrentRuns > 64 || cfg.CallTimeout <= 0 || cfg.ToolTimeout <= 0 {
 		return nil, errors.New("应用运行配置无效")
 	}
@@ -91,6 +99,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	}
 	r.db, err = sqlite.Open(initCtx, cfg.DatabasePath)
 	if err != nil {
+		return nil, err
+	}
+	canonicalDir, err := filepath.EvalSymlinks(filepath.Dir(cfg.DatabasePath))
+	if err != nil {
+		return nil, err
+	}
+	r.credentials, err = credentials.New(keyring, filepath.Join(canonicalDir, filepath.Base(cfg.DatabasePath)))
+	if err != nil {
+		return nil, err
+	}
+	if err := catalog.MigrateCredentials(initCtx, r.db.DB, r.credentials); err != nil {
 		return nil, err
 	}
 	settingsRepository, err := settingsstore.NewRepository(r.db.DB)
@@ -125,7 +144,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	if err != nil {
 		return nil, err
 	}
-	repository, err := catalog.NewRepository(r.db.DB)
+	repository, err := catalog.NewRepository(r.db.DB, r.credentials)
 	if err != nil {
 		return nil, err
 	}
@@ -232,6 +251,9 @@ func (r *Runtime) Close() error {
 		}
 		if r.httpTransport != nil {
 			r.httpTransport.CloseIdleConnections()
+		}
+		if r.credentials != nil {
+			r.closeErr = errors.Join(r.closeErr, r.credentials.Close())
 		}
 		if r.db != nil {
 			r.closeErr = errors.Join(r.closeErr, r.db.Close())

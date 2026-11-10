@@ -255,3 +255,7 @@ go test -mod=readonly -race -timeout 180s ./...
 `approval.decide` 的可选 `scope` 默认 `once`；选择 `conversation_directory` 时，审批决定与 `conversation_directory_grants` 授权在同一事务保存。授权绑定当前 conversation_id，跨提问及重启保留，其他会话不继承。历史一次性审批不会自动升级。授权范围是实际目录路径，目录改名不会自动迁移授权；判断使用路径层级而非字符串前缀，并覆盖多文件计划及辅助路径，符号链接按实际目标校验。
 
 `approval.directory.list` 按 conversation_id 分页查询（limit 默认 100、最大 200，offset 默认 0），返回包含撤销记录的数组；记录包含 id、conversation_id、approval_id、scope、created_at、revoked_at。`approval.directory.revoke` 接收 conversation_id 和 id，重复撤销幂等，不改变来源审批。创建及撤销发布 `directory_grant.updated`，通知包含 conversation_id 与 directory_grant。工具步骤 input.directory_grant_ids 和 authorization.reason=conversation_directory_grant 记录继承来源，不伪造新的用户决定。工具认领事务再次核验撤销状态及范围；撤销不撤回已开始或已单独批准的操作，只使依赖该目录授权的后续操作重新判断。被拒绝或结果待核实的操作、always/never 策略继续执行各自的限制。
+
+## 展示历史的执行边界
+
+`conversation.history` 按当前分支执行分页，消息与执行在同一读事务查询，保留整轮及独立手动压缩。客户端使用执行游标继续回读，不以最近 200 个执行作为历史上限；密集压缩形成的无消息页仍能继续翻页。重发被替换执行的操作审计不进入该展示分支。页数、字节和排序约束见 [JSON-RPC 协议](../jsonrpc.md#conversationhistory)。

@@ -8,6 +8,8 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/agent/events"
 	"github.com/xiaoyu98628/callum/internal/config"
+	"github.com/xiaoyu98628/callum/internal/credentials"
+	"github.com/xiaoyu98628/callum/internal/credentials/system"
 	"github.com/xiaoyu98628/callum/internal/stdio"
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
@@ -15,10 +17,14 @@ import (
 
 // Run 是独立 stdio 进程入口，接管输入输出，并在连接结束后关闭整个运行时。
 func Run(ctx context.Context, cfg config.Config, in io.ReadCloser, out io.WriteCloser, logger *slog.Logger) (retErr error) {
+	return run(ctx, cfg, in, out, logger, system.New())
+}
+
+func run(ctx context.Context, cfg config.Config, in io.ReadCloser, out io.WriteCloser, logger *slog.Logger, keyring credentials.Keyring) (retErr error) {
 	if in == nil || out == nil {
 		return errors.New("输入输出不能为空")
 	}
-	runtime, err := New(ctx, cfg, logger)
+	runtime, err := newRuntime(ctx, cfg, logger, keyring)
 	if err != nil {
 		return errors.Join(err, in.Close(), out.Close())
 	}

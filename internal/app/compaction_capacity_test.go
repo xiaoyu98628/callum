@@ -43,7 +43,8 @@ func capacitySettings(t *testing.T, rt *Runtime, enabled bool, budget int64) {
 
 func capacityTerminal(t *testing.T, rt *Runtime, sub *events.Subscription, id string) agent.Event {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	// 最长场景执行 420 个实际工具步骤；并行竞态检查保留 30 秒等待预算。
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 	for {
 		event, err := sub.Next(ctx)
@@ -143,7 +144,7 @@ func TestSingleExecutionCompactsMessageBoundaryAndRestoresAfterRestart(t *testin
 	if err := rt.Close(); err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := New(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	restarted, err := newTestRuntime(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +440,7 @@ func TestCancelledCheckpointCannotEraseUnknownOperationOnContinuation(t *testing
 	if err := rt.Close(); err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := New(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	restarted, err := newTestRuntime(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

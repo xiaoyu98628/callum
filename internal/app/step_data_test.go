@@ -13,6 +13,8 @@ import (
 )
 
 func TestLargeModelResultUsesBoundedUTF8Fragments(t *testing.T) {
+	// 各用例独占临时目录、运行时及受控端点，可与其他应用回归并行。
+	t.Parallel()
 	large := strings.Repeat("中", 3<<20)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

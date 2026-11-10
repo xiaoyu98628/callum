@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/xiaoyu98628/callum/internal/credentials"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
 	"gorm.io/gorm"
 	sqliteengine "modernc.org/sqlite"
@@ -14,6 +15,9 @@ import (
 func storageError(err error) error {
 	if err == nil {
 		return nil
+	}
+	if errors.Is(err, credentials.ErrUnavailable) || errors.Is(err, credentials.ErrInvalid) {
+		return errors.Join(provider.ErrCredentials, err)
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) || errors.Is(err, sql.ErrNoRows) {
 		return errors.Join(provider.ErrNotFound, err)

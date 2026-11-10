@@ -6,6 +6,7 @@ import (
 
 	"gorm.io/gorm/clause"
 
+	"github.com/xiaoyu98628/callum/internal/credentials"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
@@ -77,14 +78,15 @@ func (s *Repository) DeleteModel(ctx context.Context, id string) error {
 // 此处只读取数据，启用规则及配置校验由业务服务负责。
 func (s *Repository) LoadRuntime(ctx context.Context, id string) (provider.RuntimeConfig, error) {
 	var row struct {
-		Record              schema.Model `gorm:"embedded"`
-		RuntimeProtocol     string
-		RuntimeProviderName string
-		RuntimeBaseURL      string
-		RuntimeAPIKey       string `json:"-"`
+		Record                  schema.Model `gorm:"embedded"`
+		RuntimeProtocol         string
+		RuntimeProviderName     string
+		RuntimeBaseURL          string
+		RuntimeAPIKey           string `json:"-"`
+		RuntimeCredentialFormat int
 	}
 	err := s.db.WithContext(ctx).Model(&schema.Model{}).
-		Select("models.*, p.name AS runtime_provider_name, p.protocol AS runtime_protocol, p.base_url AS runtime_base_url, p.api_key AS runtime_api_key").
+		Select("models.*, p.name AS runtime_provider_name, p.protocol AS runtime_protocol, p.base_url AS runtime_base_url, p.api_key AS runtime_api_key, p.credential_format AS runtime_credential_format").
 		Joins("JOIN model_providers p ON p.id = models.provider_id").Where("models.id = ?", id).Take(&row).Error
 	if err != nil {
 		return provider.RuntimeConfig{}, storageError(err)
@@ -93,5 +95,12 @@ func (s *Repository) LoadRuntime(ctx context.Context, id string) (provider.Runti
 	if err != nil {
 		return provider.RuntimeConfig{}, err
 	}
-	return provider.RuntimeConfig{Model: m, ProviderName: row.RuntimeProviderName, Protocol: row.RuntimeProtocol, BaseURL: row.RuntimeBaseURL, APIKey: row.RuntimeAPIKey}, nil
+	if row.RuntimeAPIKey != "" && row.RuntimeCredentialFormat != 1 {
+		return provider.RuntimeConfig{}, storageError(credentials.ErrInvalid)
+	}
+	key, err := s.cipher.Open(ctx, m.ProviderID, row.RuntimeAPIKey)
+	if err != nil {
+		return provider.RuntimeConfig{}, storageError(err)
+	}
+	return provider.RuntimeConfig{Model: m, ProviderName: row.RuntimeProviderName, Protocol: row.RuntimeProtocol, BaseURL: row.RuntimeBaseURL, APIKey: key}, nil
 }

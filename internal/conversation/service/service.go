@@ -71,6 +71,17 @@ func (s *Service) Messages(ctx context.Context, id string, before int64, limit i
 	return s.repository.Messages(ctx, id, before, limit)
 }
 
+// History 按执行边界返回有界历史，独立压缩即使没有对应消息也可继续翻页。
+func (s *Service) History(ctx context.Context, id, before string, limit int) (conversation.HistoryPage, error) {
+	if limit == 0 {
+		limit = 25
+	}
+	if !validID(id) || (before != "" && !validID(before)) || limit < 1 || limit > 25 {
+		return conversation.HistoryPage{}, conversation.ErrInvalid
+	}
+	return s.repository.History(ctx, id, before, limit)
+}
+
 func (s *Service) Update(ctx context.Context, id string, in conversation.Update) (conversation.Conversation, error) {
 	if !validID(id) || (in.WorkspaceID != nil && !validID(*in.WorkspaceID)) || (in.DetachWorkspace && in.WorkspaceID != nil) {
 		return conversation.Conversation{}, conversation.ErrInvalid

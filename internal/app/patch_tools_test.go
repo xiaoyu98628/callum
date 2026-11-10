@@ -21,6 +21,8 @@ import (
 )
 
 func TestPatchToolsThroughStdio(t *testing.T) {
+	// 各用例独占临时目录、运行时及受控端点，可与其他应用回归并行。
+	t.Parallel()
 	for _, test := range []struct {
 		name, policy, decision                                    string
 		update, outside, stream, changeDuringApproval, fragmented bool

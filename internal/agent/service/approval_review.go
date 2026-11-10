@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -87,8 +88,30 @@ func (e *Engine) reviewTool(ctx context.Context, ex conversation.Execution, reso
 	}
 
 	review, response, callErr := e.runReview(ctx, ex, resolved, prepared)
+	fillFailure(&response, resolved.Protocol, callErr)
 	review.StepID = step.ID
-	output, err := json.Marshal(review)
+	conclusion, err := json.Marshal(review)
+	if err != nil {
+		return nil, err
+	}
+	// 原始模型结果与业务结论分别保存，格式错误或转人工时也能复核实际响应。
+	var fields map[string]json.RawMessage
+	if len(response.Output) > 0 {
+		if err := json.Unmarshal(response.Output, &fields); err != nil {
+			return nil, err
+		}
+	}
+	if fields == nil {
+		fields = make(map[string]json.RawMessage)
+	}
+	fields["approval_review"] = conclusion
+	// 保留既有结论投影，已持久化审批的验证及旧查询方继续使用相同字段。
+	var projection map[string]json.RawMessage
+	if err := json.Unmarshal(conclusion, &projection); err != nil {
+		return nil, err
+	}
+	maps.Copy(fields, projection)
+	output, err := json.Marshal(fields)
 	if err != nil {
 		return nil, err
 	}
@@ -112,11 +135,11 @@ func (e *Engine) reviewTool(ctx context.Context, ex conversation.Execution, reso
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var fields map[string]json.RawMessage
+	fields = nil
 	if err := json.Unmarshal(parent.Input, &fields); err != nil {
 		return nil, err
 	}
-	fields["approval_review"] = output
+	fields["approval_review"] = conclusion
 	parent.Input, err = json.Marshal(fields)
 	if err != nil {
 		return nil, err

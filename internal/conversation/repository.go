@@ -10,6 +10,7 @@ type Repository interface {
 	List(context.Context, Filter) ([]Conversation, error)
 	Update(context.Context, string, Change) (Conversation, error)
 	Messages(context.Context, string, int64, int) ([]Message, error)
+	History(context.Context, string, string, int) (HistoryPage, error)
 	Begin(context.Context, Begin) (Execution, error)
 	ApplyTitle(context.Context, string, string, string, string) (Conversation, bool, error)
 }

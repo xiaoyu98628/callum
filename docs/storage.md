@@ -10,14 +10,15 @@
 业务仓储通过 GORM 组合计数、关联查询、`IN` / `EXISTS` 子查询和窗口查询，JSON 提取及 `ROW_NUMBER()` 等 SQLite 表达式在数据库内执行。待核实操作先按固定操作取最新结果，再筛选需要确认的状态。最新检查点仍逐行读取并检查累计容量。初始化的 `PRAGMA` 和结构元数据检查使用专用 SQL。底层连接池及流式结果由存储层管理生命周期。
 
 配置存储的装配顺序为 `config.LoadArgs(args)` / `config.Load(dataDir)` →
-`sqlite.Open(ctx, cfg.DatabasePath)` → `catalog.NewRepository(db.DB)` → `providerservice.New(repository)`。
+`sqlite.Open(ctx, cfg.DatabasePath)` → 创建凭据 Vault 并执行 `catalog.MigrateCredentials` →
+`catalog.NewRepository(db.DB, vault)` → `providerservice.New(repository)`。应用在打开数据库前取得实例锁。
 这里的 `catalog` 为 `internal/storage/sqlite/catalog`，`providerservice` 为 `internal/model/provider/service` 的导入别名。
 数据库打开成功后由创建者调用 `db.Close()`；存储实现使用传入的 GORM 实例，
 业务服务使用传入的存储接口，二者均不关闭数据库。数据库 `Close` 可以重复调用。
 `sqlite.Open` 将 GORM 连接传给 `migrations.Run`。迁移包复用 `schema` 的表映射，按编号和业务分组维护建表及校验。
 `000001_01_create_catalog.go` 管理厂商和模型。`000001_02_create_conversations.go` 管理工作区及其其他目录、会话、消息、执行、步骤及上下文版本。
 `000001_03_create_approvals.go` 管理审批和目录授权。`000001_04_create_settings.go` 初始化应用设置与默认的执行、压缩设置组。
-`migrate.go` 统一管理事务、校验与结构版本。空库按当前表映射直接初始化为版本 `3`。`000002_*` 将主目录改为可选，`000003_*` 扩展执行快照的审批人约束。
+`migrate.go` 统一管理事务、校验与结构版本。空库按当前表映射直接初始化为版本 `4`。`000002_*` 将主目录改为可选，`000003_*` 扩展执行快照的审批人约束。
 初始化失败会关闭此前创建的连接池；初始化上下文不绑定到运行时实例，
 每次配置操作都接收自己的 `context.Context`。
 
@@ -44,16 +45,26 @@ Unix 系统下，已有数据目录或文件允许其他用户访问时会拒绝
 数据目录末级和数据库文件不接受符号链接。Windows 的访问控制依赖系统 ACL，
 Unix 权限位不能作为其私有访问保证。
 
-API Key 按已确认的方案保存在 SQLite 中，数据库没有额外加密。
-厂商查询仅返回 `HasAPIKey`，不查询明文凭据；`Resolve` 在内部解析运行配置时才读取凭据，
+API Key 使用 AES-256-GCM 加密后保存在 SQLite；数据库中的会话、步骤等其他内容并未整体加密。
+厂商查询仅返回 `HasAPIKey`，不返回凭据；`Resolve` 在内部解析运行配置时才解密凭据，
 运行配置不得整体写入日志或作为普通配置快照导出。GORM 的默认 SQL 日志已关闭，
 存储错误由调用边界统一处理。数据库文件及可能出现的 SQLite 辅助文件都应作为敏感数据管理。
+
+## 系统凭据与迁移
+
+`internal/credentials` 提供加密契约和 Vault；`system` 实现系统主密钥存储。每个数据目录使用随机 32 字节主密钥，系统条目命名空间为 `org.callum.credentials.v1`，条目标识是规范化数据库绝对路径的 SHA-256。macOS 使用登录钥匙串（固定 `/usr/bin/security`，密钥从标准输入传入），Windows 使用当前用户的 [Credential Manager](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credreadw)，Linux 使用当前用户本地 Unix D-Bus 会话上的 [Secret Service](https://specifications.freedesktop.org/secret-service/latest/ch03.html) 默认集合。Linux 新增纯 Go 的 `github.com/godbus/dbus/v5`，用于已有依赖未提供的 D-Bus 协议；不依赖 CGo，不创建或解锁系统集合。
+
+密文保存格式版本、非秘密主密钥标识、随机 nonce 和认证标签，并将厂商 ID 绑定为认证数据，防止跨记录替换。空 API Key 无需系统凭据条目；首次保存非空值才创建主密钥，并读取核对后再写数据库。主密钥不可用、锁定、缺失或密文校验失败时明确拒绝操作，不回退明文、不自动替换丢失的主密钥。配置接口返回 `credentials_unavailable`（错误码 `1012`）。API Key 保留、替换和清空语义不变。
+
+版本 `4` 的 `credential_format` 仅允许 `0`（待迁移明文）和 `1`（密文或空值）。启动在实例锁下先检查已有密文，再于事务外取得主密钥，随后以单个事务加密全部旧凭据；任一失败整体回滚凭据更新并阻止运行时启动，下次启动可以重试。表结构升级与凭据迁移分别提交，迁移失败的旧值仍由格式列明确识别，不会被误当密文。迁移使用有界批次读取，启用 SQLite `secure_delete`，成功后截断 WAL；清理失败也阻止启动。这只清除 SQLite 可控制的逻辑旧页，不保证删除已有备份、文件系统快照或物理磁盘残留。
+
+密文保留原主密钥标识，因此同一系统用户移动数据库目录后仍可读取旧条目；后续新密钥值使用新目录的主密钥。跨系统或账户复制数据库不会同时复制系统主密钥；数据库文件本身不能作为完整的凭据备份。启动因主密钥缺失而失败时，需恢复对应系统凭据；当前没有绕过该检查或在界面重置丢失主密钥的入口。删除厂商不自动删除共享主密钥条目。备份数据库仍需按敏感数据管理。运行时等待任务结束后清空持有的主密钥缓存，Go/系统调用中的短期明文不能视为可保证的全内存擦除。
 
 ## 表结构与校验
 
 | 表 | 字段 |
 | --- | --- |
-| `model_providers` | `id`、`name`、`protocol`、`base_url`、`api_key`、`created_at`、`updated_at` |
+| `model_providers` | `id`、`name`、`protocol`、`base_url`、`api_key`、`credential_format`、`created_at`、`updated_at` |
 | `models` | `id`、`provider_id`、`display_name`、`remote_model_id`、`enabled`、`context_window`、`max_output_tokens`、`capabilities`、`model_type`、`reasoning_levels`、`created_at`、`updated_at` |
 
 厂商和模型主键由服务端生成 UUIDv7，以标准小写、带连字符的 36 字符 TEXT 保存，
@@ -96,9 +107,9 @@ Token 容量未知时保存 SQL `NULL`，填写时必须大于零，不自动推
 ## 迁移与并发
 
 数据库使用 STRICT 表、外键约束、联合唯一索引及字段检查约束。
-结构版本保存在 SQLite `user_version` 中，当前版本为 `3`。
-空库在同一写事务中创建 12 张业务表及其约束和索引，初始化两个默认设置组。校验通过后记录版本 `3`，失败时回滚。
-打开已有库时同时校验版本、表结构、约束及设置组。版本 `1` 先将主目录改为可选，版本 `1` 和 `2` 都会升级执行快照的审批人检查约束。服务在实例锁下固定初始化连接并临时关闭外键，在同一事务中重建所需表，保留项目、消息、执行、审批、索引和触发器。通过外键与结构校验后提交版本 `3`，失败回滚并恢复外键设置。其他未支持版本和不完整的旧结构保留原数据并拒绝打开。
+结构版本保存在 SQLite `user_version` 中，当前版本为 `4`。
+空库在同一写事务中创建 12 张业务表及其约束和索引，初始化两个默认设置组。校验通过后记录版本 `4`，失败时回滚。
+打开已有库时同时校验版本、表结构、约束及设置组。版本 `1` 先将主目录改为可选，版本 `1` 和 `2` 都会升级执行快照的审批人检查约束。服务在实例锁下固定初始化连接并临时关闭外键，在同一事务中重建所需表，保留项目、消息、执行、审批、索引和触发器。版本 `1`、`2`、`3` 同时补充凭据格式列，旧值标记为待加密。通过外键与结构校验后提交版本 `4`，失败回滚并恢复外键设置。其他未支持版本和不完整的旧结构保留原数据并拒绝打开。
 开发时可通过 `--data-dir` 指向独立的新数据目录。明确需要保留的旧开发数据可离线备份到独立目录，并用当前程序校验转换后的副本。
 启动使用显式建表和结构校验。开发阶段调整数据库结构时，优先更新建表迁移和表结构定义，并用空库验证初始化。明确可丢弃的开发数据库可以删除重建。
 只有确认需要保留既有数据时，才考虑新增 `ALTER TABLE`、数据迁移或旧结构兼容逻辑，并验证升级和失败回滚。

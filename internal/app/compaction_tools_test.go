@@ -81,7 +81,7 @@ func TestCompactedUnknownOperationStillRequiresApprovalAfterRestart(t *testing.T
 	if err := rt.Close(); err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := New(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	restarted, err := newTestRuntime(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

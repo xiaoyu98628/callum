@@ -33,6 +33,15 @@ type Message struct {
 	CompletedAt    *int64        `json:"completed_at"`
 }
 
+// HistoryPage 按当前分支的执行分页，消息与独立压缩共享同一游标，避免跨页错配。
+// BeforeRunID 是下一页的排他上界；空页不推进游标。
+type HistoryPage struct {
+	Messages    []Message   `json:"messages"`
+	Runs        []agent.Run `json:"runs"`
+	BeforeRunID string      `json:"before_run_id"`
+	HasMore     bool        `json:"has_more"`
+}
+
 // Update 是业务更新输入；模型只接受本地标识，快照由服务端解析。
 type Update struct {
 	Title           *string `json:"title,omitempty"`

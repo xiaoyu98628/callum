@@ -17,6 +17,8 @@ import (
 )
 
 func TestFileToolsIndependentOfWorkspaceThroughStdio(t *testing.T) {
+	// 各用例独占临时目录、运行时及受控端点，可与其他应用回归并行。
+	t.Parallel()
 	for _, test := range []struct {
 		name, operation, policy, decision, errorKind      string
 		bound, inside, relative, symlink, replace, stream bool

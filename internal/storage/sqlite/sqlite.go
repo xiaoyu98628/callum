@@ -72,6 +72,7 @@ func databaseURI(slashPath string) string {
 	q := url.Values{}
 	q.Add("_pragma", "foreign_keys(1)")
 	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "secure_delete(1)")
 	q.Set("_txlock", "immediate")
 	u.RawQuery = q.Encode()
 	return u.String()
