@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/xiaoyu98628/callum/internal/config"
+	"github.com/xiaoyu98628/callum/internal/credentials/credentialstest"
 )
 
 type wireFrame struct {
@@ -45,7 +46,9 @@ func startApp(t *testing.T, cfg config.Config, logs io.Writer) *appPeer {
 	server, client := net.Pipe()
 	ctx, cancel := context.WithCancel(t.Context())
 	p := &appPeer{conn: client, decoder: json.NewDecoder(client), done: make(chan error, 1), cancel: cancel}
-	go func() { p.done <- Run(ctx, cfg, server, server, slog.New(slog.NewJSONHandler(logs, nil))) }()
+	go func() {
+		p.done <- run(ctx, cfg, server, server, slog.New(slog.NewJSONHandler(logs, nil)), credentialstest.Keyring{})
+	}()
 	t.Cleanup(func() {
 		cancel()
 		client.Close()

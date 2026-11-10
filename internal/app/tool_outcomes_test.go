@@ -302,7 +302,7 @@ func TestToolFactsSurviveFailureCancellationAndRestart(t *testing.T) {
 			if err := rt.Close(); err != nil {
 				t.Fatal(err)
 			}
-			restarted, err := New(t.Context(), cfg, rt.logger)
+			restarted, err := newTestRuntime(t.Context(), cfg, rt.logger)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -446,7 +446,7 @@ func TestUnknownOperationRetryAfterRestartRequiresApproval(t *testing.T) {
 	if err := rt.Close(); err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := New(t.Context(), cfg, rt.logger)
+	restarted, err := newTestRuntime(t.Context(), cfg, rt.logger)
 	if err != nil {
 		t.Fatal(err)
 	}

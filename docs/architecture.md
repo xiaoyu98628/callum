@@ -14,6 +14,7 @@
 | `internal/model/adapter/chatcompletions` | Chat Completions 请求、认证、响应转换和流式解析 | 已实现，含模拟测试 |
 | `internal/model/provider` | 厂商与模型配置类型、存储接口、错误与标识校验 | 已实现契约 |
 | `internal/model/provider/service` | 配置业务校验、UUIDv7 分配及启用规则 | 已实现业务服务 |
+| `internal/credentials`、`system` | 凭据加密、系统主密钥及关闭时清理 | 已实现，平台验证分别说明 |
 | `internal/config` | 应用配置加载及启动参数 | 已实现 |
 | `internal/settings`、`service` | 配置组契约、执行快照、值校验与版本更新 | 已实现 |
 | `internal/storage/sqlite/settings` | 应用设置持久化和版本冲突校验 | 已实现 |
@@ -55,6 +56,7 @@
 会话更新通过 `conversation.Update` 接收模型 ID 及可更新字段，业务服务校验后生成仓储使用的 `conversation.Change`，模型快照由服务端解析；JSON-RPC 的请求、响应和通知字段保持兼容。
 `policy.Operation` 只保存可信的判定事实，不持有设置快照或工具资源；Agent 校验执行快照并查询授权，policy 统一计算历史拒绝、未知结果、沙箱及目录授权的最终判定，执行认领仍在事务内复核授权。
 `agent/transcript` 不依赖 ORM 或通信协议；SQLite 保留有界查询、分支筛选和事务写入，历史读取与压缩检查点共用轨迹恢复规则，`conversation/history` 负责将轨迹装配到对应用户消息后。
+会话展示历史由 `conversation.HistoryPage` 统一返回当前分支的执行和消息；SQLite 同一读事务按执行游标分页，独立手动压缩与普通轮次使用相同排序，不依赖固定数量的最新执行来补齐旧消息。
 其他协议和供应商兼容差异按实际需求接入。
 
 ## 工具组织与契约
@@ -84,7 +86,7 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 ## 运行时与资源所有权
 
 `app.New(ctx, cfg, logger)` 创建独立运行时，不需要 stdin/stdout。运行时持有数据库、实例锁、HTTP 连接池、
-共享调度器和事件发布器；初始化上下文仅用于启动，已接受的执行使用应用运行上下文。
+共享调度器、凭据 Vault 和事件发布器；初始化上下文仅用于启动，已接受的执行使用应用运行上下文。
 `Providers()`、`Workspaces()`、`Conversations()`、`Runs()` 返回业务服务，`Invoke` 提供无历史调用，
 `Approvals()` 返回审批查询与决定服务，`Settings()` 返回应用设置查询与更新服务，`Cancel` 请求独立取消。无历史调用和普通对话共享运行及实际模型请求的并发限制。
 调用 `Send` 或 `Invoke` 时，`accepted` 回调获得执行标识；回调成功后才启动执行和发布执行事件。
@@ -102,6 +104,6 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 外部取消或通信失败会关闭该连接的标准流以解除阻塞。关闭订阅本身不会取消任务；连接所属任务由接入层单独登记和清理。
 
 现有 `app.Run` 仍是独立 stdio 进程入口：创建运行时、接入连接，并在连接退出后调用 `Runtime.Close()`。
-`Close` 停止入口、取消并等待所有任务及连接，关闭发布器、HTTP 空闲连接和数据库，最后释放实例锁，可以重复调用。
+`Close` 停止入口、取消并等待所有任务及连接，关闭发布器、HTTP 空闲连接，清空 Vault 主密钥缓存并关闭数据库，最后释放实例锁，可以重复调用。
 HTTP、WebSocket 和 CLI 入口尚未实现；接入时复用同一运行时和业务事件，各自转换请求、错误、响应和推送格式。
 macOS/Linux 标准流副本与非阻塞标志的恢复封装在 `stdio/transport`，入口不直接操作文件描述符。

@@ -3,6 +3,7 @@ module github.com/xiaoyu98628/callum
 go 1.27.3
 
 require (
+	github.com/godbus/dbus/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/openai/openai-go/v3 v3.90.0
 	golang.org/x/sys v0.49.0

@@ -44,6 +44,8 @@ func protocolError(f inference.Failure) *protocol.Error {
 		code = 1010
 	case "closing":
 		code = 1011
+	case "credentials_unavailable":
+		code = 1012
 	}
 	data := map[string]any{"kind": f.Kind}
 	if f.ProviderRequestID != "" {

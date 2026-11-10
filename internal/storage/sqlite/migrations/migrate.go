@@ -8,10 +8,11 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 	"gorm.io/gorm"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 // Run 在同一个事务内初始化空库或校验当前结构。调用方持有连接与实例锁。
 func Run(ctx context.Context, db *gorm.DB) (err error) {
@@ -61,6 +62,13 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 		return errors.New("数据库结构版本在初始化期间发生变化，请重新打开")
 	}
 	version = actualVersion
+	if version > 0 && version <= 3 {
+		if !tx.Migrator().HasColumn(&schema.Provider{}, "credential_format") {
+			if err := tx.Exec("ALTER TABLE model_providers ADD COLUMN credential_format integer NOT NULL DEFAULT 0 CONSTRAINT ck_provider_credential_format CHECK (credential_format IN (0,1))").Error; err != nil {
+				return err
+			}
+		}
+	}
 	tables := slices.Concat(catalogTables(), conversationTables(), approvalTables(), settingsTables())
 	if version == 0 {
 		if err := initialize(tx, tables); err != nil {
@@ -78,7 +86,7 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 		if err := allowAutoReviewer(tx); err != nil {
 			return fmt.Errorf("升级审批人约束: %w", err)
 		}
-	} else if version != schemaVersion {
+	} else if version != 3 && version != schemaVersion {
 		return fmt.Errorf("不支持数据库结构版本 %d，请使用独立开发数据目录", version)
 	}
 	if err := validateSchema(tx, tables); err != nil {
@@ -140,15 +148,23 @@ func validateCoreTable(tx *gorm.DB, table any) error {
 	if !strings.HasSuffix(strings.ToUpper(strings.TrimSpace(ddl)), "STRICT") {
 		return fmt.Errorf("%s 不是 STRICT 表", statement.Schema.Table)
 	}
-	columns, err := tx.Migrator().ColumnTypes(table)
-	if err != nil {
+	// 直接使用 SQLite 的结构事实，避免 GORM 为每张表反复用正则解析大型 CHECK DDL。
+	// 同时保留字段、类型、非空及单列主键的原有校验强度。
+	type columnInfo struct {
+		Name    string
+		Type    string
+		Notnull int
+		Pk      int
+	}
+	var columns []columnInfo
+	if err := tx.Raw("SELECT name,type,\"notnull\",pk FROM pragma_table_info(?)", statement.Schema.Table).Scan(&columns).Error; err != nil {
 		return err
 	}
-	actual := make(map[string]gorm.ColumnType, len(columns))
+	actual := make(map[string]columnInfo, len(columns))
 	primary := 0
 	for _, column := range columns {
-		actual[column.Name()] = column
-		if value, known := column.PrimaryKey(); known && value {
+		actual[column.Name] = column
+		if column.Pk > 0 {
 			primary++
 		}
 	}
@@ -167,14 +183,14 @@ func validateCoreTable(tx *gorm.DB, table any) error {
 		if want == "" {
 			want = "integer"
 		}
-		if !strings.EqualFold(column.DatabaseTypeName(), want) {
+		if !strings.EqualFold(column.Type, want) {
 			return fmt.Errorf("%s.%s 类型不匹配", statement.Schema.Table, field.DBName)
 		}
-		if nullable, known := column.Nullable(); known && field.NotNull && nullable {
+		if field.NotNull && column.Notnull == 0 {
 			return fmt.Errorf("%s.%s 缺少非空约束", statement.Schema.Table, field.DBName)
 		}
 		if field.PrimaryKey {
-			if primary, known := column.PrimaryKey(); !known || !primary {
+			if column.Pk == 0 {
 				return errors.New("表主键不匹配")
 			}
 		}

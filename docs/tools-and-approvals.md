@@ -69,7 +69,7 @@
 无工作区时 `request.workspace` 为 `null`；文件工具的 `request.target` 包含 `requested_path`（解析基准后的请求路径）、`path`（解析链接后的实际绝对路径）、`kind`（`file` 或 `directory`）及 `within_workspace`。
 `ApprovalPolicy` 与 `ApprovalsReviewer` 是独立设置，保存在 `app_settings` 的 `execution` 配置组中，客户端通过接口修改，无需重启 Go 服务。
 `approval_policy` 默认 `on-request`，按需询问。`always` 对每次有效工具调用发起审批。受限沙箱下的 `never` 直接拒绝需要审批的操作。
-`approvals_reviewer` 默认 `user`。选择 `auto_review` 后，服务可将原本需要审批的项目内普通文件操作、无已知风险的只读沙箱命令及项目内单层目录创建提交给独立审核调用。其他可写沙箱命令、沙箱外命令、危险操作、待核实操作和项目外文件操作交给用户。审核使用本次任务的模型、最新用户文字和固定操作快照，审核请求占用同一模型并发限额，最多等待 20 秒。批准或拒绝写入 `decided_by=auto_review`，仅绑定同一次固定操作。超时、格式错误和无法判断时走原有人工审批。模型、结论、理由和实际 usage 保存于关联的 `approval_review` 模型步骤。取消随所属执行传播，重启恢复终态而不重放操作。
+`approvals_reviewer` 默认 `user`。选择 `auto_review` 后，服务可将原本需要审批的项目内普通文件操作、无已知风险的只读沙箱命令及项目内单层目录创建提交给独立审核调用。其他可写沙箱命令、沙箱外命令、危险操作、待核实操作和项目外文件操作交给用户。审核使用本次任务的模型、最新用户文字和固定操作快照，审核请求占用同一模型并发限额，最多等待 20 秒。批准或拒绝写入 `decided_by=auto_review`，仅绑定同一次固定操作。超时、格式错误和无法判断时走原有人工审批。模型、原始响应、供应商请求标识和实际 usage 保存于关联的审核 model_call 步骤；output 在保留原始响应字段的同时追加 `approval_review` 规范化结论。工具父步骤 input 仍只记录规范化结论，原始结果通过 step.data 分页读取；格式错误、拒绝和转人工的原始响应同样保留。取消随所属执行传播，重启恢复终态而不重放操作。
 `sandbox_mode` 默认 `workspace-write`，也支持 `read-only` 和 `danger-full-access`。完全访问需显式选择，必须与 `never/user` 配对。命令以当前系统账户权限访问文件和网络，常规操作无需逐次审批。目标和资源校验继续生效，历史拒绝与待核实结果仍受限制。只读模式下普通补丁修改另需审批，目录写授权不绕过此限制。旧全局配置缺少该字段时，新任务按 `workspace-write` 受理；查询返回明确默认值而不改写存储或 revision。历史执行快照保持缺失，命令延续逐次审批；旧客户端更新原有两字段时保留当前沙箱模式。无需新增数据库列或改写历史记录。
 `--approval-mode`、`--approval-policy`、`--approvals-reviewer` 已移除，启动参数不覆盖数据库中的用户选择。
 

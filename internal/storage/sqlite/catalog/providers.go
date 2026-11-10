@@ -14,8 +14,13 @@ const publicProviderColumns = "id, name, protocol, base_url, api_key <> '' AS ha
 // CreateProvider 保存业务层分配标识的厂商，未提供凭据时保存空字符串。
 func (s *Repository) CreateProvider(ctx context.Context, id string, in provider.ProviderInput) error {
 	row := schema.Provider{ID: id, Name: in.Name, Protocol: in.Protocol, BaseURL: in.BaseURL}
+	row.CredentialFormat = 1
 	if in.APIKey != nil {
-		row.APIKey = *in.APIKey
+		var err error
+		row.APIKey, err = s.cipher.Seal(ctx, id, *in.APIKey)
+		if err != nil {
+			return storageError(err)
+		}
 	}
 	if err := s.db.WithContext(ctx).Create(&row).Error; err != nil {
 		return storageError(err)
@@ -30,7 +35,11 @@ func (s *Repository) UpdateProvider(ctx context.Context, id string, in provider.
 		"updated_at": time.Now().UTC().UnixMilli(),
 	}
 	if in.APIKey != nil {
-		fields["api_key"] = *in.APIKey
+		value, err := s.cipher.Seal(ctx, id, *in.APIKey)
+		if err != nil {
+			return storageError(err)
+		}
+		fields["api_key"], fields["credential_format"] = value, 1
 	}
 	return changed(s.db.WithContext(ctx).Model(&schema.Provider{}).Where("id = ?", id).Updates(fields))
 }

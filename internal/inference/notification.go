@@ -44,6 +44,8 @@ func DescribeError(err error) Failure {
 		e.Message, e.Kind = "关联配置不存在或仍被引用", "referenced"
 	case errors.Is(err, provider.ErrDisabled):
 		e.Message, e.Kind = "模型已禁用", "disabled"
+	case errors.Is(err, provider.ErrCredentials):
+		e.Message, e.Kind = "系统凭据库不可用或凭据无法解密，请解锁凭据库后重试。", "credentials_unavailable"
 	case errors.Is(err, ErrUnsupported), errors.Is(err, model.ErrUnsupportedOutput):
 		e.Message, e.Kind = "当前适配器不支持该模型功能或输出", "unsupported"
 	case errors.Is(err, ErrBusy):

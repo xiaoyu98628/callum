@@ -11,8 +11,10 @@ type Provider struct {
 	Protocol string `gorm:"type:text;not null;check:ck_provider_protocol,length(trim(protocol)) > 0"`
 	// BaseURL 是该连接的 API 根地址，由关联模型共享。
 	BaseURL string `gorm:"type:text;not null;check:ck_provider_url,length(trim(base_url)) > 0"`
-	// APIKey 保存调用凭据，空字符串表示未配置；不得作为查询结果或日志输出。
+	// APIKey 保存 AES-GCM 密文，空字符串表示未配置；不得作为查询结果或日志输出。
 	APIKey string `gorm:"type:text;not null;default:''" json:"-"`
+	// CredentialFormat 的 0 仅用于待迁移的旧记录，1 表示加密或空凭据。
+	CredentialFormat int `gorm:"type:integer;not null;default:1;check:ck_provider_credential_format,credential_format IN (0,1)"`
 	// CreatedAt 是创建时间，使用 UTC Unix 毫秒时间戳。
 	CreatedAt int64 `gorm:"not null;autoCreateTime:milli"`
 	// UpdatedAt 是最近更新时间，使用 UTC Unix 毫秒时间戳。

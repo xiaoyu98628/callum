@@ -8,4 +8,5 @@ var (
 	ErrReferenced    = errors.New("关联配置不存在或仍被引用")
 	ErrInvalidConfig = errors.New("配置无效")
 	ErrDisabled      = errors.New("模型已禁用")
+	ErrCredentials   = errors.New("系统凭据库不可用或无法解密凭据")
 )

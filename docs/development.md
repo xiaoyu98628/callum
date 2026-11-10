@@ -113,3 +113,11 @@ go test -mod=readonly -race -timeout 60s ./internal/config/... ./internal/model/
 go test -mod=readonly -tags release -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/agent/...
 CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/agent/...
 ```
+
+## 凭据与验证隔离
+
+保存非空 API Key 需要可用的系统凭据库，平台要求与旧值迁移见 [系统凭据与迁移](storage.md#系统凭据与迁移)。普通 Go 自动化测试通过内部装配助手注入独立凭据替身，不调用真实用户钥匙串；生产入口固定使用系统实现，无环境变量回退开关。
+
+macOS 可显式运行系统集成检查：`CALLUM_LIVE_KEYRING_TEST=1 go test -mod=readonly -run TestIsolatedSystemKeychainRoundTrip -v ./internal/credentials/system`。测试只创建随机专用条目并在结束时删除。Windows Credential Manager 与 Linux Secret Service 已做纯 Go 交叉编译，原生锁定、取消和读写仍需各自系统验收，不能由 macOS 测试替代。
+
+迁移结构校验直接读取 SQLite 元数据，避免 GORM 反复解析整张表 DDL。无共享数据及全局进程状态的应用场景并行执行，保留完整的 420 次工具长任务回归；单场景等待预算为 30 秒，包级竞态检查仍为 60 秒。测试在每个场景关闭服务、连接和临时资源。

@@ -27,6 +27,8 @@ func publicError(err error) *protocol.Error {
 		e.Code, e.Message, kind = 1003, "关联配置不存在或仍被引用", "referenced"
 	case errors.Is(err, provider.ErrDisabled):
 		e.Code, e.Message, kind = 1004, "模型已禁用", "disabled"
+	case errors.Is(err, provider.ErrCredentials):
+		e.Code, e.Message, kind = 1012, "系统凭据库不可用或凭据无法解密，请解锁凭据库后重试。", "credentials_unavailable"
 	}
 	e.Data = map[string]any{"kind": kind}
 	return e

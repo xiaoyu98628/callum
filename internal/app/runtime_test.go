@@ -18,11 +18,17 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent/events"
 	"github.com/xiaoyu98628/callum/internal/config"
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/credentials/credentialstest"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/provider"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 )
+
+// 测试不读写系统钥匙串；同一临时目录重启仍得到同一隔离主密钥。
+func newTestRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger) (*Runtime, error) {
+	return newRuntime(ctx, cfg, logger, credentialstest.Keyring{})
+}
 
 func runtimeFixture(t *testing.T, limit int) (*Runtime, config.Config) {
 	t.Helper()
@@ -31,7 +37,7 @@ func runtimeFixture(t *testing.T, limit int) (*Runtime, config.Config) {
 		t.Fatal(err)
 	}
 	cfg.MaxConcurrentRuns = limit
-	runtime, err := New(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	runtime, err := newTestRuntime(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +252,7 @@ func TestRuntimeCloseCancelsAndReleasesOwnership(t *testing.T) {
 	waitSignal(t, started)
 	// 第二次初始化必须在取得实例锁时失败，不能触碰活动实例的数据。
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	if duplicate, err := New(t.Context(), cfg, logger); err == nil {
+	if duplicate, err := newTestRuntime(t.Context(), cfg, logger); err == nil {
 		duplicate.Close()
 		t.Fatal("重复运行时取得了实例锁")
 	}
@@ -268,7 +274,7 @@ func TestRuntimeCloseCancelsAndReleasesOwnership(t *testing.T) {
 	if err := runtime.Invoke(t.Context(), inference.Request{ModelID: id, Messages: []model.Message{{Role: model.RoleUser, Content: "late"}}}, func(string) error { return nil }); !errors.Is(err, agent.ErrClosed) {
 		t.Fatalf("关闭后仍接受执行: %v", err)
 	}
-	recovered, err := New(t.Context(), cfg, logger)
+	recovered, err := newTestRuntime(t.Context(), cfg, logger)
 	if err != nil {
 		t.Fatalf("实例锁未释放: %v", err)
 	}
@@ -314,7 +320,7 @@ func TestOwnershipPrecedesMigration(t *testing.T) {
 	}
 	defer ownership.Close()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
-	if duplicate, err := New(t.Context(), cfg, logger); err == nil {
+	if duplicate, err := newTestRuntime(t.Context(), cfg, logger); err == nil {
 		duplicate.Close()
 		t.Fatal("重复实例取得了锁")
 	}
@@ -324,7 +330,7 @@ func TestOwnershipPrecedesMigration(t *testing.T) {
 	if err := ownership.Close(); err != nil {
 		t.Fatal(err)
 	}
-	runtime, err := New(t.Context(), cfg, logger)
+	runtime, err := newTestRuntime(t.Context(), cfg, logger)
 	if err != nil {
 		t.Fatal(err)
 	}

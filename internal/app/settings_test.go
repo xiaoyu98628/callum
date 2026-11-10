@@ -35,7 +35,7 @@ func TestInvalidStoredSettingsReleaseStartupResources(t *testing.T) {
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if failed, err := New(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil))); err == nil {
+	if failed, err := newTestRuntime(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil))); err == nil {
 		failed.Close()
 		t.Fatal("非法持久化配置被默认权限替代")
 	} else if !errors.Is(err, settings.ErrStorage) {
@@ -51,7 +51,7 @@ func TestInvalidStoredSettingsReleaseStartupResources(t *testing.T) {
 	if err != nil || closeErr != nil {
 		t.Fatalf("临时设置修复失败: %v %v", err, closeErr)
 	}
-	restarted, err := New(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	restarted, err := newTestRuntime(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestSettingsStdioConflictAndRestart(t *testing.T) {
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := New(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	restarted, err := newTestRuntime(t.Context(), cfg, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

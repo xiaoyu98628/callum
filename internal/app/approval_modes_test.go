@@ -189,6 +189,39 @@ func TestAssistedApprovalThroughStdio(t *testing.T) {
 			if tc.highRisk {
 				wantCalls = 0
 			}
+			if tc.reply != "" {
+				var steps []agent.StepSummary
+				f := p.call(t, "step.list", map[string]any{"run_id": rid})
+				requireOK(t, f)
+				if err := json.Unmarshal(f.Result, &steps); err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, step := range steps {
+					if step.Name != "AI 审批" {
+						continue
+					}
+					data := p.call(t, "step.data", map[string]any{"step_id": step.ID, "field": "output"})
+					requireOK(t, data)
+					var fragment struct{ Fragment string }
+					if err := json.Unmarshal(data.Result, &fragment); err != nil {
+						t.Fatal(err)
+					}
+					var output struct {
+						Response struct {
+							Choices []struct{ Message struct{ Content string } }
+						}
+						Review *agent.ApprovalReview `json:"approval_review"`
+					}
+					if json.Unmarshal([]byte(fragment.Fragment), &output) != nil || len(output.Response.Choices) != 1 || output.Response.Choices[0].Message.Content != tc.reply || output.Review == nil {
+						t.Fatal("审核步骤未保留原始响应及独立结论")
+					}
+					found = true
+				}
+				if !found {
+					t.Fatal("缺少审核审计步骤")
+				}
+			}
 			if reviewCalls.Load() != wantCalls {
 				t.Fatalf("不符合审核范围: %d", reviewCalls.Load())
 			}

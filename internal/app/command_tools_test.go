@@ -71,6 +71,8 @@ func commandStepOutput(t *testing.T, p *appPeer, runID string) (agent.StepSummar
 }
 
 func TestCommandToolsThroughStdio(t *testing.T) {
+	// 各用例独占临时目录、运行时及受控端点，可与其他应用回归并行。
+	t.Parallel()
 	helper := commandHelper(t)
 	for _, test := range []struct {
 		name, policy, decision, mode string
