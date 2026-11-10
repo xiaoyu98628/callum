@@ -1,6 +1,9 @@
+//go:build darwin
+
 package run
 
 import (
+	"context"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -122,7 +125,7 @@ func (p *fixedCommand) protectDataAncestors(projectWrite bool) []string {
 }
 
 // setupExecution 只在审批完成、路径复核后创建私有临时目录；调用者在进程树收尾后清理。
-func (p *fixedCommand) setupExecution() (func() error, error) {
+func (p *fixedCommand) setupExecution(context.Context) (func() error, error) {
 	if !p.boundary.Sandboxed {
 		return func() error { return nil }, nil
 	}
@@ -167,35 +170,4 @@ func seatbeltProfile(workspaceWrite, protectData bool) string {
 	return profile
 }
 
-// commandRisk 保留已识别破坏性操作的人工复核；任意脚本仍由系统沙箱限制实际访问。
-// 这不是命令白名单，也不声称能判断所有程序的业务副作用。
-func commandRisk(command []string) string {
-	if len(command) == 0 {
-		return "unclassified_operation"
-	}
-	words := make([]string, 0, len(command))
-	for _, part := range command {
-		words = append(words, strings.FieldsFunc(strings.ToLower(part), func(r rune) bool {
-			return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '/')
-		})...)
-	}
-	for _, word := range words {
-		switch filepath.Base(word) {
-		case "rm", "rmdir", "sudo", "su", "diskutil", "dd", "mkfs", "chmod", "chown":
-			return "destructive_command"
-		}
-	}
-	for _, word := range words {
-		if word == "-delete" || word == "-exec" || word == "-execdir" {
-			return "destructive_command"
-		}
-	}
-	if slices.ContainsFunc(words, func(word string) bool { return filepath.Base(word) == "git" }) {
-		for _, word := range words {
-			if word == "clean" || word == "reset" || word == "restore" || word == "push" {
-				return "sensitive_git_command"
-			}
-		}
-	}
-	return ""
-}
+func (*fixedCommand) sandboxBackend() string { return "macos-seatbelt" }

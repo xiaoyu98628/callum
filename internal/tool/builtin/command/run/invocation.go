@@ -41,9 +41,13 @@ func (p *invocation) ExecuteStream(ctx context.Context, emit func(tool.OutputChu
 	if err := p.fixed.check(runCtx); err != nil {
 		return tool.Result{Outcome: tool.OutcomeNotApplied}, err
 	}
-	cleanup, err := p.fixed.setupExecution()
+	cleanup, err := p.fixed.setupExecution(runCtx)
 	if err != nil {
-		return tool.Result{Outcome: tool.OutcomeNotApplied}, err
+		outcome := tool.OutcomeNotApplied
+		if errors.Is(err, tool.ErrUnknownOutcome) {
+			outcome = tool.OutcomeUnknown
+		}
+		return tool.Result{Outcome: outcome}, err
 	}
 	report, err := runProcess(runCtx, p.fixed, emit)
 	if cleanupErr := cleanup(); cleanupErr != nil {

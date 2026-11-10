@@ -86,6 +86,9 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger) (_ *Runtim
 	if err != nil {
 		return nil, err
 	}
+	if err := command.RecoverSandbox(initCtx, filepath.Dir(cfg.DatabasePath)); err != nil {
+		return nil, err
+	}
 	r.db, err = sqlite.Open(initCtx, cfg.DatabasePath)
 	if err != nil {
 		return nil, err

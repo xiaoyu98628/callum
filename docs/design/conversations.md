@@ -181,7 +181,7 @@ internal/agent/transcript 负责执行轨迹配对校验、失败回答过滤、
 
 同一 `request_hash` 留下未知、部分生效或已生效但报错的结果后，模型再次请求该固定操作必须重新获得用户确认；`never` 策略拒绝，判定原因 `previous_result_requires_confirmation`。这一约束沿当前分支上下文恢复，不自动重试操作；明确成功才解除待核实状态。审批不改变操作事实，也不豁免参数、目标及工作区的执行前校验。
 
-已接入文件创建修改和非交互命令执行；macOS 命令使用 Seatbelt 系统沙箱，Linux/Windows 仍逐次审批。macOS、Linux、Windows 的原生验证与交叉编译结果分别说明，不将编译通过视为原生运行通过。
+已接入文件创建修改和非交互命令执行；macOS 命令使用 Seatbelt，Windows 已接入 AppContainer 平台实现但原生验收待完成，Linux 仍逐次审批。macOS、Linux、Windows 的原生验证与交叉编译结果分别说明，不将编译通过视为原生运行通过。
 
 模型与工具结果保留统一 context_message 以重建跨协议上下文，标题不参与工具轨迹；步骤仍保存原始结果和 usage。
 工具调用轮中的暂存正文随 message.updated 清空，最终回答继续流式输出；完整中间文本可查询对应模型步骤。
@@ -213,7 +213,7 @@ internal/agent/transcript 负责执行轨迹配对校验、失败回答过滤、
 
 `on-request` 自动执行普通只读沙箱命令，已识别的高风险命令逐次询问。`always` 对有效调用逐次询问，`never` 拒绝需要审批的调用。沙箱失败保留退出码及错误，任何更高权限都需要新的明确请求。
 
-`sandbox_permissions` 省略或为 `use_default` 时，macOS 命令保持只读沙箱。需要项目写入时，提交 `workspace_write` 及非空 `justification`。服务端要求绑定工作区、受理快照允许项目写入和单次审批。批准后，命令可修改或删除真实工作区内的文件，网络仍关闭。请求 `require_escalated` 同样需要说明和单次审批，批准后使用当前系统用户的文件和网络权限。Linux/Windows 当前命令逐次审批，`workspace_write` 在没有系统沙箱时不可用。
+`sandbox_permissions` 省略或为 `use_default` 时，macOS 与 Windows 命令保持只读沙箱。需要项目写入时，提交 `workspace_write` 及非空 `justification`。服务端要求绑定工作区、受理快照允许项目写入和单次审批。批准后，命令可修改或删除真实工作区内的文件，网络仍关闭。请求 `require_escalated` 同样需要说明和单次审批，批准后使用当前系统用户的文件和网络权限。Linux 当前命令逐次审批，`workspace_write` 在没有系统沙箱时不可用。Windows 的 AppContainer 实现与原生验收状态见下文。
 
 Seatbelt 是共享文件系统上的路径访问边界，不是容器或独立文件系统：项目内既有文件的其他硬链接会共享修改，项目内已可写的别名也不构成独立副本；新建硬链接被默认拒绝。路径固定及执行前复核不保证抵抗同时发生的外部重命名，也不锁定程序的完整依赖图。应将项目根目录设为实际任务目录，而非整个用户目录。
 
@@ -223,25 +223,30 @@ Seatbelt 是共享文件系统上的路径访问边界，不是容器或独立�
 
 正常退出并完成收尾报告 applied，含义仅为命令调用已经执行至退出；exit_code 独立表达业务成功/失败，非零退出码不是启动失败。启动失败 not_applied；启动后的超时、取消、信号终止和结果不明报告 unknown，保留输出，沿用持久化边界、中断恢复和重新审批，不自动重试。
 
-单次命令沿用 tool-timeout，默认 30 秒，不计算审批等待。Unix 独立进程组覆盖未主动脱离的后代，主进程退出、取消和超时均终止组内残留；不承诺收回主动脱离进程组或经外部服务启动的进程；Unix 上 Callum 异常退出也不保证回收子进程，恢复仅记录未知而不重试。Windows 10+/Server 2016+ 在创建时通过 JOB_LIST 关联 Job，启用 KILL_ON_JOB_CLOSE，限制普通 breakaway；不具备操作系统沙箱。主进程和管道各最多 2 秒收尾，Windows Job 成员另有最多 2 秒确认，失败如实记录而不伪造清理成功。Close 取消并等待本次执行，再释放准备句柄，可重复调用。
+单次命令沿用 tool-timeout，默认 30 秒，不计算审批等待。Unix 独立进程组覆盖未主动脱离的后代，主进程退出、取消和超时均终止组内残留；不承诺收回主动脱离进程组或经外部服务启动的进程；Unix 上 Callum 异常退出也不保证回收子进程，恢复仅记录未知而不重试。Windows 10+/Server 2016+ 在创建时通过 JOB_LIST 关联 Job，启用 KILL_ON_JOB_CLOSE，限制普通 breakaway；受限模式另以 AppContainer 提供文件与网络边界。主进程和管道各最多 2 秒收尾，Windows Job 成员另有最多 2 秒确认，失败如实记录而不伪造清理成功。Close 取消并等待本次执行，再释放准备句柄，可重复调用。
 
 测试使用 testdata 中的受控进程及临时目录，验证审批前不启动、参数/工作目录/环境、双流实时输出、截断、退出码、取消/超时、子进程和应用关闭。平台原生 CI 与本地交叉编译分开记录，新增工具不增加数据库迁移或 Go 依赖。
 
-### Windows 原生命令沙箱专项设计（规划）
+### Windows 原生命令沙箱实现与待验收范围
 
-目标是让 Windows 的只读、项目写入、单次沙箱外执行和完全访问具有与 macOS 一致的业务语义。当前实现仅以 Job Object 管理命令进程树，受限模式的命令仍逐次审批；`workspace_write` 申请返回不可用。以下内容是后续实现及验收方案。
+平台代码位于 `internal/tool/builtin/command/run/sandbox*_windows.go`、`process_windows.go` 和 `protection_windows.go`。macOS 的原有实现移入 `sandbox_darwin.go`，Linux 的无系统沙箱行为保留在独立文件。公共 policy、审批协议、设置结构及数据库表未改动。Windows 的只读自动放行、项目写入逐次审批、单次沙箱外请求和显式完全访问已接通调用链；未取得 Windows 原生测试结果，不宣称与 macOS 的实际功能及隔离边界已完全一致。
 
-拟在 `internal/tool/builtin/command/run` 的平台实现中评估 AppContainer/LPAC，结合当前创建时 Job 关联限制子进程生命周期。AppContainer 通过访问令牌、SID 和 DACL 控制资源访问，文件与网络权限均需明确配置。此选择属于工程方案，实际可用边界需在 Windows 10/11 x64 上验证。[Microsoft AppContainer 启动文档](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)
+Windows 每次执行使用随机名称的独立 AppContainer profile/SID、无 capabilities 的安全属性、`DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED` 令牌和 Job Object。挂起创建后验证 AppContainer 标志、包 SID 与唯一限制 SID，才恢复主线程；任何失败均停止并回收，不回退到普通进程。既有完全访问和已批准的沙箱外调用继续使用原启动链。[Microsoft AppContainer 启动文档](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)、[限制令牌文档](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-createrestrictedtoken)是 API 依据，实际 OS 行为仍需原生验证。
 
-- 只读模式允许当前用户可读且授权范围内的执行依赖与任务文件，仅本次私有临时目录可写。项目写入模式须在固定实际目录内授予写入，保留 `.git`、`.codex`、`.agents`、`.aws` 和应用自身数据目录的保护。网络限制覆盖 IPv4、IPv6、DNS、回环和子进程。
-- 平台层负责将固定目录和模式转换为系统边界。`CommandBoundary` 继续向 policy 提供可信事实，审批快照保存真实边界与范围。只有系统隔离已建立并通过执行前复核，才能声明 `Sandboxed`。初始化或复核失败返回明确错误。
-- 应用持有的私有沙箱资源使用独立目录。用户已有项目、执行文件及父目录的原有 ACL 必须保留。AppContainer 对任意项目目录和程序依赖的授权方式仍需验证，应检查是否需要文件访问代理或额外系统能力，明确安装权限、持久授权与异常恢复后再确定实现。审批等待期间只保留固定句柄和快照，进程启动前创建运行资源。
-- 路径校验覆盖盘符大小写、UNC、重解析点、联接点、硬链接、短文件名、备用数据流及路径替换。项目与数据目录重叠时应按真实目标判断，临时目录和依赖授权不得成为访问 Callum 数据的别名。
-- 单次沙箱外请求沿用审批和固定目标校验，完全访问继续由受理设置快照显式选择。系统能力不足或构建隔离失败时明确失败；更高权限通过新的请求与审批取得。初始化失败、取消、超时和应用退出均须等待 Job 成员结束后释放令牌、句柄与私有资源，清理错误与原错误共同返回。
+审批准备仅固定路径、身份、读取根和权限指纹。默认读取项目、cwd、程序目录及系统既有 AppContainer 资源；私有临时目录和 AppContainer 隔离配置存储可写。项目写入限真实工作区，现有 `.git`、`.codex`、`.agents`、`.aws` 拒绝写入；应用数据拒绝访问，祖先不授予删除权限。根目录、授权对象及数据库链接在执行前复核，遍历跳过重解析点；受限模式拒绝 UNC。系统目录使用既有读取权限，不向系统目录增加写入授权。审批显示 `windows-appcontainer`、固定 `readable_roots` 及已有 `writable_roots`。
 
-原生验收应使用隔离数据与本机受控服务，覆盖只读命令、项目内修改、越界与保护目录拒绝、网络及子进程限制、审批前后路径替换、并发隔离、未知结果、取消及崩溃恢复，并运行 PowerShell、cmd、Node、Git 和 Go 的实际任务。文件内容和原有 ACL 在成功、失败及崩溃恢复后均需核对。Windows x86 服务在 x64 客户端下的行为也需纳入验收，交叉编译结果单独记录。
+ACL 计划最多 65,536 个对象，恢复日志最多 16 MiB。每个对象以句柄复核身份后合并本次 SID，不替换其他 SID 权限；目录使用不自动传播到已有子对象的句柄权限，逐项授权，未来子对象使用继承。写入前将完整计划同步到私有 `command-sandboxes/` 日志。跨进程用户级互斥锁串行化 Callum 的 ACL 更新；执行之间使用不同 SID。结束先确认 Job 为空，再删除 profile、移除本次 SID，并扫描固定根和数据目录收回新增/改名对象上的继承条目。失败保留日志与 unknown/清理失败状态；下次启动在数据库实例锁内、打开数据库前恢复，恢复失败阻止启动。
 
-当前待确定的是目录授权机制、最低系统要求与外部程序兼容范围。完成这些原生验证后，再接通 Windows 的沙箱内项目写入与受限命令自动放行。桌面客户端当前按无系统沙箱展示和审批。
+ACL 与 Seatbelt 的边界仍存在差异：读取不是整个用户可读文件系统；已存在元数据目录的对象保护不能表达将来新建同名目录的动态路径规则；外部将对象移出所有根目录可能留下不再使用的 SID 条目；外部 ACL 编辑不参与 Callum 的互斥。共享文件系统的硬链接与并发外部改名不提供副本隔离。不能将这些差异描述为完全等价。
+
+新增 Windows 原生测试覆盖：只读拒绝写入、项目写入审批、项目外/子进程越界、现有保护目录、应用数据读写、修改 ACL、NULL DACL 越界、回环网络拒绝、私有临时目录、取消、ACL 并发保留、替换文件及新增对象回收、重启恢复与重复恢复。测试使用临时目录和受控本机监听，不访问用户数据。可在 Windows x64 中执行：
+
+```powershell
+go test -mod=readonly -race -timeout 180s ./internal/tool/builtin/command/... ./internal/tool/policy/...
+go test -mod=readonly -race -timeout 180s ./...
+```
+
+本机 macOS 只能运行 macOS 回归及 Windows x86/x64 交叉编译，未运行上述 Windows 测试。待验收还包括 IPv4/IPv6、DNS、重解析点/联接点、短路径、硬链接、审批后路径替换、真实崩溃及未清理 Job 恢复，以及 PowerShell、cmd、Node、Git、Go 的常用任务。Windows x86 服务在 x64 客户端下的 WOW64 行为和原有 ACL/文件内容核对均待实机验证。桌面测试已接通只读自动执行、项目写入审批、设置快照及完全访问；测试启用不代表原生执行通过。
 
 ### 会话目录授权
 

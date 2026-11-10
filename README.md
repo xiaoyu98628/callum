@@ -618,7 +618,7 @@ Go 服务支持 `conversation.compact` 手动压缩，并在每次回答模型�
 
 每个工具步骤的 `input` 保存 `settings_revision`、`approval_policy`、`approvals_reviewer`、`sandbox_mode`，以及 `authorization.action`（`allow`、`ask`、`deny`）和规则标识 `authorization.reason`。
 判定是执行前的规则结果；`ask` 的实际用户决定通过关联审批记录查询。自动放行及策略拒绝不会伪造用户审批记录。
-文件目标由可信工具实现独立固定和校验，通用执行器不要求工具依赖工作区或文件系统；macOS 的 `workspace-write` 与 `read-only` 命令使用系统沙箱；显式设置 `danger-full-access` 后，新任务命令使用当前系统账户权限。
+文件目标由可信工具实现独立固定和校验，通用执行器不要求工具依赖工作区或文件系统；macOS 与 Windows 的 `workspace-write` 与 `read-only` 命令使用各自的系统沙箱；显式设置 `danger-full-access` 后，新任务命令使用当前系统账户权限。
 模型请求及工具执行仍分别受 `--call-timeout`、`--tool-timeout` 限制；审批等待没有超时配置。
 审批状态为 `pending`、`approved`、`rejected`、`cancelled`。批准后再次校验权限与取消信号，并在事务中认领尚未执行的工具步骤。
 同一人工决定按原授权范围重复提交保持幂等，冲突决定返回错误。已完成的 AI 决定保留 `auto_review` 身份，后续人工提交返回冲突。本机用户决定记录为 `local_user`。
@@ -704,9 +704,15 @@ macOS 的文件读写、权限、ACL、取消、冲突、并发及 stdio 流式�
 
 命令 effects 固定为 `unknown`。macOS 使用 `/usr/bin/sandbox-exec` 启动 Seatbelt，默认只读，网络关闭，仅本次命令的私有临时目录可写。内置文件工具和 Seatbelt 命令禁止访问 Callum 自身数据目录，目录搜索跳过该目录。沙箱内项目写入也限制重命名该目录在项目内的祖先路径。文件工具拒绝以其他路径访问 SQLite 文件及附属文件。SQLite 文件存在硬链接时拒绝启动 Seatbelt 命令。项目中的 `.git`、`.codex`、`.agents`、`.aws` 仍受写入限制。Go/npm 临时缓存使用本次命令的私有临时目录。
 
+Windows 10/11 的平台实现使用每次执行独立的 AppContainer、无网络 capabilities、`WRITE_RESTRICTED` 令牌和创建时关联的 Job Object。默认只读，可写范围为本次私有临时目录和 AppContainer 的隔离配置存储；项目写入仍需要单次审批。程序先以挂起状态创建并复核 AppContainer SID 与限制 SID，再恢复运行；建立失败直接返回错误，不降级为普通进程。当前仅完成交叉构建和原生测试用例编译，尚无 Windows 原生运行结果，不能据此确认隔离有效或 PowerShell、cmd、Node、Git、Go 的实际兼容性。
+
+Windows 读取范围为固定工作目录、可选项目、可执行文件所在目录，以及 Windows 已授予 AppContainer 访问的系统资源。审批详情中的 `sandbox_backend=windows-appcontainer` 和 `readable_roots` 展示固定范围；其他本地读取可用文件工具。受限命令只接受本地盘符路径，UNC 不可用。目录或依赖无法授权时明确失败。现有 `.git`、`.codex`、`.agents`、`.aws` 对象拒绝写入，应用数据禁止访问，其祖先目录不授予删除和重命名权限，SQLite 及附属文件有硬链接时拒绝启动。ACL 保护跟随现有对象，不等同于 Seatbelt 对将来新建同名目录的路径规则；并发外部重命名及项目文件硬链接也不构成独立文件副本。
+
+Windows 在执行前临时为独立 SID 合并 ACL，结束时只移除该 SID 的条目；保留其他 SID 的权限。准备与审批阶段不创建配置或改写 ACL。恢复日志先同步写入应用数据目录的 `command-sandboxes/`，启动取得实例锁后、打开数据库前恢复，确认 Job 已结束后回收配置和权限；失败保留日志并阻止继续初始化。单次计划最多 65,536 个对象、日志最多 16 MiB；回收扫描同样有界，失败不伪报完成。用户或外部程序将对象移出所有固定目录时，无法通过原路径发现移出对象上的遗留 SID；该 SID 不复用，旧令牌与进程结束后不再获得运行授权。并发外部 ACL 编辑不受 Callum 的跨进程互斥保护。Windows 原生验收仍需覆盖这些边界，详见[设计与验收说明](docs/design/conversations.md#windows-原生命令沙箱实现与待验收范围)。
+
 `on-request` 自动执行普通只读沙箱命令，已识别的高风险命令逐次询问。`always` 对有效调用逐次询问，`never` 拒绝需要审批的调用。沙箱失败保留退出码及错误，任何更高权限都需要新的明确请求。
 
-`sandbox_permissions` 省略或为 `use_default` 时，macOS 命令保持只读沙箱。需要项目写入时，提交 `workspace_write` 及非空 `justification`。服务端要求绑定工作区、受理快照允许项目写入和单次审批。批准后，命令可修改或删除真实工作区内的文件，网络仍关闭。请求 `require_escalated` 同样需要说明和单次审批，批准后使用当前系统用户的文件和网络权限。Linux/Windows 当前命令逐次审批，`workspace_write` 在没有系统沙箱时不可用。
+`sandbox_permissions` 省略或为 `use_default` 时，macOS 与 Windows 命令保持只读沙箱。需要项目写入时，提交 `workspace_write` 及非空 `justification`。服务端要求绑定工作区、受理快照允许项目写入和单次审批。批准后，命令可修改或删除真实工作区内的文件，网络仍关闭。请求 `require_escalated` 同样需要说明和单次审批，批准后使用当前系统用户的文件和网络权限。Linux 当前命令逐次审批，`workspace_write` 在没有系统沙箱时不可用。Windows 的 AppContainer 实现与原生验收状态见前述说明。
 
 Seatbelt 是共享文件系统上的路径访问边界，不是容器或独立文件系统：项目内既有文件的其他硬链接会共享修改，项目内已可写的别名也不构成独立副本；新建硬链接被默认拒绝。路径固定及执行前复核不保证抵抗同时发生的外部重命名，也不锁定程序的完整依赖图。应将项目根目录设为实际任务目录，而非整个用户目录。
 
@@ -722,7 +728,7 @@ sequence 在单个步骤内从 1 递增；两个流各自保持读取顺序，�
 每片最多 4 KiB 原始字节，每次调用实时推送最多 64 KiB、128 片。保存 stdout/stderr 各自前 16 KiB 原始字节，编码后各不超过 24 KiB JSON，最终结果仍不超过 64 KiB。达到上限继续排空管道，分别设置 truncated 和 stream_truncated，并保留实际读取字节数；输出片段只即时发布，不逐片落库或承诺重放。慢订阅者沿用有界队列规则，断开对应消费者，不取消共享执行；最终结果通过 step.data 查询。
 
 结果包含 execution_boundary（sandboxed、sandbox_mode、escalated 及可选 risk）、started、pid（未启动时为 null，仅供核实，不作为重启后的进程控制凭据）、exit_code（未获得时为 null）、可选 signal、timed_out、cancelled、cleanup_complete、stdout、stderr、stream_truncated。每个输出对象为 encoding（utf-8 或 base64）、data、bytes、truncated；二进制或不能构成完整 UTF-8 的保留前缀使用 base64；UTF-8 文本按实际 JSON 转义长度和字符边界截断。
-启动失败为 not_applied；正常退出且生命周期收尾成功为 applied，仅证明命令调用已经执行完毕，非零 exit_code 仍原样交给模型判断业务失败。启动后取消、超时、信号终止或结果不明为 unknown，并保留已经收到的输出。未记录结果的中断命令沿用持久化保守未知及重新审批规则，不自动重试。
+启动失败为 not_applied；若权限建立后的回收失败则保守记录 unknown 并保留恢复日志。正常退出且生命周期收尾成功为 applied，仅证明命令调用已经执行完毕，非零 exit_code 仍原样交给模型判断业务失败。启动后取消、超时、信号终止或结果不明为 unknown，并保留已经收到的输出。未记录结果的中断命令沿用持久化保守未知及重新审批规则，不自动重试。
 
 `.github/workflows/verify.yml` 配置 macOS、Linux、Windows 的原生竞态测试、静态检查和无 CGO 构建；Go 版本读取 go.mod。工作流配置存在不等于运行通过，平台原生结果以实际 CI 记录为准；本地交叉编译只证明对应目标可构建。
 

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +36,38 @@ func main() {
 			panic(err)
 		}
 		fmt.Print("written")
+	case "write-temp":
+		if err := os.WriteFile(filepath.Join(os.TempDir(), "written"), []byte("temporary"), 0600); err != nil {
+			panic(err)
+		}
+	case "read":
+		data, err := os.ReadFile(os.Args[2])
+		if err != nil {
+			panic(err)
+		}
+		fmt.Print(string(data))
+	case "relax-acl":
+		if err := relaxACL(os.Args[2]); err != nil {
+			panic(err)
+		}
+	case "connect":
+		connection, err := net.DialTimeout("tcp", os.Args[2], time.Second)
+		if err != nil {
+			panic(err)
+		}
+		if err := connection.Close(); err != nil {
+			panic(err)
+		}
+	case "spawn-write":
+		executable, err := os.Executable()
+		if err != nil {
+			panic(err)
+		}
+		child := exec.Command(executable, "write", os.Args[2])
+		child.Stdout, child.Stderr = os.Stdout, os.Stderr
+		if err := child.Run(); err != nil {
+			panic(err)
+		}
 	case "exit":
 		fmt.Fprint(os.Stdout, "out")
 		fmt.Fprint(os.Stderr, "err")
