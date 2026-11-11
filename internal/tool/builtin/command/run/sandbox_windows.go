@@ -21,6 +21,7 @@ import (
 const sandboxJournalVersion = 1
 const maxSandboxEntries = 65536
 const maxSandboxJournalBytes = 16 << 20
+const maxSandboxRoots = 4 // cwd、程序目录、可选工作区及完整内置运行时树。
 
 type sandboxRoot struct {
 	Path     string `json:"path"`
@@ -35,6 +36,7 @@ type sandboxACLEntry struct {
 	Directory bool   `json:"directory"`
 	Mask      uint32 `json:"mask"`
 	Deny      bool   `json:"deny,omitempty"`
+	SelfOnly  bool   `json:"self_only,omitempty"` // 祖先目录的删除保护不向普通子项传播。
 }
 
 type sandboxJournal struct {
@@ -145,6 +147,9 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 	s := &p.sandboxState
 	s.journal = sandboxJournal{Version: sandboxJournalVersion, Name: "callum.command." + rand.Text(), Temporary: p.temporaryPath, ProtectedDirectory: p.protectedDirectory.actual}
 	paths := []string{p.directory.actual, filepath.Dir(p.executable.actual)}
+	for _, root := range p.readOnlyDirectories {
+		paths = append(paths, root.actual)
+	}
 	if p.workspace != nil {
 		paths = append(paths, p.workspace.actual)
 	}
@@ -167,6 +172,9 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 		ambient := !write && (isWindowsSystemDirectory(root.actual, p.environment) || ambientWindowsRead(root.actual))
 		s.journal.Roots = append(s.journal.Roots, sandboxRoot{Path: root.actual, Identity: root.identity, Write: write, Ambient: ambient})
 	}
+	if len(s.journal.Roots) > maxSandboxRoots {
+		return tool.ErrLimit
+	}
 	profile, err := json.Marshal(struct {
 		Policy string
 		Roots  []sandboxRoot
@@ -176,7 +184,7 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 	}
 	p.profile = string(profile)
 	// 随机私有目录不进入权限指纹；实际读写根目录由快照绑定。
-	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOCACHE", "GOTMPDIR", "npm_config_cache"} {
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOCACHE", "GOTMPDIR", "npm_config_cache", "PIP_CACHE_DIR"} {
 		p.environment = slices.DeleteFunc(p.environment, func(entry string) bool { name, _, _ := strings.Cut(entry, "="); return strings.EqualFold(name, key) })
 		value := p.temporaryPath
 		if key == "GOCACHE" {
@@ -288,11 +296,11 @@ func (p *fixedCommand) collectSandboxACLs(ctx context.Context) error {
 				return tool.ErrDenied
 			}
 			mask := uint32(windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE)
-			deny := block || protectedSandboxPath(path)
+			deny := block || protectedSandboxPath(path) || p.protection.ReadOnlyContains(path)
 			if write && !deny {
 				mask |= windows.FILE_GENERIC_WRITE
 				// 应用数据的祖先目录不能被重命名或删除。
-				if !strings.EqualFold(path, root) && !withinSandboxPath(p.protectedDirectory.actual, path) {
+				if !strings.EqualFold(path, root) && !p.protection.ProtectsDescendant(path) {
 					mask |= windows.DELETE
 				}
 			}
@@ -312,6 +320,10 @@ func (p *fixedCommand) collectSandboxACLs(ctx context.Context) error {
 				mask |= old.Mask
 			}
 			entries[key] = sandboxACLEntry{Path: path, Identity: identity, Directory: info.IsDir(), Mask: mask, Deny: deny}
+			if !deny && info.IsDir() && p.protection.ProtectsDescendant(path) {
+				// 工作区父目录的继承 DELETE 授权不能抵消资源祖先的固定路径保护。
+				entries[key+"\x00ancestor"] = sandboxACLEntry{Path: path, Identity: identity, Directory: true, Mask: windows.DELETE | sandboxDeleteChild, Deny: true, SelfOnly: true}
+			}
 			if len(entries) > maxSandboxEntries {
 				return tool.ErrLimit
 			}
@@ -385,13 +397,8 @@ func (p *fixedCommand) createsWorkspaceDirectory() bool {
 	if err != nil {
 		return false
 	}
-	trusted := false
-	for _, directory := range []string{"System32", "SysWOW64"} {
-		actual, err := filepath.EvalSymlinks(filepath.Join(systemRoot, directory, "cmd.exe"))
-		if err == nil && strings.EqualFold(actual, p.executable.actual) {
-			trusted = true
-		}
-	}
+	actual, resolveErr := filepath.EvalSymlinks(filepath.Join(systemRoot, "System32", "cmd.exe"))
+	trusted := resolveErr == nil && strings.EqualFold(actual, p.executable.actual)
 	relative, err := filepath.Rel(strings.ToLower(p.workspace.actual), strings.ToLower(p.directory.actual))
 	return trusted && err == nil && filepath.IsLocal(relative)
 }

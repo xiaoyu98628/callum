@@ -45,6 +45,34 @@ func prepareSandboxTest(t *testing.T, root string, command []string, mode tool.S
 	return invocation, invocation.fixed.temporaryPath
 }
 
+func TestSeatbeltKeepsBundledResourcesReadOnlyInsideWorkspace(t *testing.T) {
+	workspace := t.TempDir()
+	bundle := bundledFixture(t, filepath.Join(workspace, "assets"), buildHelper(t))
+	marker := filepath.Join(bundle.Directory(), "marker")
+	instance := NewWithRuntime(os.Environ(), tool.ProtectedData{}, bundle).(*commandTool)
+	for _, command := range [][]string{
+		{"node", "write", marker},
+		{"/bin/mv", filepath.Join(workspace, "assets"), filepath.Join(workspace, "moved-assets")},
+	} {
+		raw, _ := json.Marshal(arguments{Command: command, Cwd: workspace, SandboxPermissions: sandboxProjectWrite, Justification: "验证临时资源只读边界"})
+		call, err := instance.PrepareWithPermissions(t.Context(), tool.Scope{ID: "test", RootPath: workspace}, raw, tool.ExecutionPermissions{SandboxMode: tool.SandboxWorkspaceWrite})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, executeErr := call.Execute(t.Context())
+		if err := errors.Join(executeErr, call.Close()); err != nil {
+			t.Fatal(err)
+		}
+		report := decodeReport(t, result)
+		if report.ExitCode == nil || *report.ExitCode == 0 {
+			t.Fatalf("运行时资源或祖先可被改写: %s", result.Output)
+		}
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("运行时目录出现了工具写入")
+	}
+}
+
 func TestSeatbeltEnforcesWritesProcessesAndNetwork(t *testing.T) {
 	helper := buildHelper(t)
 	root, outside := t.TempDir(), t.TempDir()

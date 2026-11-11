@@ -24,7 +24,7 @@ var (
 	createRestrictedToken     = windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
 )
 
-// securityCapabilities 的布局同时适用于 Windows x86 和 x64。
+// securityCapabilities 使用 Windows SDK 布局，适用于 x64 和 ARM64。
 type securityCapabilities struct {
 	SID          *windows.SID
 	Capabilities *windows.SIDAndAttributes
@@ -263,7 +263,7 @@ func updateSandboxACL(entry sandboxACLEntry, sid *windows.SID, remove bool) (ret
 	defer pinned.Unpin()
 	trustee := windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_UNKNOWN, TrusteeValue: windows.TrusteeValueFromSID(sid)}
 	inheritance := uint32(0)
-	if entry.Directory {
+	if entry.Directory && !entry.SelfOnly {
 		inheritance = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE
 	}
 	mode := windows.ACCESS_MODE(windows.GRANT_ACCESS)

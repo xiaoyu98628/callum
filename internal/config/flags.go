@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -16,7 +18,8 @@ const (
 )
 
 type toolFlags struct {
-	tool *time.Duration
+	tool     *time.Duration
+	runtimes *string
 }
 
 func flags(w io.Writer) (*flag.FlagSet, *string, *int, *time.Duration, toolFlags) {
@@ -26,7 +29,8 @@ func flags(w io.Writer) (*flag.FlagSet, *string, *int, *time.Duration, toolFlags
 	limit := f.Int("max-concurrent-runs", DefaultMaxConcurrentRuns, "同时活动执行及实际模型请求的上限（1 至 64）")
 	timeout := f.Duration("call-timeout", DefaultCallTimeout, "每次模型调用的超时，例如 5m")
 	extra := toolFlags{
-		tool: f.Duration("tool-timeout", 30*time.Second, "单次工具执行超时"),
+		tool:     f.Duration("tool-timeout", 30*time.Second, "单次工具执行超时"),
+		runtimes: f.String("runtime-dir", "", "可选的内置 Python/Node 平台资源目录，必须是绝对路径"),
 	}
 	return f, dir, limit, timeout, extra
 }
@@ -52,6 +56,12 @@ func LoadArgs(args []string) (Config, error) {
 	}
 	cfg.MaxConcurrentRuns, cfg.CallTimeout = *limit, *timeout
 	cfg.ToolTimeout = *extra.tool
+	if *extra.runtimes != "" {
+		if !filepath.IsAbs(*extra.runtimes) || strings.ContainsRune(*extra.runtimes, 0) {
+			return Config{}, errors.New("运行时目录必须是绝对路径")
+		}
+		cfg.RuntimeDir = filepath.Clean(*extra.runtimes)
+	}
 	return cfg, nil
 }
 

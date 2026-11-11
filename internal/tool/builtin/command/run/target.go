@@ -34,6 +34,7 @@ type fixedCommand struct {
 	temporaryPath, profile                                 string
 	launchArguments                                        []string
 	sandboxState                                           sandboxState
+	readOnlyDirectories                                    []*fixedPath
 }
 
 func cleanDirectory(path string) (string, error) {
@@ -149,6 +150,16 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 	}
 	fixed.command[0] = fixed.executable.actual
 	fixed.environment = append(fixed.environment, "PWD="+fixed.directory.actual)
+	for _, directory := range protection.ReadOnlyDirectories {
+		if !filepath.IsAbs(directory) {
+			return nil, tool.ErrDenied
+		}
+		root, err := pinPath(directory, true)
+		if err != nil {
+			return nil, err
+		}
+		fixed.readOnlyDirectories = append(fixed.readOnlyDirectories, root)
+	}
 	if err := fixed.configureSandbox(a, permissions, protection); err != nil {
 		return nil, err
 	}
@@ -179,11 +190,15 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 		SandboxBackend           string               `json:"sandbox_backend,omitempty"`
 		WritableRoots            []string             `json:"writable_roots"`
 		ReadableRoots            []string             `json:"readable_roots,omitempty"`
+		ReadOnlyRoots            []string             `json:"read_only_roots,omitempty"`
 		TemporaryDirectoryPolicy string               `json:"temporary_directory_policy,omitempty"`
 		NetworkAccess            bool                 `json:"network_access"`
 		Justification            string               `json:"justification,omitempty"`
 		ProfileSHA256            string               `json:"profile_sha256,omitempty"`
 	}{Executable: fixed.executable.actual, ExecutableIdentity: fixed.executable.identity, ExecutableSize: fixed.executable.info.Size(), ExecutableModified: fixed.executable.info.ModTime().UnixNano(), Cwd: fixed.directory.actual, CwdIdentity: fixed.directory.identity, EnvironmentProfile: "base-v1", EnvironmentKeys: keys, EnvironmentSHA256: hex.EncodeToString(digest.Sum(nil)), Boundary: fixed.boundary, Sandboxed: fixed.boundary.Sandboxed, NetworkAccess: !fixed.boundary.Sandboxed, Justification: a.Justification, WritableRoots: []string{}}
+	for _, root := range fixed.readOnlyDirectories {
+		details.ReadOnlyRoots = append(details.ReadOnlyRoots, root.actual)
+	}
 	if fixed.boundary.Sandboxed {
 		details.EnvironmentProfile = "base-v2-sandbox"
 		details.SandboxBackend = fixed.sandboxBackend()
@@ -220,6 +235,11 @@ func (p *fixedCommand) check(ctx context.Context) error {
 			return err
 		}
 	}
+	for _, root := range p.readOnlyDirectories {
+		if err := root.check(false); err != nil {
+			return err
+		}
+	}
 	for _, path := range []*fixedPath{p.sandboxExecutable, p.temporaryParent, p.protectedDirectory} {
 		if path != nil {
 			if err := path.check(path == p.sandboxExecutable); err != nil {
@@ -240,7 +260,7 @@ func (p *fixedCommand) check(ctx context.Context) error {
 
 func (p *fixedCommand) close() error {
 	err := p.sandboxState.close()
-	for _, path := range []*fixedPath{p.executable, p.directory, p.workspace, p.sandboxExecutable, p.temporaryParent, p.protectedDirectory} {
+	for _, path := range append([]*fixedPath{p.executable, p.directory, p.workspace, p.sandboxExecutable, p.temporaryParent, p.protectedDirectory}, p.readOnlyDirectories...) {
 		if path != nil {
 			err = errors.Join(err, path.file.Close())
 		}

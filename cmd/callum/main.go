@@ -11,6 +11,7 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/app"
 	"github.com/xiaoyu98628/callum/internal/config"
+	"github.com/xiaoyu98628/callum/internal/runtimeassets/prepare"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
 )
 
@@ -20,6 +21,15 @@ func main() {
 
 func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	if len(os.Args) > 1 && os.Args[1] == "prepare-runtimes" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := prepare.RunCommand(ctx, os.Args[2:], logger.With("module", "runtimeassets.prepare"), true); err != nil && !errors.Is(err, flag.ErrHelp) {
+			logger.Error("离线运行时准备失败", "module", "runtimeassets.prepare", "error", err)
+			return 1
+		}
+		return 0
+	}
 	cfg, err := config.LoadArgs(os.Args[1:])
 	if errors.Is(err, flag.ErrHelp) {
 		config.WriteUsage(os.Stderr)

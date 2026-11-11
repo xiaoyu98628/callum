@@ -24,6 +24,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
+	"github.com/xiaoyu98628/callum/internal/runtimeassets"
 	"github.com/xiaoyu98628/callum/internal/settings"
 	settingsservice "github.com/xiaoyu98628/callum/internal/settings/service"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
@@ -91,6 +92,13 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	initCtx, initCancel := context.WithTimeout(runtimeCtx, 10*time.Second)
 	defer initCancel()
 	var err error
+	var bundle *runtimeassets.Bundle
+	if cfg.RuntimeDir != "" {
+		bundle, err = runtimeassets.Load(initCtx, cfg.RuntimeDir)
+		if err != nil {
+			return nil, fmt.Errorf("加载内置运行时: %w", err)
+		}
+	}
 	// 实例锁覆盖迁移与恢复，另一个运行时不能在启动失败前改写活动实例的结构。
 	r.ownership, err = sqlite.AcquireOwnership(cfg.DatabasePath)
 	if err != nil {
@@ -196,8 +204,14 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 		return nil, fmt.Errorf("解析应用数据目录: %w", err)
 	}
 	protection := tool.ProtectedData{Directory: protectedDir, Database: filepath.Join(protectedDir, filepath.Base(cfg.DatabasePath))}
+	if bundle != nil {
+		if protection.Contains(bundle.Directory()) || (tool.ProtectedData{Directory: bundle.Directory()}).Contains(protectedDir) {
+			return nil, errors.New("运行时资源与私有数据目录不得重叠")
+		}
+		protection.ReadOnlyDirectories = []string{bundle.Directory()}
+	}
 	registry := registry.New()
-	for _, instance := range append(filesystem.Tools(protection), command.Tools(os.Environ(), protection)...) {
+	for _, instance := range append(filesystem.Tools(protection), command.ToolsWithRuntime(os.Environ(), protection, bundle)...) {
 		if err := registry.Register(instance); err != nil {
 			return nil, err
 		}

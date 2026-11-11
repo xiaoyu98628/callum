@@ -44,6 +44,40 @@ func prepareWindowsSandbox(t *testing.T, root, data string, command []string, wr
 	return p
 }
 
+func TestAppContainerBundledRootIsReadableAndNotWritable(t *testing.T) {
+	workspace, data := t.TempDir(), t.TempDir()
+	cwd := filepath.Join(workspace, "subdirectory")
+	if err := os.Mkdir(cwd, 0700); err != nil {
+		t.Fatal(err)
+	}
+	assets := filepath.Join(workspace, "assets")
+	bundle := bundledFixture(t, assets, buildHelper(t))
+	source, marker := filepath.Join(bundle.Directory(), "manifest.json"), filepath.Join(bundle.Directory(), "blocked")
+	instance := NewWithRuntime(os.Environ(), tool.ProtectedData{Directory: data}, bundle).(*commandTool)
+	for _, command := range [][]string{{"node", "read", source}, {"node", "write", marker}, {"cmd.exe", "/d", "/c", "move", assets, filepath.Join(workspace, "moved-assets")}} {
+		raw, _ := json.Marshal(arguments{Command: command, Cwd: cwd, SandboxPermissions: sandboxProjectWrite, Justification: "验证临时解释器资源的读取和写入边界"})
+		call, err := instance.PrepareWithPermissions(t.Context(), tool.Scope{ID: "test", RootPath: workspace}, raw, tool.ExecutionPermissions{SandboxMode: tool.SandboxWorkspaceWrite})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixed := call.(*invocation).fixed
+		if len(fixed.sandboxState.journal.Roots) != maxSandboxRoots {
+			t.Fatalf("标准库资源没有完整进入恢复范围: %+v", fixed.sandboxState.journal.Roots)
+		}
+		result, executeErr := call.Execute(t.Context())
+		if err := errors.Join(executeErr, call.Close()); err != nil {
+			t.Fatal(err)
+		}
+		report := decodeReport(t, result)
+		if report.ExitCode == nil || (*report.ExitCode == 0) != (command[1] == "read") || !report.CleanupComplete {
+			t.Fatalf("运行时读写边界错误: %s", result.Output)
+		}
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("解释器写入了运行时目录")
+	}
+}
+
 func TestAppContainerFileNetworkAndChildBoundaries(t *testing.T) {
 	helper := buildHelper(t)
 	root, outside, data := t.TempDir(), t.TempDir(), t.TempDir()

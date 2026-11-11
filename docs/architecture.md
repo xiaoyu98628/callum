@@ -16,6 +16,7 @@
 | `internal/model/provider/service` | 配置业务校验、UUIDv7 分配及启用规则 | 已实现业务服务 |
 | `internal/credentials`、`system` | 凭据加密、系统主密钥及关闭时清理 | 已实现，平台验证分别说明 |
 | `internal/config` | 应用配置加载及启动参数 | 已实现 |
+| `internal/runtimeassets`、`prepare` | 运行时清单及文件校验；开发侧固定归档下载、安全解压与资源准备 | 已实现；运行期只读，不修改全局环境 |
 | `internal/settings`、`service` | 配置组契约、执行快照、值校验与版本更新 | 已实现 |
 | `internal/storage/sqlite/settings` | 应用设置持久化和版本冲突校验 | 已实现 |
 | `internal/stdio/settings` | 应用设置查询、更新接口 | 已实现 |
@@ -51,6 +52,8 @@
 | `internal/stdio/workspace`、`conversation` | 工作区和对话接口 | 已实现 |
 
 ## 业务边界与执行恢复
+
+`internal/runtimeassets` 返回启动时校验的不可变资源描述，不持有文件、进程或后台任务；`Runtime` 将其借给命令工具并把实际资源根目录登记为只读保护范围。命令调用仍独立持有并关闭固定入口和资源目录句柄，沿用审批、进程组/Job 与输出生命周期。`prepare` 同时由随附 `callum prepare-runtimes` 离线子命令及独立维护入口 `cmd/prepare-runtimes` 使用：前者严格禁止下载且不创建应用 Runtime，后者仅在显式 `--download` 时获取缺失归档；正常 stdio 服务不调用准备流程。
 
 `internal/conversation/compaction` 负责完整轮次的压缩规划、来源指纹与摘要校验，执行编排位于 `internal/agent/service`。用户补充输入使用现有步骤持久化，支持选项、文字、跳过和取消。工具和审批业务不依赖 stdio，后续入口复用同一 Agent 与审批服务。
 会话更新通过 `conversation.Update` 接收模型 ID 及可更新字段，业务服务校验后生成仓储使用的 `conversation.Change`，模型快照由服务端解析；JSON-RPC 的请求、响应和通知字段保持兼容。

@@ -70,6 +70,13 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 	ancestorArguments := p.protectDataAncestors(projectWrite)
 	p.launchArguments = []string{p.sandboxExecutable.actual, "-p", p.profile, "-D", "COMMAND_TEMP=" + p.temporaryPath}
 	p.launchArguments = append(p.launchArguments, ancestorArguments...)
+	for i, root := range p.readOnlyDirectories {
+		key := fmt.Sprintf("RUNTIME_ROOT_%d", i)
+		p.profile += fmt.Sprintf("(deny file-write* (subpath (param \"%s\")))\n", key)
+		p.launchArguments = append(p.launchArguments, "-D", key+"="+root.actual)
+	}
+	// 策略在所有只读资源规则拼接完成后传给启动器。
+	p.launchArguments[2] = p.profile
 	if p.protectedDirectory != nil {
 		p.launchArguments = append(p.launchArguments, "-D", "APP_DATA="+p.protectedDirectory.actual)
 	}
@@ -79,7 +86,7 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 	p.launchArguments = append(p.launchArguments, "--")
 	p.launchArguments = append(p.launchArguments, p.command...)
 	// 不把真实用户缓存目录自动加入写入范围。常用工具缓存转入此次受控临时目录。
-	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOCACHE", "GOTMPDIR", "npm_config_cache"} {
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOCACHE", "GOTMPDIR", "npm_config_cache", "PIP_CACHE_DIR"} {
 		p.environment = slices.DeleteFunc(p.environment, func(entry string) bool { return strings.HasPrefix(entry, key+"=") })
 		value := p.temporaryPath
 		if key == "GOCACHE" {
@@ -108,18 +115,24 @@ func (p *fixedCommand) createsWorkspaceDirectory() bool {
 
 // 保护项目内通往应用数据的祖先路径，避免获批命令通过重命名祖先绕过路径限制。
 func (p *fixedCommand) protectDataAncestors(projectWrite bool) []string {
-	if !projectWrite || p.protectedDirectory == nil {
+	if !projectWrite {
 		return nil
 	}
 	var arguments []string
-	for parent := filepath.Dir(p.protectedDirectory.actual); ; parent = filepath.Dir(parent) {
-		relative, err := filepath.Rel(p.workspace.actual, parent)
-		if err != nil || relative == "." || !filepath.IsLocal(relative) {
-			break
+	roots := slices.Clone(p.readOnlyDirectories)
+	if p.protectedDirectory != nil {
+		roots = append(roots, p.protectedDirectory)
+	}
+	for _, root := range roots {
+		for parent := filepath.Dir(root.actual); ; parent = filepath.Dir(parent) {
+			relative, err := filepath.Rel(p.workspace.actual, parent)
+			if err != nil || relative == "." || !filepath.IsLocal(relative) {
+				break
+			}
+			key := fmt.Sprintf("APP_DATA_PARENT_%d", len(arguments)/2)
+			p.profile += fmt.Sprintf("(deny file-write-unlink (literal (param \"%s\")))\n", key)
+			arguments = append(arguments, "-D", key+"="+parent)
 		}
-		key := fmt.Sprintf("APP_DATA_PARENT_%d", len(arguments)/2)
-		p.profile += fmt.Sprintf("(deny file-write-unlink (literal (param \"%s\")))\n", key)
-		arguments = append(arguments, "-D", key+"="+parent)
 	}
 	return arguments
 }

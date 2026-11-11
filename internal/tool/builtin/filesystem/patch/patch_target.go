@@ -161,7 +161,7 @@ func (p *patchInvocation) prepareTarget(ctx context.Context, entry *patchTarget,
 		entry.target = tool.Target{RequestedPath: requested, Path: actual, Kind: "file"}
 		entry.basePath, entry.baseInfo, entry.missing = base, info, missing
 	}
-	if p.owner.protection.Contains(entry.target.Path) {
+	if p.owner.protection.WriteProtected(entry.target.Path) {
 		return tool.ErrDenied
 	}
 	if len(entry.target.Path) > 1024 {
@@ -294,6 +294,9 @@ func (p *patchInvocation) checkWorkspace(ctx context.Context) error {
 	return nil
 }
 func (t *patchTarget) check(ctx context.Context, p *patchInvocation) error {
+	if p.owner.protection.WriteProtected(t.target.Path) {
+		return tool.ErrDenied
+	}
 	if err := p.checkWorkspace(ctx); err != nil {
 		return err
 	}

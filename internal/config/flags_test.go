@@ -42,3 +42,14 @@ func TestApprovalSettingsAreNotStartupFlags(t *testing.T) {
 		}
 	}
 }
+
+func TestBundledRuntimeDirectoryIsExplicitAndAbsolute(t *testing.T) {
+	directory := t.TempDir()
+	cfg, err := LoadArgs([]string{"--data-dir", directory, "--runtime-dir", directory})
+	if err != nil || cfg.RuntimeDir != directory {
+		t.Fatalf("运行时资源参数未传入装配: %+v %v", cfg, err)
+	}
+	if _, err := LoadArgs([]string{"--data-dir", directory, "--runtime-dir", "resources/runtimes"}); err == nil {
+		t.Fatal("接受了依赖进程工作目录的运行时路径")
+	}
+}

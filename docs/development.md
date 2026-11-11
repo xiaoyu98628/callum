@@ -59,6 +59,7 @@ go run ./cmd/callum
 | `--max-concurrent-runs` | `4` | 同时执行的调用上限，范围 `1` 至 `64`，超出时立即返回忙碌错误 |
 | `--call-timeout` | `5m` | 普通对话每次模型请求超时；兼容 `model.invoke` 仍按配置解析及调用整体计时，必须大于零 |
 | `--tool-timeout` | `30s` | 单次工具执行超时，必须大于零 |
+| `--runtime-dir` | 空 | 可选的内置 Python/Node 平台资源目录，必须为绝对路径；指定后启动时校验全部文件和链接 |
 
 运行数量和实际模型请求数量分别受同一个配置上限约束；标题使用空闲模型请求容量，不排队争用。
 活动任务占满运行容量时立即返回忙碌；已确定终态的任务正在清理时，允许在受理请求的短期超时内等待其释放。
@@ -71,6 +72,54 @@ go run ./cmd/callum --max-concurrent-runs 2 --call-timeout 3m
 
 初始化限时 10 秒，配置接口及调用前的配置查询限时 5 秒；短期初始化、配置请求上下文
 不会成为异步模型执行的运行上下文。HTTP 响应头等待上限为 30 秒，不自动跟随重定向或重试。
+
+## 内置运行时资源
+
+客户端携带资源并传入位置，Go 服务校验和执行。固定 Python 3.14.10（Astral `python-build-standalone` 的 `20261110 install_only_stripped`）与 Node 26.13.0（Node 官方完整发行包），覆盖 macOS Intel x64、Apple Silicon ARM64 和 Windows x64、ARM64。服务与解释器采用相同原生架构，来源与归档 SHA-256 维护在客户端 `resources/runtimes/sources.json`。
+
+四平台的八份完整归档位于客户端仓库 `resources/runtimes/archives/`，直接纳入普通 Git；标准库、许可证及配套资源保留。开发、构建、测试前，客户端调用随附服务的严格离线子命令：
+
+```sh
+/absolute/path/callum-desktop/resources/backend/darwin-arm64/callum prepare-runtimes \
+  --sources /absolute/path/callum-desktop/resources/runtimes/sources.json \
+  --output /absolute/path/callum-desktop/resources/runtimes/unpacked \
+  --cache /absolute/path/callum-desktop/resources/runtimes/archives \
+  --target darwin-arm64
+```
+
+其他平台使用相同目录名的原生服务，Windows 程序名为 `callum.exe`；省略 `--target` 准备全部四个平台。该子命令不打开数据库或启动 stdio 服务，禁止启用网络下载。客户端 `npm run prepare:runtimes` 自动选择当前平台，`dev`、`build`、`test` 已挂接前置步骤，不需要本机 Go 或后端源码。归档缺失或损坏直接失败，不联网补取。
+
+维护者升级资源时，可以从本仓库使用独立入口，并显式允许获取缺失归档：
+
+```sh
+go run -mod=readonly ./cmd/prepare-runtimes \
+  --sources /absolute/path/callum-desktop/resources/runtimes/sources.json \
+  --output /absolute/path/new-runtime-output \
+  --cache /absolute/path/callum-desktop/resources/runtimes/archives \
+  --download
+```
+
+该独立入口默认也保持离线，只有 `--download` 启用网络；随附 `callum prepare-runtimes` 始终拒绝这个参数。进度与错误使用结构化 JSON 写入 stderr，stdout 为空，`--help` 正常退出。
+
+准备过程检查归档 SHA-256，限制大小、条目和解压总量，拒绝越界路径、硬链接、特殊文件及越界链接，延后建立符号链接。校验成功后生成 `manifest.json` 并将资源设置为只读，再激活平台目录；失败清理本次暂存目录和锁。重复准备检查归档及所有已解压内容，不替换有效目录；损坏、版本不符或缺少清单均拒绝覆盖。版本更新应在新输出目录核验后，在服务关闭时替换生成资源，不在服务运行期升级解释器。
+
+独立服务可显式接入：
+
+```sh
+go run -mod=readonly ./cmd/callum --data-dir /absolute/path/isolated-data \
+  --runtime-dir /absolute/path/callum-desktop/resources/runtimes/unpacked/darwin-arm64
+```
+
+`python`、`python3`、`node` 裸命令固定到清单的绝对入口，子进程 PATH 优先使用同套运行时。缺失或损坏明确失败，显式程序路径继续采用既有校验和审批；每次命令准备复核目录身份和解释器内容，标准库全量校验在启动时完成。设置中不提供多版本切换。
+
+真实解释器测试使用本次准备的资源，测试数据仍在临时目录：
+
+```sh
+CALLUM_TEST_RUNTIME_DIR=/absolute/path/callum-desktop/resources/runtimes/unpacked/darwin-arm64 \
+  go test -mod=readonly -race -timeout 60s ./internal/tool/builtin/command/run -run 'Bundled'
+```
+
+macOS ARM64 实际运行已验证；其他架构的归档校验及交叉构建不能替代对应设备的原生验收。安装包的 ASAR 外资源复制尚未配置，以上命令不生成安装包。
 
 ## 检查与构建
 

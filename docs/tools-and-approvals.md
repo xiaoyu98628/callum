@@ -175,6 +175,12 @@ macOS 的文件读写、权限、ACL、取消、冲突、并发及 stdio 流式�
 可执行文件支持绝对路径、相对于实际工作目录的路径，或在服务端固定 PATH 中查找名称；忽略空和相对 PATH 项。Windows 直接启动 `.exe` / `.com`，无扩展名依次查找这两种格式，不隐式执行 `.bat` / `.cmd`。
 不自动套 Shell。需要 Shell 语法时，在数组中明确指定相应解释器及其参数；解释器自身的转义规则仍由调用方遵守。stdin 连接空设备，无 PTY、后续输入或持久后台会话。
 
+配置 `--runtime-dir` 后，`python`、`python3`、`node` 裸命令在服务端固定到清单中的绝对程序入口，工具定义版本为 `5`。解释器目录同时前置到命令子进程 PATH，供脚本及 Shell 启动子进程使用；Windows 资源包含 `python3.exe` 别名。当前资源版本固定为 Python 3.14.10 和 Node 26.13.0，来源与准备方法见 [运行与开发](development.md#内置运行时资源)。缺失或损坏明确失败；不会通过 PATH 静默选择其他同名解释器。显式路径继续采用既有路径和审批规则；未配置运行时的独立 Go 服务保持原有命令查找行为。
+
+资源目录与私有数据目录分开。补丁工具拒绝创建或修改运行时文件，普通读取保持可用。macOS 受限命令禁止改写运行时及重命名项目内的资源祖先；Windows 为整个可信运行时树增加读取和执行范围，并拒绝写入现有资源对象及删除其祖先。`details.read_only_roots` 记录固定目录，读取根目录也进入 Windows 审批详情。显式完全访问或经批准的沙箱外进程仍使用当前账户权限；这些目录规则不构成独立文件系统，也不能阻止同账户外部程序修改完整依赖图。
+
+Go 额外生成 `PYTHONDONTWRITEBYTECODE=1`、`PYTHONNOUSERSITE=1`、`PYTHONUTF8=1`，禁用默认字节码和用户 site-packages；模型显式使用 Python 的隔离参数时，解释器自身规则仍适用。受限命令的 `PIP_CACHE_DIR` 与 npm/Go 缓存一起定向到本次私有临时目录。第三方包应安装到获准的项目虚拟环境或项目依赖目录；共享运行时保持只读。Python 包管理可显式调用 `python -m pip`，Windows 不自动执行 `npm.cmd`，需要时显式使用内置 Node 启动 npm 的 JS 入口。
+
 环境由 app 显式传入并在工具装配时筛选，只保留 PATH、HOME、USERPROFILE、TMPDIR、TEMP、TMP、SYSTEMROOT、WINDIR、COMSPEC、PATHEXT、LANG、LC_ALL、LC_CTYPE，另按实际目录生成 PWD；Windows 名称不区分大小写。模型不能设置环境变量。API Key、令牌、代理凭据等任意环境项不会继承。
 审批 `request.details` 保存解析后的可执行文件、身份及大小/修改时间、实际 cwd 及身份、环境名单与配置摘要，不保存环境值；规范化参数保留在 `request.arguments`。详情不超过 16 KiB，参与 `request_hash`，执行前重新比较并检查原路径、句柄、工作区和可执行文件元数据。未实现补充快照的文件工具省略 details，原审批格式与指纹保持兼容。
 此检查不锁定整个软件依赖图，也不承诺执行前检查与路径启动之间的原子隔离。

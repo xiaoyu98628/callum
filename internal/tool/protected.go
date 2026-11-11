@@ -9,8 +9,34 @@ import (
 
 // ProtectedData 固定服务端自己的数据目录和 SQLite 文件位置。空值用于没有应用存储的调用方。
 type ProtectedData struct {
-	Directory string
-	Database  string
+	Directory           string
+	Database            string
+	ReadOnlyDirectories []string // 装配层传入已解析链接的实际绝对路径。
+}
+
+// WriteProtected 拒绝修改私有数据或只读运行时；读取运行时仍按普通文件规则处理。
+func (p ProtectedData) WriteProtected(path string) bool {
+	return p.Contains(path) || p.ReadOnlyContains(path)
+}
+
+// ReadOnlyContains 判断实际目标是否属于只读资源树，不限制读取。
+func (p ProtectedData) ReadOnlyContains(path string) bool {
+	for _, root := range p.ReadOnlyDirectories {
+		if (ProtectedData{Directory: root}).Contains(path) {
+			return true
+		}
+	}
+	return false
+}
+
+// ProtectsDescendant 也保护资源目录的祖先，防止通过重命名祖先改变固定路径。
+func (p ProtectedData) ProtectsDescendant(path string) bool {
+	for _, root := range append([]string{p.Directory}, p.ReadOnlyDirectories...) {
+		if root != "" && (ProtectedData{Directory: path}).Contains(root) {
+			return true
+		}
+	}
+	return false
 }
 
 // Contains 判断已解析的目标是否在数据目录内，包括大小写不敏感卷上的路径变体。

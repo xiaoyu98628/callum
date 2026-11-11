@@ -246,7 +246,7 @@ go test -mod=readonly -race -timeout 180s ./internal/tool/builtin/command/... ./
 go test -mod=readonly -race -timeout 180s ./...
 ```
 
-本机 macOS 只能运行 macOS 回归及 Windows x86/x64 交叉编译，未运行上述 Windows 测试。待验收还包括 IPv4/IPv6、DNS、重解析点/联接点、短路径、硬链接、审批后路径替换、真实崩溃及未清理 Job 恢复，以及 PowerShell、cmd、Node、Git、Go 的常用任务。Windows x86 服务在 x64 客户端下的 WOW64 行为和原有 ACL/文件内容核对均待实机验证。桌面测试已接通只读自动执行、项目写入审批、设置快照及完全访问；测试启用不代表原生执行通过。
+本机 macOS ARM64 运行对应回归，Windows x64/ARM64 只做交叉编译，未运行上述 Windows 测试。待验收还包括 IPv4/IPv6、DNS、重解析点/联接点、短路径、硬链接、审批后路径替换、真实崩溃及未清理 Job 恢复，以及 PowerShell、cmd、Node、Git、Go 的常用任务。Windows 两种原生架构的 ACL、文件内容及进程资源回收均待实机验证。桌面测试已接通只读自动执行、项目写入审批、设置快照及完全访问；测试启用不代表原生执行通过。
 
 ### 会话目录授权
 
