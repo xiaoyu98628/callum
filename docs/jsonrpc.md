@@ -950,7 +950,7 @@ HTTP 状态，不暴露凭据、原始供应商响应体或底层错误链。
 
 ## 20. 非交互命令执行
 
-服务以 `--runtime-dir` 接入内置解释器后，`python`、`python3`、`node` 裸命令固定到可信资源清单入口，命令工具定义版本为 `5`。子进程 PATH 优先使用同套运行时；启动检查全部文件和链接，命令准备复核解释器完整性。审批 `details.read_only_roots` 展示实际只读资源目录，Windows 的 `readable_roots` 同时包含所需标准库和配套资源。参数及事件契约保持不变，完整资源和权限规则见 [Agent 工具与审批](tools-and-approvals.md#非交互命令执行)。
+服务以 `--runtime-dir` 接入内置解释器后，`python`、`python3`、`node` 裸命令固定到可信资源清单入口，命令工具定义版本为 `6`。子进程 PATH 优先使用同套运行时；启动检查全部文件和链接，命令准备复核解释器完整性。审批 `details.read_only_roots` 展示实际只读资源目录，Windows 的 `readable_roots` 同时包含所需标准库和配套资源。工具说明每轮提供直接 `python3`/`node` 调用示例及内置绝对入口，默认不用登录 Shell 包装；只有确需 Shell 语法时才显式使用非登录 Shell 与内置绝对路径。参数及事件契约保持不变，完整资源和权限规则见 [Agent 工具与审批](tools-and-approvals.md#非交互命令执行)。
 
 `run_command` 是模型工具，通过 `conversation.send` 请求任务，不能将以下工具参数直接作为 stdio 请求发送：
 

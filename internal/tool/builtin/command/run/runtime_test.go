@@ -104,7 +104,7 @@ func TestBundledInterpreters(t *testing.T) {
 	instance := NewWithRuntime([]string{"PATH=" + t.TempDir(), "OPENAI_API_KEY=must-not-leak"}, tool.ProtectedData{Directory: t.TempDir()}, bundle).(*commandTool)
 	python := `import sys, ssl, sqlite3, json, subprocess, os; assert sys.version_info[:3] == (3,14,10); assert os.getenv("OPENAI_API_KEY") is None; assert sqlite3.connect(":memory:").execute("select 1").fetchone() == (1,); ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); assert subprocess.check_output(["python3", "-c", "print('child-ok')"], text=True).strip() == "child-ok"; print("bundled-python-ok")`
 	node := `const assert=require('node:assert/strict'); require('node:fs'); require('node:crypto').randomBytes(4); assert.equal(process.version,'v26.13.0'); assert.equal(process.env.OPENAI_API_KEY,undefined); assert.equal(require('node:child_process').execFileSync('node',['-p',"'child-ok'"],{encoding:'utf8'}).trim(),'child-ok'); console.log('bundled-node-ok')`
-	for _, command := range [][]string{{"python", "-c", python}, {"node", "-e", node}, {"python", "-c", "print('x'*100000)"}} {
+	for _, command := range [][]string{{"python3", "-c", python}, {"node", "-e", node}, {"python3", "-c", "print('x'*100000)"}} {
 		raw, _ := json.Marshal(arguments{Command: command, Cwd: t.TempDir()})
 		call, err := instance.PrepareWithPermissions(t.Context(), tool.Scope{}, raw, tool.ExecutionPermissions{SandboxMode: tool.SandboxReadOnly})
 		if err != nil {

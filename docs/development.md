@@ -110,7 +110,7 @@ go run -mod=readonly ./cmd/callum --data-dir /absolute/path/isolated-data \
   --runtime-dir /absolute/path/callum-desktop/resources/runtimes/unpacked/darwin-arm64
 ```
 
-`python`、`python3`、`node` 裸命令固定到清单的绝对入口，子进程 PATH 优先使用同套运行时。缺失或损坏明确失败，显式程序路径继续采用既有校验和审批；每次命令准备复核目录身份和解释器内容，标准库全量校验在启动时完成。设置中不提供多版本切换。
+`python`、`python3`、`node` 裸命令固定到清单的绝对入口，子进程 PATH 优先使用同套运行时。缺失或损坏明确失败，显式程序路径继续采用既有校验和审批；每次命令准备复核目录身份和解释器内容，标准库全量校验在启动时完成。设置中不提供多版本切换。工具说明明确要求默认直接使用 `python3`/`node`，无需用户重复提醒；不要仅为运行 Python/JS 代码套登录 Shell。确需 Shell 语法时，使用非登录 Shell 和工具说明给出的内置绝对入口，详见 [命令调用规则](tools-and-approvals.md#非交互命令执行)。
 
 真实解释器测试使用本次准备的资源，测试数据仍在临时目录：
 
