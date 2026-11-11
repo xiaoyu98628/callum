@@ -94,7 +94,7 @@ func (e *Engine) PreviewContext(ctx context.Context, in conversation.ContextUsag
 	if state.ActualModelID == resolved.Snapshot.ID {
 		value.ActualInputTokens = copyInt(state.ActualInputTokens)
 	}
-	return withDraft(value, in.Draft), nil
+	return withDraft(value, in.Draft, in.DraftImages, state.Settings.Compaction.ImageTokenEstimate), nil
 }
 
 func previewFailure(value conversation.ContextUsage, err error) (conversation.ContextUsage, error) {

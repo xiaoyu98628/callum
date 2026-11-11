@@ -10,6 +10,7 @@ type ContextUsageRequest struct {
 	ConversationID string  `json:"conversation_id,omitempty"`
 	WorkspaceID    *string `json:"workspace_id,omitempty"`
 	ModelID        string  `json:"model_id,omitempty"`
+	DraftImages    int     `json:"draft_images,omitempty"`
 	Draft          string  `json:"draft,omitempty"`
 }
 

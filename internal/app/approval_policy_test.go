@@ -131,7 +131,7 @@ func TestToolApprovalPoliciesBeforeExecution(t *testing.T) {
 			snapshot := model.Snapshot{ID: policyTestID(t), DisplayName: "测试模型", RemoteModelID: "test", Provider: model.ProviderSnapshot{ID: policyTestID(t), Name: "测试厂商"}}
 			service, err := conversationservice.New(conversations, func(context.Context, string) (agent.Resolved, error) {
 				return agent.Resolved{Client: policyTestModel{args: json.RawMessage(test.args), denied: test.action == policy.Deny}, Snapshot: snapshot, ContextWindow: 1000000, Protocol: "chatcompletions"}, nil
-			}, runtime.manager, engine)
+			}, runtime.manager, engine, runtime.attachments)
 			if err != nil {
 				t.Fatal(err)
 			}

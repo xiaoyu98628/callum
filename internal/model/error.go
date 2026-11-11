@@ -12,6 +12,8 @@ var (
 	ErrUnsupportedOutput = errors.New("暂不支持此类模型输出")
 	ErrImageRead         = errors.New("图片文件不可读取")
 	ErrImageFormat       = errors.New("图片格式不支持")
+	ErrAttachment        = errors.New("附件不可读取或已超过处理范围")
+	ErrImageLimit        = errors.New("图片超过处理上限，请缩小或转换后重试")
 	ErrInputLimit        = errors.New("模型输入超过字节上限")
 	ErrTokenBudget       = errors.New("缺少有效的上下文 Token 预算")
 	ErrTokenLimit        = errors.New("当前必须保留的上下文超过 Token 预算")

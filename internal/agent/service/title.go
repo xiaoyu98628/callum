@@ -18,16 +18,16 @@ import (
 // TitleTimeout 限制辅助标题请求，主回答结束时还会提前取消它。
 const TitleTimeout = 10 * time.Second
 
-func (e *Engine) title(parent context.Context, ex conversation.Execution, resolved agent.Resolved) {
+func (e *Engine) title(parent context.Context, ex conversation.Execution, resolved agent.Resolved, text string) {
 	ctx, cancel := context.WithTimeout(parent, min(TitleTimeout, e.options.CallTimeout))
 	defer cancel()
-	err := e.titleStep(ctx, ex, resolved)
+	err := e.titleStep(ctx, ex, resolved, text)
 	if err != nil && ctx.Err() == nil {
 		e.logger.Warn("辅助标题任务未完成", "module", "run", "run_id", ex.Run.ID)
 	}
 }
 
-func (e *Engine) titleStep(ctx context.Context, ex conversation.Execution, resolved agent.Resolved) error {
+func (e *Engine) titleStep(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, text string) error {
 	id, err := uuid.NewV7()
 	if err != nil {
 		return err
@@ -45,7 +45,7 @@ func (e *Engine) titleStep(ctx context.Context, ex conversation.Execution, resol
 	if err := e.event(ex, "step.created", step.ID, "", step); err != nil {
 		return err
 	}
-	result, callErr := resolved.Client.Generate(ctx, model.Request{Model: resolved.Snapshot.RemoteModelID, CaptureResult: true, AllowImageInput: resolved.ImageInput, Messages: []model.Message{{Role: model.RoleSystem, Content: "请为用户的问题生成一个简短会话标题，不超过30个Unicode字符，只返回一行标题，不要回答问题、不要附加解释。"}, {Role: model.RoleUser, Blocks: ex.User.Content}}})
+	result, callErr := resolved.Client.Generate(ctx, model.Request{Model: resolved.Snapshot.RemoteModelID, CaptureResult: true, Messages: []model.Message{{Role: model.RoleSystem, Content: "请为用户的问题生成一个简短会话标题，不超过30个Unicode字符，只返回一行标题，不要回答问题、不要附加解释。"}, {Role: model.RoleUser, Content: text}}})
 	if ctx.Err() != nil {
 		callErr = errors.Join(ctx.Err(), callErr)
 	}

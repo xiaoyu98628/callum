@@ -83,6 +83,7 @@ type Begin struct {
 	RunID              string
 	StepID             string
 	ResendMessageID    string
+	ResendRunID        string
 	Model              model.Snapshot
 	Protocol           string
 	Content            []model.Block
@@ -106,10 +107,12 @@ type Execution struct {
 
 // Send 是发送或编辑重发的输入。首次提问不提供 ConversationID；ModelID 可在已有会话省略。
 type Send struct {
-	ConversationID string        `json:"conversation_id,omitempty"`
-	WorkspaceID    *string       `json:"workspace_id,omitempty"`
-	ModelID        string        `json:"model_id,omitempty"`
-	MessageID      string        `json:"message_id,omitempty"`
-	Content        []model.Block `json:"content"`
-	Stream         *bool         `json:"stream,omitempty"`
+	ConversationID      string        `json:"conversation_id,omitempty"`
+	WorkspaceID         *string       `json:"workspace_id,omitempty"`
+	ModelID             string        `json:"model_id,omitempty"`
+	MessageID           string        `json:"message_id,omitempty"`
+	ExpectedRunID       string        `json:"expected_run_id,omitempty"`
+	RetainedAttachments []int         `json:"retained_attachments,omitempty"`
+	Content             []model.Block `json:"content"`
+	Stream              *bool         `json:"stream,omitempty"`
 }

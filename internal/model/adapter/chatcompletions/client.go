@@ -1,10 +1,12 @@
 package chatcompletions
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/option"
@@ -19,11 +21,16 @@ type Config struct {
 
 	// APIKey 是运行时读取的凭据。
 	APIKey string
+	// ReadAttachment 读取并核对服务端托管的原图。
+	ReadAttachment func(context.Context, string) ([]byte, string, error)
 }
 
 // Client 将 Chat Completions 协议转换为统一的模型接口。
 type Client struct {
-	sdk openai.ChatCompletionService
+	sdk            openai.ChatCompletionService
+	readAttachment func(context.Context, string) ([]byte, string, error)
+	imageMu        sync.Mutex
+	images         map[string]string
 }
 
 var _ model.Client = (*Client)(nil)
@@ -54,5 +61,5 @@ func New(cfg Config, httpClient *http.Client) (*Client, error) {
 		option.WithMaxRetries(0),
 	)
 
-	return &Client{sdk: sdk}, nil
+	return &Client{sdk: sdk, readAttachment: cfg.ReadAttachment, images: make(map[string]string)}, nil
 }

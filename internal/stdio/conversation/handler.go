@@ -38,6 +38,21 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 			return reply(nil, rpcErr)
 		}
 		value, err = h.service.History(ctx, p.ConversationID, p.BeforeRunID, p.Limit)
+	case "conversation.attachment_preview":
+		var p struct {
+			ConversationID string `json:"conversation_id,omitempty"`
+			MessageID      string `json:"message_id,omitempty"`
+			Index          int    `json:"index,omitempty"`
+			Path           string `json:"path,omitempty"`
+		}
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		data, mime, previewErr := h.service.PreviewAttachment(ctx, p.ConversationID, p.MessageID, p.Index, p.Path)
+		if previewErr != nil {
+			return reply(nil, publicError(previewErr))
+		}
+		return reply(map[string]any{"data": data, "mime": mime}, nil)
 	case "conversation.context_usage":
 		var p domain.ContextUsageRequest
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {

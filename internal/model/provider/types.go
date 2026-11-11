@@ -35,13 +35,14 @@ type ModelInput struct {
 	Enabled         bool
 	ContextWindow   *int64
 	MaxOutputTokens *int64
-	Capabilities    map[string]bool
-	// ModelType 是内容类型元数据，不作为工具开关；空数组表示尚未标注。
+	// Capabilities 记录模型拥有的能力，不表示用户已启用这些能力。
+	Capabilities map[string]bool
+	// ModelType 保存用户选中的内容类型；包含 image 时启用图片输入，不作为工具开关。
 	ModelType       []string
 	ReasoningLevels []ReasoningLevel
 }
 
-// ValidModelType 判断模型内容类型是否受支持；不代表适配器具备相应输入或输出能力。
+// ValidModelType 判断用户选择的内容类型是否有效；适配器仍只提供已经实现的输入和输出。
 func ValidModelType(kind string) bool {
 	switch kind {
 	case "text", "image", "audio", "video":

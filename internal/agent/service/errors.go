@@ -65,6 +65,8 @@ func failure(err error) (status, kind, message string) {
 		return status, "incomplete", "模型输出未完整完成"
 	case errors.Is(err, model.ErrInvalidResponse):
 		return status, "invalid_response", "模型响应格式无效"
+	case errors.Is(err, model.ErrImageLimit):
+		return status, "image_limit", model.ErrImageLimit.Error()
 	case errors.Is(err, model.ErrImageRead):
 		return status, "image_read", "图片文件不可读取"
 	case errors.Is(err, model.ErrImageFormat):

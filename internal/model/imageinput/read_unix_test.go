@@ -1,6 +1,6 @@
 //go:build unix
 
-package chatcompletions
+package imageinput
 
 import (
 	"context"
@@ -34,7 +34,7 @@ func TestImageFileReplacedByFIFODoesNotBlock(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := readImageFile(ctx, path, expected)
+		_, err := readFile(ctx, func() (*os.File, error) { return os.OpenFile(path, readFlags, 0) }, expected)
 		done <- err
 	}()
 	select {

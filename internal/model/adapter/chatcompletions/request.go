@@ -13,7 +13,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model"
 )
 
-func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletionNewParams, error) {
+func (c *Client) buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletionNewParams, error) {
 	if strings.TrimSpace(req.Model) == "" {
 		return openai.ChatCompletionNewParams{}, errors.New("模型 ID 不能为空")
 	}
@@ -26,6 +26,7 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 	}
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.Messages))
 	inputBytes := 0
+	var usedImages map[string]string
 
 	for i, message := range req.Messages {
 		if message.Reasoning != nil {
@@ -50,11 +51,25 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 					}
 					text.WriteString(block.Text)
 					parts = append(parts, openai.TextContentPart(block.Text))
+				case "file":
+					if message.Role != model.RoleUser || block.AttachmentRef == "" {
+						return openai.ChatCompletionNewParams{}, model.ErrUnsupportedOutput
+					}
+					metadata := model.AttachmentText(block)
+					inputBytes += len(metadata)
+					text.WriteString(metadata)
+					parts = append(parts, openai.TextContentPart(metadata))
 				case "image":
 					if !req.AllowImageInput || message.Role != model.RoleUser {
 						return openai.ChatCompletionNewParams{}, model.ErrUnsupportedOutput
 					}
-					data, err := imageData(ctx, block.Path)
+					if block.AttachmentRef != "" && usedImages == nil {
+						// 成功预检保留本请求的全部准备结果，失败的候选不替换缓存。
+						c.imageMu.Lock()
+						defer c.imageMu.Unlock()
+						usedImages = make(map[string]string)
+					}
+					data, err := c.imageData(ctx, block, usedImages)
 					if err != nil {
 						return openai.ChatCompletionNewParams{}, err
 					}
@@ -119,11 +134,14 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 	if len(encoded) > MaxInputBytes-1024 {
 		return openai.ChatCompletionNewParams{}, &model.InputLimitError{Dimension: "请求字节", Actual: int64(len(encoded)), Limit: MaxInputBytes - 1024}
 	}
+	if usedImages != nil {
+		c.images = usedImages
+	}
 	return params, nil
 }
 
 // ValidateInput 复用实际请求编码，包含工具定义、推理回传及图片编码的容量检查。
 func (c *Client) ValidateInput(ctx context.Context, req model.Request) error {
-	_, err := buildRequest(ctx, req)
+	_, err := c.buildRequest(ctx, req)
 	return err
 }

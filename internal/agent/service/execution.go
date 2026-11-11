@@ -3,12 +3,14 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/agent/executor"
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/conversation/history"
 )
 
 // Execute 只在受理响应已排队后运行；标题任务在终态前取消并等待退出。
@@ -23,9 +25,9 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	titleCtx, titleCancel := context.WithCancel(ctx)
 	if err == nil {
 		err = e.loop(ctx, ex, resolved, func() {
-			if ex.User.Sequence == 1 && ex.Conversation.TitleSource == "default" {
+			if text := history.Text(ex.User.Content); ex.User.Sequence == 1 && ex.Conversation.TitleSource == "default" && strings.TrimSpace(text) != "" {
 				if release, ok, _ := e.manager.TryAcquireCall(titleCtx); ok {
-					titleWG.Go(func() { defer release(); e.title(titleCtx, ex, resolved) })
+					titleWG.Go(func() { defer release(); e.title(titleCtx, ex, resolved, text) })
 				}
 			}
 		})

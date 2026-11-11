@@ -55,6 +55,8 @@ func Estimate(messages []model.Message, tools []model.ToolDefinition, imageToken
 		for _, b := range m.Blocks {
 			if b.Type == "image" {
 				total += imageTokens
+			} else if b.Type == "file" {
+				total += Text(model.AttachmentText(b))
 			} else {
 				total += Text(b.Text)
 			}

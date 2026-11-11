@@ -17,17 +17,19 @@ import (
 	"github.com/xiaoyu98628/callum/internal/config"
 )
 
-func TestImageInputUsesCapabilityRatherThanContentType(t *testing.T) {
+func TestImageInputUsesSelectedModelType(t *testing.T) {
 	for _, test := range []struct {
 		name         string
 		capabilities map[string]bool
 		types        []string
 		allowed      bool
 	}{
-		{"capability_without_types", map[string]bool{"image_input": true}, nil, true},
-		{"capability_with_text_type", map[string]bool{"image_input": true}, []string{"text"}, true},
-		{"image_type_without_capability", nil, []string{"image"}, false},
-		{"image_type_with_false_capability", map[string]bool{"image_input": false}, []string{"image"}, false},
+		{"capability_without_types", map[string]bool{"image_input": true}, nil, false},
+		{"capability_with_text_type", map[string]bool{"image_input": true}, []string{"text"}, false},
+		{"image_type_without_capability", nil, []string{"image"}, true},
+		{"image_type_with_false_capability", map[string]bool{"image_input": false}, []string{"image"}, true},
+		{"image_type_with_capability", map[string]bool{"image_input": true}, []string{"text", "image"}, true},
+		{"other_types_without_image", nil, []string{"text", "audio", "video"}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var requests atomic.Int32
@@ -86,10 +88,10 @@ func TestImageInputUsesCapabilityRatherThanContentType(t *testing.T) {
 				requireOK(t, frame)
 				p.event(t, "run.completed")
 				if requests.Load() != 1 {
-					t.Fatal("没有按图片能力完成调用")
+					t.Fatal("选中图片类型后未完成调用")
 				}
 			} else if frame.Error == nil || frame.Error.Code != 1005 || requests.Load() != 0 {
-				t.Fatalf("内容类型被当成图片能力或调用失败: %+v", frame)
+				t.Fatalf("未选中图片类型仍被受理或调用失败: %+v", frame)
 			}
 			p.stop(t)
 		})

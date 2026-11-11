@@ -22,7 +22,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 	scope, operationErr := e.toolScope(ctx, ex)
 	var prepared *toolexecutor.Prepared
 	if operationErr == nil {
-		permissions := tool.ExecutionPermissions{}
+		permissions := tool.ExecutionPermissions{ConversationID: ex.Conversation.ID}
 		if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
 			permissions.SandboxMode = snapshot.SandboxMode
 		}

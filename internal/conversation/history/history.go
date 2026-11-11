@@ -12,15 +12,20 @@ import (
 // MaxBytes 限制组装的历史内容，不是 Token 估算或容量限制。
 const MaxBytes = 8 << 20
 
-// Title 截取首次问题前 30 个 Unicode 码点，兼容中英文。
-func Title(blocks []model.Block) string {
+// Text 拼接内容块中的原始文字。
+func Text(blocks []model.Block) string {
 	var text strings.Builder
 	for _, block := range blocks {
 		if block.Type == "text" {
 			text.WriteString(block.Text)
 		}
 	}
-	runes := []rune(strings.TrimSpace(text.String()))
+	return text.String()
+}
+
+// Title 截取首次问题前 30 个 Unicode 码点，兼容中英文。
+func Title(blocks []model.Block) string {
+	runes := []rune(strings.TrimSpace(Text(blocks)))
 	if len(runes) == 0 {
 		return "新对话"
 	}

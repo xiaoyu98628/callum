@@ -18,7 +18,7 @@ func (c *Client) Stream(ctx context.Context, req model.Request, emit func(model.
 		return errors.New("流式事件回调不能为空")
 	}
 
-	params, err := buildRequest(ctx, req)
+	params, err := c.buildRequest(ctx, req)
 	if err != nil {
 		return err
 	}

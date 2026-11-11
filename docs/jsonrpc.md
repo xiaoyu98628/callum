@@ -84,7 +84,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | 模型配置 | `model.create`、`model.update`、`model.get`、`model.list`、`model.set_enabled`、`model.delete` |
 | 无历史调用 | `model.invoke` |
 | 工作区 | `workspace.create`、`workspace.update`、`workspace.get`、`workspace.list`、`workspace.delete`、`workspace.restore` |
-| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.history`、`conversation.delete`、`conversation.restore` |
+| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.history`、`conversation.attachment_preview`、`conversation.delete`、`conversation.restore` |
 | 上下文压缩 | `conversation.context_usage`、`conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
 | 执行 | `run.get`、`run.list`、`run.cancel` |
 | 步骤 | `step.get`、`step.list`、`step.data` |
@@ -250,12 +250,12 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | `enabled` | boolean | 必须显式提交 `true` 或 `false` |
 | `context_window` | integer/null | 已确认的上下文窗口；填写时必须大于零，未知则省略或 `null` |
 | `max_output_tokens` | integer/null | 已确认的最大输出 Token 数；填写时必须大于零 |
-| `capabilities` | object/null | 具体能力，支持 `image_input`、`tools`、`reasoning` 布尔值；`tools` 仅保留兼容元数据，不作为开关 |
-| `model_type` | string[] | 可多选的内容类型：`text`、`image`、`audio`、`video`，不能重复；空数组表示尚未标注 |
+| `capabilities` | object/null | 模型拥有的能力，支持 `image_input`、`tools`、`reasoning` 布尔值；不代表用户已选择启用 |
+| `model_type` | string[] | 用户选中启用的类型：`text`、`image`、`audio`、`video`，不能重复；包含 `image` 时启用图片输入 |
 | `reasoning_levels` | object[]/null | 每项包含 `display_name`、`remote_value`；远端值以真实厂商定义为准 |
 
 普通对话与 Agent 默认向所有模型提供工具，无需填写 `capabilities.tools`，也不在 `model_type` 中选择工具。`capabilities:null`、`model_type:[]` 的配置同样可以调用工具。
-`reasoning` 和推理等级仅作元数据，不自动传入推理参数，也不阻止文本请求。图片输入需 `capabilities.image_input:true`；标注 `model_type:["image"]` 不自动声明图片输入或输出。图片输出及音视频输入输出尚未接入，类型字段只保存元数据。
+`reasoning` 和推理等级仅作元数据，不自动传入推理参数，也不阻止文本请求。图片输入以 `model_type` 包含 `image` 为启用依据；仅有 `capabilities.image_input:true` 而未选中 `image` 时不启用，缺少能力声明不会覆盖用户的选择。类型数组为空仍可发送文本和调用工具。图片输出及音视频输入输出尚未接入。
 模型响应或流式分片含非 NULL 的 `audio` 字段时，执行明确失败，错误类型为 `unsupported`；`audio:null` 和未知厂商元数据可以保留。合法空文本响应仍可成功，音频内容不会被当作空文本成功处理。
 
 上下文窗口和最大输出 Token 用于解析会话压缩预算；它们不会自动变成每次请求的 max_tokens 或其他输出参数。推理等级仍为元数据。自动压缩启用且窗口未知时，必须在 context_compaction 设置显式 token_budget；model.update 完整替换时需保留所需容量字段。model.invoke 不应用会话压缩预算。
@@ -317,7 +317,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 - 等待 `message.updated` 获取完整回答，并以 `run.completed`、`run.failed`、`run.cancelled` 判断终态。
 
 默认标题为首条问题文字去首尾空白后前 30 个 Unicode 码点，英文按字母、空格、标点计数，仅图片默认“新对话”。
-标题调用与首次回答并行，使用当前模型，最多 10 秒且受模型请求超时约束；容量不足时跳过，主回答结束即取消并等待尚未完成的标题任务。
+标题调用与首次回答并行，只使用提问中的文字，纯图片提问保留默认标题。标题使用当前模型，最多 10 秒且受模型请求超时约束；容量不足时跳过，主回答结束即取消并等待尚未完成的标题任务。
 标题成功通过 conversation.updated 更新；人工改名和问题内容变化会阻止旧标题覆盖。标题失败不导致回答失败。
 
 ### conversation.send：继续同一会话，流式回答
@@ -638,13 +638,13 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 ## 12. 图片输入
 
-仅在厂商模型实际支持图片输入时执行。以下完整更新声明图片输入能力，并标注文本、图片内容类型；其余可选元数据会清空：
+仅在厂商模型实际支持图片输入时执行。以下完整更新记录模型能力，并通过 `model_type` 选择启用文本、图片类型；其余可选元数据会清空：
 
 ```json
 {"jsonrpc":"2.0","id":"model-enable-image","method":"model.update","params":{"id":"<model_id>","provider_id":"<provider_id>","display_name":"测试模型","remote_model_id":"<remote_model_id>","enabled":true,"capabilities":{"image_input":true},"model_type":["text","image"]}}
 ```
 
-工具默认提供，不需要为图片与工具组合另设开关。类型数组可以为空；是否允许图片输入取决于 `capabilities.image_input`，不从类型数组推断。
+工具默认提供，不需要为图片与工具组合另设开关。图片输入只在类型数组包含 `image` 时启用；`capabilities.image_input` 记录模型能力，不作为用户启用开关。
 
 图片内容块使用本地绝对路径：
 
@@ -652,10 +652,15 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 {"jsonrpc":"2.0","id":"chat-image","method":"conversation.send","params":{"model_id":"<model_id>","stream":true,"content":[{"type":"text","text":"请描述这张图片。"},{"type":"image","path":"<absolute_image_path>"}]}}
 ```
 
-图片要求使用规范绝对路径、普通对话启用 image_input，并由具体端点支持；服务读取 PNG、JPEG、GIF、WebP 为内联数据发送，不把本地路径直接交给远端。
-单图最多 4 MiB，实际请求 JSON 上限 12 MiB；图片读取失败、格式不支持、超限均明确失败，不静默丢弃内容块。
-当前适配器不生成图片，附件管理未接入，编辑或删除消息不删除图片源文件。图片原文件不复制、不版本化，历史再次调用仍依赖该路径指向的可读文件。客户端不传 Base64 或远端协议格式。
-读取只接受核对身份后的普通文件，使用已打开的固定句柄。Unix 使用非阻塞打开；路径在检查后被替换为命名管道时明确失败，不等待管道写端。
+图片要求使用规范绝对路径、模型的 `model_type` 包含 `image`，并由具体端点支持。Go 在受理时把原图写入数据目录下的 `attachments/<conversation_id>/<run_id>/<sha256>.<ext>`。消息内容块保存 `type: "image"` 和相对 `attachment_ref`。旧消息中的绝对 `path` 仍可读取，编辑重发时导入副本。模型请求将图片编码为内联数据 URL，原文件路径保留在本机。
+
+每条消息最多 8 张图，原文件每张最多 16 MiB，合计最多 32 MiB。发送版的像素边界为长边 2048、32×32 像素块最多 2500，处理前限制 1600 万像素和单边 16384。PNG 和 JPEG 超过发送边界时等比缩小或重编码。GIF 和 WebP 以原编码发送，超限时提示转换或缩小。发送版单图最多 4 MiB，实际请求 JSON 上限 12 MiB。预检和发送复用本次执行的托管图片准备结果。图片读取、格式和处理上限错误在受理前返回，错误码为 `1013`，`data.kind` 为 `image_read`、`image_format`、`image_limit` 或 `input_limit`。
+
+`conversation.resend` 可提交 `expected_run_id` 和 `retained_attachments`。后者为原提问中保留图片块的零基索引数组，必须与原执行一同提交。服务器只接受该消息的图片索引，新选择的图片继续以 `content` 提交。消息或执行不匹配时拒绝重发。
+
+`conversation.attachment_preview` 接收 `conversation_id`、`message_id` 和零基 `index`，返回 `{ "mime": "image/png", "data": "<Base64>" }`。客户端可用独立的 `path` 参数预览尚未发送的草稿图。预览使用有界的发送尺寸，原图副本保持原字节。`conversation.context_usage` 接收可选的 `draft_images`，按设置中的单图估算计入草稿用量。
+
+图片读取只接受核对身份后的普通文件，使用已打开的固定句柄。Unix 使用非阻塞打开；路径在检查后被替换为命名管道时明确失败。会话附件属于本机应用数据，发送给模型时遵守上面的图片输入规则。
 
 ## 13. 执行查询和取消
 

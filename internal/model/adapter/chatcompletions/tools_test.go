@@ -14,7 +14,7 @@ import (
 
 func TestToolDefinitionsAndMessages(t *testing.T) {
 	req := model.Request{Model: "m", Tools: []model.ToolDefinition{{Name: "read_file", Description: "读取", Parameters: json.RawMessage(`{"type":"object"}`)}}, Messages: []model.Message{{Role: model.RoleUser, Content: "读取"}, {Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: "c", Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)}}}, {Role: model.RoleTool, ToolCallID: "c", Content: `{"text":"ok"}`}}}
-	params, err := buildRequest(t.Context(), req)
+	params, err := (&Client{}).buildRequest(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestToolDefinitionsHaveNoLocalCountLimit(t *testing.T) {
 	for i := range 64 {
 		req.Tools = append(req.Tools, model.ToolDefinition{Name: fmt.Sprintf("tool_%d", i), Parameters: json.RawMessage(`{"type":"object"}`)})
 	}
-	params, err := buildRequest(t.Context(), req)
+	params, err := (&Client{}).buildRequest(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestToolDefinitionsHaveNoLocalCountLimit(t *testing.T) {
 	}
 	// 去掉数量阈值仍须拒绝重复定义及非法名称。
 	req.Tools = append(req.Tools, req.Tools[0])
-	if _, err := buildRequest(t.Context(), req); !errors.Is(err, model.ErrInvalidResponse) {
+	if _, err := (&Client{}).buildRequest(t.Context(), req); !errors.Is(err, model.ErrInvalidResponse) {
 		t.Fatalf("接受重复工具: %v", err)
 	}
 }

@@ -50,6 +50,10 @@ API Key 使用 AES-256-GCM 加密后保存在 SQLite；数据库中的会话、�
 运行配置不得整体写入日志或作为普通配置快照导出。GORM 的默认 SQL 日志已关闭，
 存储错误由调用边界统一处理。数据库文件及可能出现的 SQLite 辅助文件都应作为敏感数据管理。
 
+会话原图保存在数据目录的 `attachments/<conversation_id>/<run_id>/<sha256>.<ext>`。桌面默认根目录为 `~/.callum`，开发和隔离环境使用各自的数据目录。`conversation_messages.content` 的图片块保存 `attachment_ref`，相对于 `attachments/` 解析。现有数据库结构版本和表结构可以直接读取这种 JSON。备份会话时，使用同一时点的数据库备份和附件目录。
+
+受理前写入 `attachments/.pending/` 标记，原图及目录项落盘后提交消息。运行时在实例锁内按会话和执行核对标记，保留已受理的文件并回收未受理残留。软删除和编辑重发保留已受理原图。附件继承应用数据访问边界，Unix 上新建文件和目录使用私有权限，Windows 使用数据目录的访问控制。预览及模型读取核对附件的内容哈希。
+
 ## 系统凭据与迁移
 
 `internal/credentials` 提供加密契约和 Vault；`system` 实现系统主密钥存储。每个数据目录使用随机 32 字节主密钥，系统条目命名空间为 `org.callum.credentials.v1`，条目标识是规范化数据库绝对路径的 SHA-256。macOS 使用登录钥匙串（固定 `/usr/bin/security`，密钥从标准输入传入），Windows 使用当前用户的 [Credential Manager](https://learn.microsoft.com/en-us/windows/win32/api/wincred/nf-wincred-credreadw)，Linux 使用当前用户本地 Unix D-Bus 会话上的 [Secret Service](https://specifications.freedesktop.org/secret-service/latest/ch03.html) 默认集合。Linux 新增纯 Go 的 `github.com/godbus/dbus/v5`，用于已有依赖未提供的 D-Bus 协议；不依赖 CGo，不创建或解锁系统集合。
@@ -76,12 +80,11 @@ UUID 生成复用 `github.com/google/uuid v1.6.0`，已从间接依赖改为直�
 同一厂商可以配置多个连接，厂商名称不强制唯一；同一厂商配置下的远端模型标识必须唯一。
 模型通过外键关联厂商，仍有模型引用时不能删除厂商。
 
-`model_type` 是可多选的内容类型元数据，使用 JSON 数组，允许 `text`、`image`、`audio`、`video`，不能重复；空数组表示尚未标注，不阻止文本对话或工具调用。
-`capabilities` 保存具体能力，使用 JSON 对象，当前识别 `reasoning`、`image_input`、`tools`。
-`image_input:true` 声明支持图片输入；缺少该键或为 `false` 时拒绝图片输入。`reasoning` 及推理等级仅作元数据，不自动设置远端推理参数。
+`model_type` 保存用户选择启用的内容类型，使用 JSON 数组，允许 `text`、`image`、`audio`、`video`，不能重复；包含 `image` 时启用图片输入，空数组或未选中 `image` 时不启用图片输入，不阻止文本对话或工具调用。
+`capabilities` 保存模型拥有的能力，使用 JSON 对象，当前识别 `reasoning`、`image_input`、`tools`；这些能力声明不替代用户在 `model_type` 中的选择。
+`image_input:true` 仅记录模型拥有图片输入能力，不控制是否启用。即使该键未知或为 `false`，本地图片受理仍按 `model_type` 判断，远端模型校验实际输入是否受支持。`reasoning` 及推理等级仅作元数据，不自动设置远端推理参数。
 当前所有模型在普通对话与 Agent 执行中默认获得已注册工具，`capabilities.tools` 保留为兼容元数据，无论缺失、`true` 或 `false` 都不控制工具提供，也不要求在 `model_type` 中选择工具。
-内容类型与具体能力相互独立：标注 `image` 不等于支持图片输入或图片输出，标注 `audio`、`video` 不会使适配器自动获得音视频能力。
-当前适配器支持文本及明确声明的图片输入，图片输出、音视频输入输出尚未接入。
+用户选择不会增加适配器尚未实现的能力：选择 `image` 当前启用图片输入，图片输出、音视频输入输出尚未接入。
 
 `reasoning_levels` 保存展示名称和远端参数值，例如：
 

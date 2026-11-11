@@ -16,6 +16,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent/events"
 	agentexecutor "github.com/xiaoyu98628/callum/internal/agent/executor"
 	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
+	"github.com/xiaoyu98628/callum/internal/attachment"
 	"github.com/xiaoyu98628/callum/internal/config"
 	conversationservice "github.com/xiaoyu98628/callum/internal/conversation/service"
 	"github.com/xiaoyu98628/callum/internal/credentials"
@@ -57,6 +58,7 @@ type Runtime struct {
 	approvals     *approval.Service
 	settings      *settingsservice.Service
 	credentials   *credentials.Vault
+	attachments   *attachment.Store
 	calls         *executor.Manager
 	mu            sync.Mutex
 	closed        bool
@@ -136,6 +138,22 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	if err := runRepository.Recover(initCtx); err != nil {
 		return nil, err
 	}
+	r.attachments, err = attachment.Open(initCtx, canonicalDir, func(ctx context.Context, conversationID, runID string) (bool, error) {
+		run, err := runRepository.Get(ctx, runID)
+		if errors.Is(err, agent.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if run.ConversationID != conversationID {
+			return false, errors.New("附件恢复记录的会话归属不匹配")
+		}
+		return true, nil
+	}, logger)
+	if err != nil {
+		return nil, err
+	}
 	workspaceRepository, err := workspacestore.NewRepository(r.db.DB)
 	if err != nil {
 		return nil, err
@@ -192,7 +210,7 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	if err != nil {
 		return nil, err
 	}
-	r.conversations, err = conversationservice.New(conversationRepository, newConversationResolver(r.providers, client), r.manager, r.engine)
+	r.conversations, err = conversationservice.New(conversationRepository, newConversationResolver(r.providers, client, r.attachments), r.manager, r.engine, r.attachments)
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +272,9 @@ func (r *Runtime) Close() error {
 		}
 		if r.credentials != nil {
 			r.closeErr = errors.Join(r.closeErr, r.credentials.Close())
+		}
+		if r.attachments != nil {
+			r.closeErr = errors.Join(r.closeErr, r.attachments.Close())
 		}
 		if r.db != nil {
 			r.closeErr = errors.Join(r.closeErr, r.db.Close())

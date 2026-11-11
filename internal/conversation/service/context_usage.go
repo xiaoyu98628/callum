@@ -5,6 +5,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/model/imageinput"
 )
 
 // ContextUsage 返回当前模型下的只读上下文预览；草稿不会保存或发送到模型。
@@ -12,7 +13,7 @@ func (s *Service) ContextUsage(ctx context.Context, in conversation.ContextUsage
 	if err := ctx.Err(); err != nil {
 		return conversation.ContextUsage{}, err
 	}
-	if (in.ConversationID != "" && !validID(in.ConversationID)) || (in.ModelID != "" && !validID(in.ModelID)) || (in.WorkspaceID != nil && (!validID(*in.WorkspaceID) || in.ConversationID != "")) || len(in.Draft) > 1<<20 || !utf8.ValidString(in.Draft) {
+	if (in.ConversationID != "" && !validID(in.ConversationID)) || (in.ModelID != "" && !validID(in.ModelID)) || (in.WorkspaceID != nil && (!validID(*in.WorkspaceID) || in.ConversationID != "")) || in.DraftImages < 0 || in.DraftImages > imageinput.MaxImages || len(in.Draft) > 1<<20 || !utf8.ValidString(in.Draft) {
 		return conversation.ContextUsage{}, conversation.ErrInvalid
 	}
 	if in.ConversationID != "" {

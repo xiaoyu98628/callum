@@ -113,7 +113,7 @@ stdio 的 protocol、transport 不依赖业务模块；业务错误和执行事�
 - 模型错误应保留必要的错误链和供应商请求标识，同时避免向调用方或日志暴露凭据。
 - 模型能力和限制以接入时核实的供应商协议为准，不硬编码未经确认的上下文容量或参数支持情况。
 - 当前按所有模型都支持工具调用处理，普通对话与 Agent 执行默认提供已注册工具，不通过 model_type 或 capabilities.tools 设置开关，不增加能力探测或自动降级。辅助标题、上下文摘要和兼容的 model.invoke 保持各自的文本调用用途。
-- model_type 是可多选的内容类型元数据，支持 text、image、audio、video；不代表适配器已经支持这些类型的输入或输出。图片输入由 capabilities.image_input 明确声明，推理等级仍作为元数据保存。
+- capabilities 记录模型拥有的能力，model_type 保存用户选中的 text、image、audio、video 类型。图片输入以 model_type 包含 image 为启用依据，不由 capabilities.image_input 决定；未选中 image 时不启用图片输入。图片输出、音视频输入输出仍受适配器实际实现范围限制，推理等级作为元数据保存。
 
 ## 对话、执行与上下文
 

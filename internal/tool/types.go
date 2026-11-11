@@ -136,7 +136,10 @@ func (m SandboxMode) Valid() bool {
 }
 
 // ExecutionPermissions 由受理时的服务端设置快照提供，模型不能指定沙箱模式。
-type ExecutionPermissions struct{ SandboxMode SandboxMode }
+type ExecutionPermissions struct {
+	SandboxMode    SandboxMode
+	ConversationID string
+}
 
 // PermissionTool 为需要运行权限的工具显式传入执行快照；普通文件工具沿用 Prepare。
 type PermissionTool interface {

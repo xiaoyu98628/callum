@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"time"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	domain "github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
 
@@ -155,6 +157,19 @@ func (r *Repository) Update(ctx context.Context, id string, c domain.Change) (ou
 	return out, err
 }
 
+// Message 查询指定会话的固定消息，用于读取附图。
+func (r *Repository) Message(ctx context.Context, conversationID, messageID string) (domain.Message, error) {
+	var row schema.Message
+	err := r.db.WithContext(ctx).Where("conversation_id = ? AND id = ?", conversationID, messageID).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.Message{}, domain.ErrNotFound
+	}
+	if err != nil {
+		return domain.Message{}, err
+	}
+	return message(row), nil
+}
+
 func (r *Repository) Messages(ctx context.Context, id string, before int64, limit int) ([]domain.Message, error) {
 	if _, err := r.Get(ctx, id); err != nil {
 		return nil, err
@@ -195,4 +210,26 @@ func (r *Repository) Messages(ctx context.Context, id string, before int64, limi
 		out = append(out, message(row))
 	}
 	return out, nil
+}
+
+// Attachment 只从当前用户消息分支查询引用。已替换消息和其他会话不授予读取权限。
+func (r *Repository) Attachment(ctx context.Context, conversationID, ref string) (model.Block, error) {
+	var values []struct{ Value string }
+	err := r.db.WithContext(ctx).Raw(`
+		SELECT entry.value FROM conversation_messages m, json_each(m.content) entry
+		WHERE m.conversation_id = ? AND m.role = 'user'
+		AND json_extract(entry.value, '$.attachment_ref') = ?
+		AND json_extract(entry.value, '$.type') = 'file'
+		LIMIT 1`, conversationID, ref).Scan(&values).Error
+	if err != nil {
+		return model.Block{}, err
+	}
+	if len(values) == 0 {
+		return model.Block{}, domain.ErrNotFound
+	}
+	var block model.Block
+	if err := json.Unmarshal([]byte(values[0].Value), &block); err != nil {
+		return block, err
+	}
+	return block, nil
 }
