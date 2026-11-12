@@ -14,7 +14,7 @@ import (
 func TestOfflineCommandCannotEnableDownloads(t *testing.T) {
 	directory := t.TempDir()
 	source := Source{Version: "fixed", URL: "https://example.invalid/archive", SHA256: strings.Repeat("0", 64), Archive: "missing.tar.gz", Prefix: "root", Entry: "bin/interpreter"}
-	data, err := json.Marshal(sources{FormatVersion: 1, Targets: []Target{{Directory: "target", Platform: runtime.GOOS, Arch: runtime.GOARCH, Python: source, Node: source}}})
+	data, err := json.Marshal(sources{FormatVersion: 2, Targets: []Target{{Directory: "target", Platform: runtime.GOOS, Arch: runtime.GOARCH, Python: source, Node: source, Git: GitSource{Source: source, ExecPath: "libexec", TemplatePath: "templates", ConfigPath: "etc/gitconfig"}}}})
 	if err != nil {
 		t.Fatal(err)
 	}

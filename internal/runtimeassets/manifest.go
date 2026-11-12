@@ -1,4 +1,4 @@
-// Package runtimeassets 校验随应用提供的解释器资源，不下载资源或修改全局环境。
+// Package runtimeassets 校验随应用提供的 Python、Node 和 Git 资源，不下载资源或修改全局环境。
 package runtimeassets
 
 import (
@@ -16,6 +16,9 @@ import (
 	"strings"
 )
 
+// FormatVersion 固定当前完整资源清单结构；旧缓存由调用方使用独立目录保留。
+const FormatVersion = 2
+
 const MaxManifestBytes = 8 << 20
 const maxFiles = 30000
 const maxPayloadBytes int64 = 2 << 30
@@ -24,6 +27,14 @@ const maxPayloadBytes int64 = 2 << 30
 type Executable struct {
 	Version string `json:"version"`
 	Path    string `json:"path"`
+}
+
+// GitRuntime 固定 Git 入口及其发行包内的辅助程序、模板和系统配置路径。
+type GitRuntime struct {
+	Executable
+	ExecPath     string `json:"exec_path"`
+	TemplatePath string `json:"template_path"`
+	ConfigPath   string `json:"config_path"`
 }
 
 // File 记录普通文件的内容，或符号链接原文；不允许链接越出资源根目录。
@@ -41,6 +52,7 @@ type Manifest struct {
 	Arch          string     `json:"arch"`
 	Python        Executable `json:"python"`
 	Node          Executable `json:"node"`
+	Git           GitRuntime `json:"git"`
 	Files         []File     `json:"files"`
 }
 
@@ -60,7 +72,7 @@ func Decode(reader io.Reader) (Manifest, error) {
 	if err := decoder.Decode(&value); err != nil {
 		return value, fmt.Errorf("运行时清单无效: %w", err)
 	}
-	if decoder.Decode(new(any)) != io.EOF || value.FormatVersion != 1 || len(value.Files) == 0 || len(value.Files) > maxFiles {
+	if decoder.Decode(new(any)) != io.EOF || value.FormatVersion != FormatVersion || len(value.Files) == 0 || len(value.Files) > maxFiles {
 		return value, errors.New("运行时清单格式或文件数量无效")
 	}
 	return value, nil

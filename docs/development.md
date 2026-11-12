@@ -59,7 +59,7 @@ go run ./cmd/callum
 | `--max-concurrent-runs` | `4` | 同时执行的调用上限，范围 `1` 至 `64`，超出时立即返回忙碌错误 |
 | `--call-timeout` | `5m` | 普通对话每次模型请求超时；兼容 `model.invoke` 仍按配置解析及调用整体计时，必须大于零 |
 | `--tool-timeout` | `30s` | 单次工具执行超时，必须大于零 |
-| `--runtime-dir` | 空 | 可选的内置 Python/Node 平台资源目录，必须为绝对路径；指定后启动时校验全部文件和链接 |
+| `--runtime-dir` | 空 | 可选的内置 Python/Node/Git 平台资源目录，必须为绝对路径；指定后启动时校验全部文件和链接 |
 
 运行数量和实际模型请求数量分别受同一个配置上限约束；标题使用空闲模型请求容量，不排队争用。
 活动任务占满运行容量时立即返回忙碌；已确定终态的任务正在清理时，允许在受理请求的短期超时内等待其释放。
@@ -75,9 +75,9 @@ go run ./cmd/callum --max-concurrent-runs 2 --call-timeout 3m
 
 ## 内置运行时资源
 
-客户端携带资源并传入位置，Go 服务校验和执行。固定 Python 3.14.10（Astral `python-build-standalone` 的 `20261110 install_only_stripped`）与 Node 26.13.0（Node 官方完整发行包），覆盖 macOS Intel x64、Apple Silicon ARM64 和 Windows x64、ARM64。服务与解释器采用相同原生架构，来源与归档 SHA-256 维护在客户端 `resources/runtimes/sources.json`。
+客户端携带资源并传入位置，Go 服务校验和执行。固定 Python 3.14.10（Astral `python-build-standalone` 的 `20261110 install_only_stripped`）、Node 26.13.0（Node 官方完整发行包）及 Git 2.56.1（Windows 为 2.56.1.windows.1，GitHub Desktop Dugite 发行包），覆盖 macOS Intel x64、Apple Silicon ARM64 和 Windows x64、ARM64。服务与运行时采用相同原生架构，来源与归档 SHA-256 维护在客户端 `resources/runtimes/sources.json`。
 
-四平台的八份完整归档位于客户端仓库 `resources/runtimes/archives/`，直接纳入普通 Git；标准库、许可证及配套资源保留。开发、构建、测试前，客户端调用随附服务的严格离线子命令：
+四平台的十二份完整归档位于客户端仓库 `resources/runtimes/archives/`，直接纳入普通 Git；标准库、许可证及配套资源保留。开发、构建、测试前，客户端调用随附服务的严格离线子命令：
 
 ```sh
 /absolute/path/callum-desktop/resources/backend/darwin-arm64/callum prepare-runtimes \
@@ -101,6 +101,8 @@ go run -mod=readonly ./cmd/prepare-runtimes \
 
 该独立入口默认也保持离线，只有 `--download` 启用网络；随附 `callum prepare-runtimes` 始终拒绝这个参数。进度与错误使用结构化 JSON 写入 stderr，stdout 为空，`--help` 正常退出。
 
+来源清单与生成清单格式均为 `2`，该编号只用于格式校验，不加入资源目录。客户端固定使用 `unpacked/<平台>/`。已有目录不符合当前清单时仍拒绝覆盖；更新前应在新输出目录校验，在服务关闭后备份并替换生成资源。
+
 准备过程检查归档 SHA-256，限制大小、条目和解压总量，拒绝越界路径、硬链接、特殊文件及越界链接，延后建立符号链接。校验成功后生成 `manifest.json` 并将资源设置为只读，再激活平台目录；失败清理本次暂存目录和锁。重复准备检查归档及所有已解压内容，不替换有效目录；损坏、版本不符或缺少清单均拒绝覆盖。版本更新应在新输出目录核验后，在服务关闭时替换生成资源，不在服务运行期升级解释器。
 
 独立服务可显式接入：
@@ -110,9 +112,9 @@ go run -mod=readonly ./cmd/callum --data-dir /absolute/path/isolated-data \
   --runtime-dir /absolute/path/callum-desktop/resources/runtimes/unpacked/darwin-arm64
 ```
 
-`python`、`python3`、`node` 裸命令固定到清单的绝对入口，子进程 PATH 优先使用同套运行时。缺失或损坏明确失败，显式程序路径继续采用既有校验和审批；每次命令准备复核目录身份和解释器内容，标准库全量校验在启动时完成。设置中不提供多版本切换。工具说明明确要求默认直接使用 `python3`/`node`，无需用户重复提醒；不要仅为运行 Python/JS 代码套登录 Shell。确需 Shell 语法时，使用非登录 Shell 和工具说明给出的内置绝对入口，详见 [命令调用规则](tools-and-approvals.md#非交互命令执行)。
+`python`、`python3`、`node`、`git` 裸命令固定到清单的绝对入口，子进程 PATH 优先使用同套运行时。缺失或损坏明确失败，显式程序路径继续采用既有校验和审批；每次命令准备复核目录身份、三个程序入口和 Git 配置内容，完整资源校验在启动时完成。设置中不提供多版本切换。工具说明明确要求默认直接使用 `python3`/`node`/`git`，无需用户重复提醒；不要仅为运行 Python/JS 代码套登录 Shell。确需 Shell 语法时，使用非登录 Shell 和工具说明给出的内置绝对入口，详见 [命令调用规则](tools-and-approvals.md#非交互命令执行)。
 
-真实解释器测试使用本次准备的资源，测试数据仍在临时目录：
+真实解释器及 Git 仓库操作测试使用本次准备的资源，测试数据仍在临时目录：
 
 ```sh
 CALLUM_TEST_RUNTIME_DIR=/absolute/path/callum-desktop/resources/runtimes/unpacked/darwin-arm64 \

@@ -31,13 +31,26 @@ type Source struct {
 	Entry   string `json:"entry"`
 }
 
-// Target 将客户端的平台资源目录映射为 Go 平台和两个完整发行包。
+// GitSource 固定 Git 归档中相对于组件目录的配套路径。
+type GitSource struct {
+	Source
+	ExecPath     string `json:"exec_path"`
+	TemplatePath string `json:"template_path"`
+	ConfigPath   string `json:"config_path"`
+}
+
+func (g GitSource) manifest() runtimeassets.GitRuntime {
+	return runtimeassets.GitRuntime{Version: g.Version, Path: "git/" + g.Entry, ExecPath: "git/" + g.ExecPath, TemplatePath: "git/" + g.TemplatePath, ConfigPath: "git/" + g.ConfigPath}
+}
+
+// Target 将客户端的平台资源目录映射为 Go 平台和三个完整发行包。
 type Target struct {
-	Directory string `json:"directory"`
-	Platform  string `json:"platform"`
-	Arch      string `json:"arch"`
-	Python    Source `json:"python"`
-	Node      Source `json:"node"`
+	Directory string    `json:"directory"`
+	Platform  string    `json:"platform"`
+	Arch      string    `json:"arch"`
+	Python    Source    `json:"python"`
+	Node      Source    `json:"node"`
+	Git       GitSource `json:"git"`
 }
 
 type sources struct {
@@ -58,7 +71,7 @@ func ReadSources(path string) (_ []Target, retErr error) {
 	if err := decoder.Decode(&value); err != nil {
 		return nil, err
 	}
-	if decoder.Decode(new(any)) != io.EOF || value.FormatVersion != 1 || len(value.Targets) == 0 || len(value.Targets) > 16 {
+	if decoder.Decode(new(any)) != io.EOF || value.FormatVersion != runtimeassets.FormatVersion || len(value.Targets) == 0 || len(value.Targets) > 16 {
 		return nil, errors.New("资源来源清单无效")
 	}
 	seen := map[string]bool{}
@@ -66,11 +79,16 @@ func ReadSources(path string) (_ []Target, retErr error) {
 		if !simpleName(target.Directory) || seen[target.Directory] || !slices.Contains([]string{"darwin", "windows", "linux"}, target.Platform) || !slices.Contains([]string{"arm64", "amd64"}, target.Arch) {
 			return nil, errors.New("资源目标平台无效或重复")
 		}
+		for _, name := range []string{target.Git.ExecPath, target.Git.TemplatePath, target.Git.ConfigPath} {
+			if !safePath(name) {
+				return nil, errors.New("Git 配套路径无效")
+			}
+		}
 		seen[target.Directory] = true
-		for _, source := range []Source{target.Python, target.Node} {
+		for _, source := range []Source{target.Python, target.Node, target.Git.Source} {
 			parsed, err := url.Parse(source.URL)
 			_, hashErr := hex.DecodeString(source.SHA256)
-			if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || parsed.RawQuery != "" || hashErr != nil || len(source.SHA256) != 64 || source.Version == "" || !simpleName(source.Archive) || !simpleName(source.Prefix) || !safePath(source.Entry) {
+			if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" || parsed.RawQuery != "" || hashErr != nil || len(source.SHA256) != 64 || source.Version == "" || !simpleName(source.Archive) || (!simpleName(source.Prefix) && source.Prefix != ".") || !safePath(source.Entry) {
 				return nil, errors.New("运行时归档来源或入口无效")
 			}
 		}
@@ -96,11 +114,11 @@ func Install(ctx context.Context, target Target, outputRoot, cacheRoot string, o
 		return fmt.Errorf("资源准备锁已存在或不可创建: %w", err)
 	}
 	defer func() { retErr = errors.Join(retErr, os.Remove(lock)) }()
-	archives := make(map[string]string, 2)
+	archives := make(map[string]string, 3)
 	for _, item := range []struct {
 		name   string
 		source Source
-	}{{"python", target.Python}, {"node", target.Node}} {
+	}{{"python", target.Python}, {"node", target.Node}, {"git", target.Git.Source}} {
 		archive, err := cachedArchive(ctx, item.source, cacheRoot, offline)
 		if err != nil {
 			return err
@@ -118,10 +136,10 @@ func Install(ctx context.Context, target Target, outputRoot, cacheRoot string, o
 			return err
 		}
 		files, err := runtimeassets.Inventory(ctx, destination)
-		if err != nil || manifest.Platform != target.Platform || manifest.Arch != target.Arch || manifest.Python != (runtimeassets.Executable{Version: target.Python.Version, Path: "python/" + target.Python.Entry}) || manifest.Node != (runtimeassets.Executable{Version: target.Node.Version, Path: "node/" + target.Node.Entry}) || !slices.Equal(files, manifest.Files) {
+		if err != nil || manifest.Platform != target.Platform || manifest.Arch != target.Arch || manifest.Python != (runtimeassets.Executable{Version: target.Python.Version, Path: "python/" + target.Python.Entry}) || manifest.Node != (runtimeassets.Executable{Version: target.Node.Version, Path: "node/" + target.Node.Entry}) || manifest.Git != target.Git.manifest() || !slices.Equal(files, manifest.Files) {
 			return errors.New("已有运行时资源与固定版本不一致，拒绝覆盖")
 		}
-		return nil
+		return runtimeassets.ValidateLayout(destination, manifest)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -133,7 +151,7 @@ func Install(ctx context.Context, target Target, outputRoot, cacheRoot string, o
 	for _, item := range []struct {
 		name   string
 		source Source
-	}{{"python", target.Python}, {"node", target.Node}} {
+	}{{"python", target.Python}, {"node", target.Node}, {"git", target.Git.Source}} {
 		component := filepath.Join(stage, item.name)
 		if err := extract(ctx, archives[item.name], component, item.source.Prefix); err != nil {
 			return fmt.Errorf("解压 %s: %w", item.name, err)
@@ -157,13 +175,10 @@ func Install(ctx context.Context, target Target, outputRoot, cacheRoot string, o
 	if err != nil {
 		return err
 	}
-	for _, name := range []string{"python/" + target.Python.Entry, "node/" + target.Node.Entry} {
-		info, err := os.Stat(filepath.Join(stage, filepath.FromSlash(name)))
-		if err != nil || !info.Mode().IsRegular() {
-			return errors.New("归档中缺少解释器入口")
-		}
+	manifest := runtimeassets.Manifest{FormatVersion: runtimeassets.FormatVersion, Platform: target.Platform, Arch: target.Arch, Python: runtimeassets.Executable{Version: target.Python.Version, Path: "python/" + target.Python.Entry}, Node: runtimeassets.Executable{Version: target.Node.Version, Path: "node/" + target.Node.Entry}, Git: target.Git.manifest(), Files: files}
+	if err := runtimeassets.ValidateLayout(stage, manifest); err != nil {
+		return err
 	}
-	manifest := runtimeassets.Manifest{FormatVersion: 1, Platform: target.Platform, Arch: target.Arch, Python: runtimeassets.Executable{Version: target.Python.Version, Path: "python/" + target.Python.Entry}, Node: runtimeassets.Executable{Version: target.Node.Version, Path: "node/" + target.Node.Entry}, Files: files}
 	if err := runtimeassets.WriteManifest(stage, manifest); err != nil {
 		return err
 	}

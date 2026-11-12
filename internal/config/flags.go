@@ -30,7 +30,7 @@ func flags(w io.Writer) (*flag.FlagSet, *string, *int, *time.Duration, toolFlags
 	timeout := f.Duration("call-timeout", DefaultCallTimeout, "每次模型调用的超时，例如 5m")
 	extra := toolFlags{
 		tool:     f.Duration("tool-timeout", 30*time.Second, "单次工具执行超时"),
-		runtimes: f.String("runtime-dir", "", "可选的内置 Python/Node 平台资源目录，必须是绝对路径"),
+		runtimes: f.String("runtime-dir", "", "可选的内置 Python/Node/Git 平台资源目录，必须是绝对路径"),
 	}
 	return f, dir, limit, timeout, extra
 }

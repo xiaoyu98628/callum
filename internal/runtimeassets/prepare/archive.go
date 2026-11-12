@@ -90,6 +90,17 @@ func extract(ctx context.Context, archive, directory, prefix string) (retErr err
 	u := unpacker{ctx: ctx, root: root, seen: map[string]bool{}, links: map[string]string{}}
 	nameInRoot := func(name string) (string, error) {
 		name = strings.TrimSuffix(name, "/")
+		if prefix == "." {
+			if name == "." {
+				return "", nil
+			}
+			// Dugite 归档直接从 ./bin 等路径开始；只移除一个显式 ./，其余仍严格校验。
+			name = strings.TrimPrefix(name, "./")
+			if !safePath(name) {
+				return "", errors.New("归档根路径无效")
+			}
+			return name, nil
+		}
 		if name == prefix {
 			return "", nil
 		}

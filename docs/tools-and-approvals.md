@@ -175,7 +175,7 @@ macOS 的文件读写、权限、ACL、取消、冲突、并发及 stdio 流式�
 可执行文件支持绝对路径、相对于实际工作目录的路径，或在服务端固定 PATH 中查找名称；忽略空和相对 PATH 项。Windows 直接启动 `.exe` / `.com`，无扩展名依次查找这两种格式，不隐式执行 `.bat` / `.cmd`。
 不自动套 Shell。需要 Shell 语法时，在数组中明确指定相应解释器及其参数；解释器自身的转义规则仍由调用方遵守。stdin 连接空设备，无 PTY、后续输入或持久后台会话。
 
-配置 `--runtime-dir` 后，`python`、`python3`、`node` 裸命令在服务端固定到清单中的绝对程序入口，工具定义版本为 `6`。解释器目录同时前置到命令子进程 PATH，供脚本及 Shell 启动子进程使用；Windows 资源包含 `python3.exe` 别名。当前资源版本固定为 Python 3.14.10 和 Node 26.13.0，来源与准备方法见 [运行与开发](development.md#内置运行时资源)。缺失或损坏明确失败；不会通过 PATH 静默选择其他同名解释器。显式路径继续采用既有路径和审批规则；未配置运行时的独立 Go 服务保持原有命令查找行为。
+配置 `--runtime-dir` 后，`python`、`python3`、`node`、`git` 裸命令在服务端固定到清单中的绝对程序入口，工具定义版本为 `7`。解释器目录同时前置到命令子进程 PATH，供脚本及 Shell 启动子进程使用；Windows 资源包含 `python3.exe` 别名。当前资源版本固定为 Python 3.14.10、Node 26.13.0 和 Git 2.56.1（Windows 为 2.56.1.windows.1），来源与准备方法见 [运行与开发](development.md#内置运行时资源)。缺失或损坏明确失败；不会通过 PATH 静默选择其他同名解释器。显式路径继续采用既有路径和审批规则；未配置运行时的独立 Go 服务保持原有命令查找行为。
 
 工具说明在每轮模型请求中明确给出默认调用规则和当前资源的实际绝对入口。运行 Python/JavaScript 默认直接使用 `python3`/`node`，无需用户重复指定“用内置解释器”，也无需探测或安装系统版本。以下示例的 `cwd` 需替换为实际平台的绝对目录。直接调用示例：
 
@@ -185,6 +185,12 @@ macOS 的文件读写、权限、ACL、取消、冲突、并发及 stdio 流式�
 ```
 
 文件脚本分别使用 `["python3","script.py"]`、`["node","script.js"]`。不要仅为运行这些脚本再套 `bash`、`sh`、`zsh`、PowerShell 或 cmd，尤其避免 `bash -lc`、`sh -lc`、`zsh -lc`。登录 Shell 可能重设 PATH，Shell 字符串里的解释器不会经过裸命令入口映射。确需管道或重定向时，使用非登录 Shell，并按对应 Shell 语法引用工具说明提供的内置绝对路径；子进程 PATH 前置不替代显式入口。Windows 的 PowerShell/批处理脚本才需要对应 Shell，Python/JavaScript 直接指定解释器。用户明确指定项目虚拟环境或其他解释器时，使用其显式路径并遵守相同的校验、审批和沙箱。
+
+Git 默认直接使用 `command=["git","status","--short"]` 等数组，服务固定入口，并在工具说明中给出实际绝对路径。Go 为所有命令子进程生成 `GIT_EXEC_PATH`、`GIT_TEMPLATE_DIR`、`GIT_CONFIG_SYSTEM`，指向同套 Git 辅助程序、模板及发行包配置；Windows 同时将本包 DLL、HTTPS/GCM 与 MSYS shell/ssh 目录前置到 PATH。显式选择其他 Git 路径的命令仍继承这套子进程环境，不提供独立 Git 环境切换。
+
+`GIT_OPTIONAL_LOCKS=0` 禁止 status 的可选索引刷新；`GIT_TERMINAL_PROMPT=0`、`GCM_INTERACTIVE=0` 与空的 askpass 环境禁止内置 Git/GCM 交互认证，缺少可用凭据时失败。用户的仓库及全局配置仍按 Git 原有规则读取，Callum 不修改全局作者身份或配置，也不提供登录界面。Git 非零退出码需按子命令解释，例如 `diff --exit-code` 的 `1` 表示差异。
+
+Git 复用现有沙箱及审批：只读查询不获得写权限；`.git` 写保护保持不变，init/add/commit 等写入需请求沙箱外权限；clone/fetch/push 的网络访问也需审批。内置 Git 不自动批准提交或推送。临时仓库的 init/add/commit/status/diff/log/本地 clone 已纳入真实资源回归，测试不访问用户仓库或远端。
 
 这些规则用于引导模型的默认工具选择；服务端不改写 Shell 字符串或全局禁止 Shell，也不修改用户的登录配置和系统 PATH。未接入内置运行时的独立服务不注入上述内置入口说明。设计参考 [Codex 的登录 Shell 执行控制](https://learn.chatgpt.com/docs/enterprise/agent-security#execution-controls-executor)，通过直接参数数组和内置绝对入口明确解释器选择，避免依赖登录 Shell 的 PATH。
 
