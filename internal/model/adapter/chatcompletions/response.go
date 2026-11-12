@@ -84,18 +84,18 @@ func (c *Client) Generate(ctx context.Context, req model.Request) (result model.
 	result.Text = choice.Message.Content
 	result.Content = []model.Block{{Type: "text", Text: result.Text}}
 
-	result.FinishReason = choice.FinishReason
-	result.ToolCalls, err = responseCalls(choice.Message.RawJSON(), choice.FinishReason, len(req.Tools) > 0)
-	if err != nil {
-		return result, wrapError("decode response", httpResponse, err)
-	}
-
 	if choice.Message.Refusal != "" {
 		return result, wrapError(
 			"decode response",
 			httpResponse,
 			model.ErrRefused,
 		)
+	}
+
+	result.FinishReason = choice.FinishReason
+	result.ToolCalls, err = responseCalls(choice.Message.RawJSON(), choice.FinishReason, len(req.Tools) > 0)
+	if err != nil {
+		return result, wrapError("decode response", httpResponse, err)
 	}
 
 	if err := checkToolFinishReason(choice.FinishReason, len(req.Tools) > 0); err != nil {

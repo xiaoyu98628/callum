@@ -175,16 +175,21 @@ macOS 的文件读写、权限、ACL、取消、冲突、并发及 stdio 流式�
 可执行文件支持绝对路径、相对于实际工作目录的路径，或在服务端固定 PATH 中查找名称；忽略空和相对 PATH 项。Windows 直接启动 `.exe` / `.com`，无扩展名依次查找这两种格式，不隐式执行 `.bat` / `.cmd`。
 不自动套 Shell。需要 Shell 语法时，在数组中明确指定相应解释器及其参数；解释器自身的转义规则仍由调用方遵守。stdin 连接空设备，无 PTY、后续输入或持久后台会话。
 
-配置 `--runtime-dir` 后，`python`、`python3`、`node`、`git` 裸命令在服务端固定到清单中的绝对程序入口，工具定义版本为 `7`。解释器目录同时前置到命令子进程 PATH，供脚本及 Shell 启动子进程使用；Windows 资源包含 `python3.exe` 别名。当前资源版本固定为 Python 3.14.10、Node 26.13.0 和 Git 2.56.1（Windows 为 2.56.1.windows.1），来源与准备方法见 [运行与开发](development.md#内置运行时资源)。缺失或损坏明确失败；不会通过 PATH 静默选择其他同名解释器。显式路径继续采用既有路径和审批规则；未配置运行时的独立 Go 服务保持原有命令查找行为。
+`run_command` v9 的命令选择指引适用于是否配置内置运行时的两种情况：单个命令直接传入可执行程序和参数数组；多个独立操作分别调用工具；目录查看优先用 `list_directory` 的 `path`、`limit`。不要仅为打印 echo/printf 分隔标题、串联独立命令或列出多个目录而构造 Shell 脚本。例如查看 Git 状态并列出目录时，分别调用 `run_command` 的 `["git","status","--short"]` 与 `list_directory`，无需拼接 `git status; echo ...; ls`。
 
-工具说明在每轮模型请求中明确给出默认调用规则和当前资源的实际绝对入口。运行 Python/JavaScript 默认直接使用 `python3`/`node`，无需用户重复指定“用内置解释器”，也无需探测或安装系统版本。以下示例的 `cwd` 需替换为实际平台的绝对目录。直接调用示例：
+只有确需管道、重定向、条件控制等 Shell 语法时才显式使用非登录 Shell；Windows 使用 PowerShell 的 `-NoProfile -NonInteractive` 或 cmd 的 `/d` 模式。服务端同时执行 v9 静态校验：对 `sh/bash -c`，若能确认脚本只含字面量程序调用、分号或换行串联及 echo/printf 分隔输出，且含普通外部程序，则在准备操作前返回 `invalid_arguments`，不启动任何进程。使用 `mvdan.cc/sh/v3/syntax` v3.14.1 解析语法树，不解释或执行脚本。管道、重定向、条件控制、变量展开、通配符、环境赋值及状态性 Shell 内建操作保留原有执行能力；语法无法可靠识别时不猜测用途。脚本文件和其他 Shell（包括 PowerShell、cmd、zsh）不套用这套 POSIX/Bash 规则。此检查是调用形式约束，权限和副作用仍由既有沙箱与审批判定。界面按真实步骤状态展示，执行前拒绝不会标成“已运行”。
+
+配置 `--runtime-dir` 后，`python`、`python3`、`node`、`git` 裸命令在服务端固定到清单中的绝对程序入口，工具定义版本为 `9`。解释器目录同时前置到命令子进程 PATH，供脚本及 Shell 启动子进程使用；Windows 资源包含 `python3.exe` 别名。当前资源版本固定为 Python 3.14.10、Node 26.13.0 和 Git 2.56.1（Windows 为 2.56.1.windows.1），来源与准备方法见 [运行与开发](development.md#内置运行时资源)。缺失或损坏明确失败；不会通过 PATH 静默选择其他同名解释器。显式路径继续采用既有路径和审批规则；未配置运行时的独立 Go 服务保持原有命令查找行为。
+
+工具说明在每轮模型请求中明确给出默认调用规则和当前资源的实际绝对入口。运行 Python/JavaScript/Git 默认直接使用 `python3`/`node`/`git`，无需用户重复指定“用内置解释器”，也无需探测或安装系统版本。以下示例的 `cwd` 需替换为实际平台的绝对目录。直接调用示例：
 
 ```json
 {"command":["python3","-c","print(1)"],"cwd":"/absolute/project"}
 {"command":["node","-e","console.log(1)"],"cwd":"/absolute/project"}
+{"command":["git","status","--short"],"cwd":"/absolute/project"}
 ```
 
-文件脚本分别使用 `["python3","script.py"]`、`["node","script.js"]`。不要仅为运行这些脚本再套 `bash`、`sh`、`zsh`、PowerShell 或 cmd，尤其避免 `bash -lc`、`sh -lc`、`zsh -lc`。登录 Shell 可能重设 PATH，Shell 字符串里的解释器不会经过裸命令入口映射。确需管道或重定向时，使用非登录 Shell，并按对应 Shell 语法引用工具说明提供的内置绝对路径；子进程 PATH 前置不替代显式入口。Windows 的 PowerShell/批处理脚本才需要对应 Shell，Python/JavaScript 直接指定解释器。用户明确指定项目虚拟环境或其他解释器时，使用其显式路径并遵守相同的校验、审批和沙箱。
+文件脚本分别使用 `["python3","script.py"]`、`["node","script.js"]`。不要仅为运行这些脚本或单个 Git 命令再套 `bash`、`sh`、`zsh`、PowerShell 或 cmd，尤其避免 `bash -lc`、`sh -lc`、`zsh -lc`。登录 Shell 可能重设 PATH，Shell 字符串里的程序不会经过裸命令入口映射。确需管道或重定向时，使用非登录 Shell，并按对应 Shell 语法引用工具说明提供的 Python、Node、Git 内置绝对路径；子进程 PATH 前置不替代显式入口。Windows 执行 PowerShell/批处理脚本或需要对应 Shell 语法时显式使用该 Shell，Python/JavaScript 直接指定解释器。用户明确指定项目虚拟环境或其他解释器时，使用其显式路径并遵守相同的校验、审批和沙箱。
 
 Git 默认直接使用 `command=["git","status","--short"]` 等数组，服务固定入口，并在工具说明中给出实际绝对路径。Go 为所有命令子进程生成 `GIT_EXEC_PATH`、`GIT_TEMPLATE_DIR`、`GIT_CONFIG_SYSTEM`，指向同套 Git 辅助程序、模板及发行包配置；Windows 同时将本包 DLL、HTTPS/GCM 与 MSYS shell/ssh 目录前置到 PATH。显式选择其他 Git 路径的命令仍继承这套子进程环境，不提供独立 Git 环境切换。
 
@@ -192,7 +197,13 @@ Git 默认直接使用 `command=["git","status","--short"]` 等数组，服务�
 
 Git 复用现有沙箱及审批：只读查询不获得写权限；`.git` 写保护保持不变，init/add/commit 等写入需请求沙箱外权限；clone/fetch/push 的网络访问也需审批。内置 Git 不自动批准提交或推送。临时仓库的 init/add/commit/status/diff/log/本地 clone 已纳入真实资源回归，测试不访问用户仓库或远端。
 
-这些规则用于引导模型的默认工具选择；服务端不改写 Shell 字符串或全局禁止 Shell，也不修改用户的登录配置和系统 PATH。未接入内置运行时的独立服务不注入上述内置入口说明。设计参考 [Codex 的登录 Shell 执行控制](https://learn.chatgpt.com/docs/enterprise/agent-security#execution-controls-executor)，通过直接参数数组和内置绝对入口明确解释器选择，避免依赖登录 Shell 的 PATH。
+这些规则用于引导模型的默认工具选择；服务端不改写 Shell 字符串或全局禁止 Shell，也不修改用户的登录配置和系统 PATH。未接入内置运行时的独立服务不注入上述内置入口说明。必要管道与临时目录重定向已通过真实 Python/Node/Git 的显式绝对入口回归；客户端受控模型回归验证每轮收到选用规则，并将命令与目录查看作为独立工具调用。这不等于真实模型在每次请求中都遵循指引。设计参考 [Codex 的登录 Shell 执行控制](https://learn.chatgpt.com/docs/enterprise/agent-security#execution-controls-executor)，通过直接参数数组和内置绝对入口明确解释器选择，避免依赖登录 Shell 的 PATH。
+
+参数类型错误提供由服务端生成的字段说明，例如 `command: 必须是字符串数组`，不回显模型传入的值；模型可据此重新调用，纠正后的操作重新经过固定目标、审批与执行前校验。不会把字符串自动猜测或转换成命令数组。
+
+当 Chat Completions 完整响应的工具身份有效、结束原因是 `tool_calls`，但某项 `function.arguments` 不是合法 JSON 对象时，整批工具都不执行。原模型步骤记为失败并保留组装响应、原始 usage；Agent 在下一次请求的固定上下文中添加有界的服务端纠正说明，重新生成本轮调用。纠正来源写入后续模型步骤的 `input.tool_arguments_correction`（`source_step_id`、从 0 开始的 `call_index`），不写成用户消息，也不把坏批次加入工具历史或摘要。反馈计入当前请求的内容及已启用的 Token 预算，实际 usage 逐次保留；取消、超时、保存失败、响应关闭失败及其他协议损坏沿原失败路径结束。部分生效或结果未知的工具不会进入参数纠正流程。
+
+连续返回相同坏 JSON，或连续整轮都因相同工具参数被执行前拒绝且没有执行进展时，以明确的 `invalid_response` 结束。这是无进展检查，不是固定模型轮次或工具次数上限。已经完成的操作不重放，改变参数后的调用重新走原审批规则。
 
 资源目录与私有数据目录分开。补丁工具拒绝创建或修改运行时文件，普通读取保持可用。macOS 受限命令禁止改写运行时及重命名项目内的资源祖先；Windows 为整个可信运行时树增加读取和执行范围，并拒绝写入现有资源对象及删除其祖先。`details.read_only_roots` 记录固定目录，读取根目录也进入 Windows 审批详情。显式完全访问或经批准的沙箱外进程仍使用当前账户权限；这些目录规则不构成独立文件系统，也不能阻止同账户外部程序修改完整依赖图。
 

@@ -104,7 +104,16 @@ func TestBundledInterpreters(t *testing.T) {
 	instance := NewWithRuntime([]string{"PATH=" + t.TempDir(), "OPENAI_API_KEY=must-not-leak"}, tool.ProtectedData{Directory: t.TempDir()}, bundle).(*commandTool)
 	python := `import sys, ssl, sqlite3, json, subprocess, os; assert sys.version_info[:3] == (3,14,10); assert os.getenv("OPENAI_API_KEY") is None; assert sqlite3.connect(":memory:").execute("select 1").fetchone() == (1,); ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); assert subprocess.check_output(["python3", "-c", "print('child-ok')"], text=True).strip() == "child-ok"; print("bundled-python-ok")`
 	node := `const assert=require('node:assert/strict'); require('node:fs'); require('node:crypto').randomBytes(4); assert.equal(process.version,'v26.13.0'); assert.equal(process.env.OPENAI_API_KEY,undefined); assert.equal(require('node:child_process').execFileSync('node',['-p',"'child-ok'"],{encoding:'utf8'}).trim(),'child-ok'); console.log('bundled-node-ok')`
-	for _, command := range [][]string{{"python3", "-c", python}, {"node", "-e", node}, {"python3", "-c", "print('x'*100000)"}} {
+	commands := [][]string{{"python3", "-c", python}, {"node", "-e", node}, {"python3", "-c", "print('x'*100000)"}}
+	if runtime.GOOS != "windows" {
+		pythonPath, _ := bundle.Resolve("python3")
+		nodePath, _ := bundle.Resolve("node")
+		gitPath, _ := bundle.Resolve("git")
+		// PATH 只有临时空目录；必要的管道和重定向仍可通过显式绝对入口执行。
+		script := `"$1" -c 'print("pipe-ok")' | "$2" -e 'let s=""; process.stdin.on("data",c=>s+=c); process.stdin.on("end",()=>{require("node:assert/strict").equal(s.trim(),"pipe-ok");console.log("bundled-pipe-ok")})' && "$3" --version > "$TMPDIR/git-version" && "$1" -c 'import os; from pathlib import Path; assert Path(os.environ["TMPDIR"],"git-version").read_text().startswith("git version 2.56.1"); print("bundled-shell-ok")'`
+		commands = append(commands, []string{"/bin/sh", "-c", script, "callum-shell", pythonPath, nodePath, gitPath})
+	}
+	for _, command := range commands {
 		raw, _ := json.Marshal(arguments{Command: command, Cwd: t.TempDir()})
 		call, err := instance.PrepareWithPermissions(t.Context(), tool.Scope{}, raw, tool.ExecutionPermissions{SandboxMode: tool.SandboxReadOnly})
 		if err != nil {
@@ -120,6 +129,9 @@ func TestBundledInterpreters(t *testing.T) {
 		}
 		if strings.Contains(command[2], "100000") && !report.Stdout.Truncated {
 			t.Fatal("解释器的大量输出未保持有界")
+		}
+		if command[0] == "/bin/sh" && (!strings.Contains(report.Stdout.Data, "bundled-pipe-ok") || !strings.Contains(report.Stdout.Data, "bundled-shell-ok")) {
+			t.Fatalf("必要 Shell 没有使用内置程序完成管道和重定向: %s", result.Output)
 		}
 	}
 }

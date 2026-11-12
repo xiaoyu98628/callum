@@ -29,7 +29,7 @@ func decodeArguments(raw json.RawMessage) (arguments, error) {
 		return a, err
 	}
 	if len(a.Command) == 0 || len(a.Command) > 256 || a.Command[0] == "" {
-		return a, tool.ErrInvalid
+		return a, &tool.ArgumentError{Field: "command", Message: "必须是包含可执行程序的非空字符串数组，长度为 1 至 256"}
 	}
 	for _, arg := range a.Command {
 		if !utf8.ValidString(arg) || strings.ContainsRune(arg, 0) {
@@ -57,6 +57,9 @@ func decodeArguments(raw json.RawMessage) (arguments, error) {
 	}
 	if (a.SandboxPermissions == sandboxEscalated || a.SandboxPermissions == sandboxProjectWrite) && strings.TrimSpace(a.Justification) == "" {
 		return a, tool.ErrInvalid
+	}
+	if err := validateShell(a.Command); err != nil {
+		return a, err
 	}
 	return a, nil
 }

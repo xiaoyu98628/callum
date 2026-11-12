@@ -10,6 +10,7 @@ require (
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.2
 	modernc.org/sqlite v1.61.0
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (

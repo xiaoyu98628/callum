@@ -37,14 +37,21 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	totalText := 0
 	step := ex.Step
 	var meter tokens.Meter
+	var correction *argumentCorrection
+	previousRejection := ""
 	for round := int64(0); ; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := current.fit(ctx, e, &ex, resolved, fixed, definitions, &meter, 0, nil); err != nil {
+		// 参数反馈是本次请求的有界固定上下文，计入预算，不写入用户消息或历史摘要。
+		requestFixed := append([]model.Message(nil), fixed...)
+		if correction != nil {
+			requestFixed = append(requestFixed, correction.message())
+		}
+		if err := current.fit(ctx, e, &ex, resolved, requestFixed, definitions, &meter, 0, nil); err != nil {
 			return err
 		}
-		effective := append(fixed, contextMessages(ex.Context, current.messages())...)
+		effective := append(requestFixed, contextMessages(ex.Context, current.messages())...)
 		e.recordContext(ex, resolved, effective, definitions, &meter, true)
 		if round > 0 {
 			id, err := uuid.NewV7()
@@ -52,7 +59,11 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 				return err
 			}
 			now := time.Now().UnixMilli()
-			input, err := json.Marshal(map[string]any{"purpose": "answer", "protocol": resolved.Protocol, "round": round + 1, "previous_step_id": step.ID})
+			fields := map[string]any{"purpose": "answer", "protocol": resolved.Protocol, "round": round + 1, "previous_step_id": step.ID}
+			if correction != nil {
+				fields["tool_arguments_correction"] = correction
+			}
+			input, err := json.Marshal(fields)
 			if err != nil {
 				return err
 			}
@@ -73,8 +84,25 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			return err
 		}
 		if callErr != nil {
-			return callErr
+			if ctx.Err() != nil {
+				return errors.Join(ctx.Err(), callErr)
+			}
+			invalid, repairable := soleArgumentError(callErr)
+			if !repairable || result.FinishReason != "tool_calls" || len(result.Output) == 0 || len(result.ToolCalls) != 0 {
+				return callErr
+			}
+			// 尚未进入工具循环，整批均未执行；保留失败模型步骤及实际 usage，重新生成参数。
+			if correction != nil && correction.fingerprint == invalid.Fingerprint {
+				return &model.ToolCorrectionStalledError{}
+			}
+			correction = &argumentCorrection{SourceStepID: step.ID, CallIndex: invalid.Index, fingerprint: invalid.Fingerprint}
+			meter.Observe(effective, definitions, result.InputTokens)
+			if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {
+				return err
+			}
+			continue
 		}
+		correction = nil
 		meter.Observe(effective, definitions, result.InputTokens)
 		if len(result.ToolCalls) == 0 {
 			return nil
@@ -92,6 +120,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if len(current.past)+len(current.current) != beforeFit {
 			e.recordContext(ex, resolved, append(fixed, contextMessages(ex.Context, current.messages())...), definitions, nil, true)
 		}
+		roundResults := make([]model.Message, 0, len(result.ToolCalls))
 		for index, call := range result.ToolCalls {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -106,6 +135,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			if err != nil {
 				return err
 			}
+			roundResults = append(roundResults, value)
 			current.current = append(current.current, value)
 			e.recordContext(ex, resolved, append(fixed, contextMessages(ex.Context, current.messages())...), definitions, nil, true)
 			beforeFit := len(current.past) + len(current.current)
@@ -117,6 +147,11 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 				e.recordContext(ex, resolved, append(fixed, contextMessages(ex.Context, current.messages())...), definitions, nil, true)
 			}
 		}
+		rejected := rejectedArgumentsRound(result.ToolCalls, roundResults)
+		if rejected != "" && rejected == previousRejection {
+			return &model.ToolCorrectionStalledError{}
+		}
+		previousRejection = rejected
 	}
 }
 
@@ -153,6 +188,9 @@ func toolFailure(err error) json.RawMessage {
 		kind, message = "permission_denied", "操作超出权限范围或已被拒绝"
 	case errors.Is(err, tool.ErrInvalid):
 		kind, message = "invalid_arguments", "工具参数无效"
+		if detail, ok := errors.AsType[*tool.ArgumentError](err); ok {
+			message = detail.Error()
+		}
 	case errors.Is(err, tool.ErrUnavailable):
 		kind, message = "unavailable", "工具或文件不可用"
 	case errors.Is(err, tool.ErrLimit):

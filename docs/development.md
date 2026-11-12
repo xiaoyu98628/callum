@@ -112,7 +112,7 @@ go run -mod=readonly ./cmd/callum --data-dir /absolute/path/isolated-data \
   --runtime-dir /absolute/path/callum-desktop/resources/runtimes/unpacked/darwin-arm64
 ```
 
-`python`、`python3`、`node`、`git` 裸命令固定到清单的绝对入口，子进程 PATH 优先使用同套运行时。缺失或损坏明确失败，显式程序路径继续采用既有校验和审批；每次命令准备复核目录身份、三个程序入口和 Git 配置内容，完整资源校验在启动时完成。设置中不提供多版本切换。工具说明明确要求默认直接使用 `python3`/`node`/`git`，无需用户重复提醒；不要仅为运行 Python/JS 代码套登录 Shell。确需 Shell 语法时，使用非登录 Shell 和工具说明给出的内置绝对入口，详见 [命令调用规则](tools-and-approvals.md#非交互命令执行)。
+`python`、`python3`、`node`、`git` 裸命令固定到清单的绝对入口，子进程 PATH 优先使用同套运行时。缺失或损坏明确失败，显式程序路径继续采用既有校验和审批；每次命令准备复核目录身份、三个程序入口和 Git 配置内容，完整资源校验在启动时完成。设置中不提供多版本切换。v9 工具说明及执行前校验明确要求默认直接使用 `python3`/`node`/`git`，无需用户重复提醒；多个独立操作分别调用工具，目录查看优先用 `list_directory`，不为打印分隔标题或串联独立操作套 Shell。确需 Shell 语法时，使用非登录 Shell 和工具说明给出的内置绝对入口，详见 [命令调用规则](tools-and-approvals.md#非交互命令执行)。
 
 真实解释器及 Git 仓库操作测试使用本次准备的资源，测试数据仍在临时目录：
 
@@ -124,6 +124,8 @@ CALLUM_TEST_RUNTIME_DIR=/absolute/path/callum-desktop/resources/runtimes/unpacke
 macOS ARM64 实际运行已验证；其他架构的归档校验及交叉构建不能替代对应设备的原生验收。安装包的 ASAR 外资源复制尚未配置，以上命令不生成安装包。
 
 ## 检查与构建
+
+Shell 语法静态校验依赖固定的 `mvdan.cc/sh/v3` v3.14.1，仅使用 `syntax`，不使用其解释执行器；标准库没有对应 Shell 语法树解析能力。依赖更新必须同时复验简单包装拒绝与必要 Shell 保留。
 
 ```sh
 gofmt -l cmd internal

@@ -1,6 +1,8 @@
 package chatcompletions
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
 	"slices"
@@ -71,16 +73,23 @@ func responseCalls(raw, reason string, enabled bool) ([]model.ToolCall, error) {
 	out := make([]model.ToolCall, 0, len(message.Calls))
 	seen := map[string]bool{}
 	callBytes := 0
+	// 先校验整批身份与边界；有其他协议错误时不得误判为可纠正的参数错误。
 	for _, c := range message.Calls {
 		callBytes += len(c.ID) + len(c.Function.Name) + len(c.Function.Arguments)
-		if callBytes > maxToolCallBytes {
+		if callBytes > maxToolCallBytes || len(c.Function.Arguments) > maxToolArguments {
 			return nil, model.ErrInputLimit
 		}
-		var object map[string]json.RawMessage
-		if c.ID == "" || len(c.ID) > 256 || seen[c.ID] || c.Type != "function" || !toolNamePattern.MatchString(c.Function.Name) || len(c.Function.Arguments) > maxToolArguments || json.Unmarshal([]byte(c.Function.Arguments), &object) != nil || object == nil {
+		if c.ID == "" || len(c.ID) > 256 || seen[c.ID] || c.Type != "function" || !toolNamePattern.MatchString(c.Function.Name) {
 			return nil, model.ErrInvalidResponse
 		}
 		seen[c.ID] = true
+	}
+	for index, c := range message.Calls {
+		var object map[string]json.RawMessage
+		if json.Unmarshal([]byte(c.Function.Arguments), &object) != nil || object == nil {
+			digest := sha256.Sum256([]byte(c.Function.Name + "\x00" + c.Function.Arguments))
+			return nil, &model.ToolArgumentsError{Index: index, Fingerprint: hex.EncodeToString(digest[:])}
+		}
 		out = append(out, model.ToolCall{ID: c.ID, Name: c.Function.Name, Arguments: json.RawMessage(c.Function.Arguments)})
 	}
 	return out, nil

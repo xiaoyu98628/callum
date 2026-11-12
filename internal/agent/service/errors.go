@@ -64,6 +64,12 @@ func failure(err error) (status, kind, message string) {
 	case errors.Is(err, model.ErrIncomplete), errors.Is(err, io.ErrUnexpectedEOF):
 		return status, "incomplete", "模型输出未完整完成"
 	case errors.Is(err, model.ErrInvalidResponse):
+		if detail, ok := errors.AsType[*model.ToolArgumentsError](err); ok {
+			return status, "invalid_response", detail.Error()
+		}
+		if detail, ok := errors.AsType[*model.ToolCorrectionStalledError](err); ok {
+			return status, "invalid_response", detail.Error()
+		}
 		return status, "invalid_response", "模型响应格式无效"
 	case errors.Is(err, model.ErrImageLimit):
 		return status, "image_limit", model.ErrImageLimit.Error()

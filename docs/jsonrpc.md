@@ -719,6 +719,8 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 通知、列表和 `step.get` 均将大型 `output`、`usage`、`definition` 置为 `null`，这不代表数据库中没有数据。通过下面的 `step.data` 获取原始字段。
 
+参数纠正期间执行保持 running。完整模型响应中的工具参数 JSON 损坏时，失败模型步骤保留原响应和 usage，本轮不创建任何工具步骤；下一模型步骤 input.tool_arguments_correction 记录 source_step_id 和从 0 开始的 call_index。该反馈仅用于本次请求且计入容量校验，不是用户输入或授权。纠正后重新校验和审批；重复同一坏参数且无进展时通过 run.failed 的 invalid_response 和具体安全说明结束。类型错误或简单 Shell 包装则产生 failed 工具步骤，error_kind=invalid_arguments，error_message 提供字段纠正说明，operation.outcome=not_applied。详见 [Agent 工具与审批](tools-and-approvals.md#非交互命令执行)。
+
 模型步骤 input.token_budget 保存按受理策略解析的规划 input_limit、context_window、max_output_tokens、estimated_input_tokens、estimation_method，估算和模型身份/设置快照分开于实际 usage。关闭自动压缩时普通回答不强制执行该规划预算，且无法解析预算时不附加此字段。
 
 当前实际创建 `model_call`、`tool_call`、`context_compression` 步骤；辅助标题也是单独的 `model_call`。工具步骤通过 `parent_step_id` 关联产生调用的模型步骤，适合客户端按层级折叠和展开。

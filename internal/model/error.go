@@ -52,3 +52,23 @@ func (e *CallError) Error() string {
 func (e *CallError) Unwrap() error {
 	return e.cause
 }
+
+// ToolArgumentsError 表示完整响应中工具身份有效，但某项 arguments 不是 JSON 对象。
+// Fingerprint 是参数摘要，不包含参数原文；仅在整批尚未执行时可请求模型纠正。
+type ToolArgumentsError struct {
+	Index       int
+	Fingerprint string
+}
+
+func (e *ToolArgumentsError) Error() string {
+	return fmt.Sprintf("模型第 %d 项工具调用的 arguments 必须是合法 JSON 对象，本轮工具均未执行", e.Index+1)
+}
+func (*ToolArgumentsError) Unwrap() error { return ErrInvalidResponse }
+
+// ToolCorrectionStalledError 表示连续提交相同坏参数且未发生执行进展，不能继续自动纠正。
+type ToolCorrectionStalledError struct{}
+
+func (*ToolCorrectionStalledError) Error() string {
+	return "模型重复提交相同无效工具参数，没有执行进展，请检查模型服务的工具调用输出"
+}
+func (*ToolCorrectionStalledError) Unwrap() error { return ErrInvalidResponse }
