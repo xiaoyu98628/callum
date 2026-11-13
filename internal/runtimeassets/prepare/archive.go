@@ -82,6 +82,11 @@ func extract(ctx context.Context, archive, directory, prefix string) (retErr err
 	if err := os.Mkdir(directory, 0755); err != nil {
 		return err
 	}
+	return extractInto(ctx, archive, directory, prefix)
+}
+
+// extractInto 只供同一私有准备目录组合 wheel；O_EXCL 阻止覆盖已有解释器和其他包文件。
+func extractInto(ctx context.Context, archive, directory, prefix string) (retErr error) {
 	root, err := os.OpenRoot(directory)
 	if err != nil {
 		return err
@@ -109,7 +114,7 @@ func extract(ctx context.Context, archive, directory, prefix string) (retErr err
 		}
 		return strings.TrimPrefix(name, prefix+"/"), nil
 	}
-	if strings.HasSuffix(archive, ".zip") {
+	if strings.HasSuffix(archive, ".zip") || strings.HasSuffix(archive, ".whl") {
 		reader, err := zip.OpenReader(archive)
 		if err != nil {
 			return err

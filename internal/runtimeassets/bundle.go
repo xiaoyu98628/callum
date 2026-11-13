@@ -68,9 +68,36 @@ func Load(ctx context.Context, directory string) (_ *Bundle, retErr error) {
 // Directory 返回已解析符号链接的实际资源根目录。
 func (b *Bundle) Directory() string { return b.directory }
 
+// HasWorkspaceDependencies 报告通用依赖资源是否已通过启动校验，不参与技能安装或发现。
+func (b *Bundle) HasWorkspaceDependencies() bool {
+	return b != nil && b.manifest.Workspace != nil
+}
+
+// WorkspacePaths 返回与技能约定兼容的绝对路径快照，不借出可变清单。
+func (b *Bundle) WorkspacePaths() map[string]string {
+	if !b.HasWorkspaceDependencies() {
+		return nil
+	}
+	r := b.manifest.Workspace
+	absolute := func(path string) string { return filepath.Join(b.directory, filepath.FromSlash(path)) }
+	return map[string]string{"bundle_version": r.Version, "python": b.python, "node": b.node, "node_modules": absolute(r.NodeModules), "bin_directory": absolute(r.BinDirectory)}
+}
+
+// WorkspaceEnvironment 固定原技能脚本需要的环境变量；只用于命令子进程。
+func (b *Bundle) WorkspaceEnvironment() []string {
+	paths := b.WorkspacePaths()
+	if paths == nil {
+		return nil
+	}
+	return []string{"RUNTIME_PYTHON=" + paths["python"], "RUNTIME_NODE=" + paths["node"], "RUNTIME_NODE_MODULES=" + paths["node_modules"], "RUNTIME_BIN_DIR=" + paths["bin_directory"]}
+}
+
 // BinDirectories 返回仅供命令子进程使用的搜索目录，不修改系统或服务进程 PATH。
 func (b *Bundle) BinDirectories() []string {
 	directories := []string{filepath.Dir(b.python), filepath.Dir(b.node), filepath.Dir(b.git), filepath.Join(b.directory, filepath.FromSlash(b.manifest.Git.ExecPath))}
+	if b.HasWorkspaceDependencies() {
+		directories = append([]string{b.WorkspacePaths()["bin_directory"]}, directories...)
+	}
 	if b.manifest.Platform == "windows" {
 		// Windows 的 DLL、HTTPS/GCM 和 MSYS shell/ssh 分布在两个附属 bin 目录。
 		prefix := filepath.Dir(filepath.Dir(filepath.Join(b.directory, filepath.FromSlash(b.manifest.Git.ExecPath))))
@@ -99,7 +126,7 @@ func (b *Bundle) Resolve(name string) (string, bool) {
 	}
 }
 
-// Check 在每次准备操作时复核目录、三个命令入口及 Git 配置；完整资源校验在启动时完成。
+// Check 在每次准备操作时复核目录、已声明的解释器入口及 Git 配置；完整资源校验在启动时完成。
 func (b *Bundle) Check(ctx context.Context) (retErr error) {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -117,7 +144,8 @@ func (b *Bundle) Check(ctx context.Context) (retErr error) {
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, root.Close()) }()
-	for _, executable := range []Executable{b.manifest.Python, b.manifest.Node, b.manifest.Git.Executable, {Path: b.manifest.Git.ConfigPath}} {
+	executables := []Executable{b.manifest.Python, b.manifest.Node, b.manifest.Git.Executable, {Path: b.manifest.Git.ConfigPath}}
+	for _, executable := range executables {
 		name := executable.Path
 		for {
 			index := slices.IndexFunc(b.manifest.Files, func(file File) bool { return file.Path == name })
@@ -162,6 +190,37 @@ func WriteManifest(directory string, manifest Manifest) error {
 
 // ValidateLayout 检查清单入口及 Git 配套目录，供准备阶段和运行期启动共用。
 func ValidateLayout(directory string, manifest Manifest) error {
+	if r := manifest.Workspace; r != nil {
+		if r.Version == "" || !strings.HasPrefix(r.NodeModules, "node/") || r.BinDirectory != "native" {
+			return errors.New("工作区依赖资源版本无效")
+		}
+		for _, item := range []struct {
+			path      string
+			directory bool
+		}{{r.NodeModules, true}, {r.BinDirectory, true}} {
+			if !localPath(item.path) {
+				return errors.New("工作区依赖资源路径无效")
+			}
+			info, err := os.Stat(filepath.Join(directory, filepath.FromSlash(item.path)))
+			if err != nil || info.IsDir() != item.directory || (!item.directory && (!info.Mode().IsRegular() || (manifest.Platform != "windows" && info.Mode().Perm()&0111 == 0))) {
+				return errors.New("工作区依赖资源入口缺失")
+			}
+		}
+	}
+	seenPackages := map[string]bool{}
+	if len(manifest.PythonPackages) > 32 {
+		return errors.New("Python 依赖数量超过限制")
+	}
+	for _, dependency := range manifest.PythonPackages {
+		if dependency.Name == "" || dependency.Version == "" || seenPackages[dependency.Name] || !localPath(dependency.Path) || !strings.HasPrefix(dependency.Path, "python/") {
+			return errors.New("Python 依赖清单无效")
+		}
+		seenPackages[dependency.Name] = true
+		info, err := os.Stat(filepath.Join(directory, filepath.FromSlash(dependency.Path)))
+		if err != nil || !info.Mode().IsRegular() {
+			return errors.New("Python 依赖入口缺失")
+		}
+	}
 	for component, executable := range map[string]Executable{"python": manifest.Python, "node": manifest.Node, "git": manifest.Git.Executable} {
 		if executable.Version == "" || !localPath(executable.Path) || !strings.HasPrefix(executable.Path, component+"/") {
 			return errors.New("内置命令入口无效")

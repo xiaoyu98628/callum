@@ -56,6 +56,7 @@ func (o Outcome) MayHaveEffects() bool {
 type Result struct {
 	Output  json.RawMessage
 	Outcome Outcome
+	Images  []model.Block // 可信读图工具生成的托管图片引用，单独计入视觉上下文。
 }
 
 // OperationVersion 标识步骤 JSON 中操作事实的兼容版本，不是数据库结构版本。
@@ -137,8 +138,12 @@ func (m SandboxMode) Valid() bool {
 
 // ExecutionPermissions 由受理时的服务端设置快照提供，模型不能指定沙箱模式。
 type ExecutionPermissions struct {
-	SandboxMode    SandboxMode
-	ConversationID string
+	SandboxMode     SandboxMode
+	ConversationID  string
+	RunID           string
+	InputDirectory  string // 服务端持有的本轮附件输入，只读。
+	WorkDirectory   string // 服务端持有的本轮私有中间目录，可写且结束后回收。
+	AllowImageInput bool   // 来自用户选择的模型类型，不能由工具参数扩大。
 }
 
 // PermissionTool 为需要运行权限的工具显式传入执行快照；普通文件工具沿用 Prepare。

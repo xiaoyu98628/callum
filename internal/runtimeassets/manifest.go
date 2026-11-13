@@ -14,10 +14,12 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 )
 
 // FormatVersion 固定当前完整资源清单结构；旧缓存由调用方使用独立目录保留。
-const FormatVersion = 2
+const FormatVersion = 3
 
 const MaxManifestBytes = 8 << 20
 const maxFiles = 30000
@@ -27,6 +29,20 @@ const maxPayloadBytes int64 = 2 << 30
 type Executable struct {
 	Version string `json:"version"`
 	Path    string `json:"path"`
+}
+
+// PythonPackage 记录离线组合进统一解释器的第三方依赖及其模块入口。
+type PythonPackage struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Path    string `json:"path"`
+}
+
+// WorkspaceRuntime 固定技能共享依赖，解释器复用 Manifest 中的统一入口。
+type WorkspaceRuntime struct {
+	Version      string `json:"version"`
+	NodeModules  string `json:"node_modules"`
+	BinDirectory string `json:"bin_directory"`
 }
 
 // GitRuntime 固定 Git 入口及其发行包内的辅助程序、模板和系统配置路径。
@@ -47,13 +63,15 @@ type File struct {
 
 // Manifest 固定一个平台的完整运行时资源，准备命令生成后由应用只读使用。
 type Manifest struct {
-	FormatVersion int        `json:"format_version"`
-	Platform      string     `json:"platform"`
-	Arch          string     `json:"arch"`
-	Python        Executable `json:"python"`
-	Node          Executable `json:"node"`
-	Git           GitRuntime `json:"git"`
-	Files         []File     `json:"files"`
+	FormatVersion  int               `json:"format_version"`
+	Platform       string            `json:"platform"`
+	Arch           string            `json:"arch"`
+	Python         Executable        `json:"python"`
+	Node           Executable        `json:"node"`
+	Git            GitRuntime        `json:"git"`
+	PythonPackages []PythonPackage   `json:"python_packages,omitempty"`
+	Workspace      *WorkspaceRuntime `json:"workspace,omitempty"`
+	Files          []File            `json:"files"`
 }
 
 func localPath(name string) bool {
@@ -116,7 +134,6 @@ func Inventory(ctx context.Context, directory string) (_ []File, retErr error) {
 	}
 	defer func() { retErr = errors.Join(retErr, root.Close()) }()
 	var files []File
-	var total int64
 	err = fs.WalkDir(root.FS(), ".", func(name string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -141,19 +158,49 @@ func Inventory(ctx context.Context, directory string) (_ []File, retErr error) {
 				return fmt.Errorf("运行时链接不可用: %w", err)
 			}
 		} else if entry.Type().IsRegular() {
-			item.SHA256, item.Size, err = hashFile(ctx, root, name)
-			if err != nil {
-				return err
-			}
-			total += item.Size
-			if total > maxPayloadBytes {
-				return errors.New("运行时资源总大小超过限制")
-			}
+			// 目录顺序先固定，再由有界工作者计算内容摘要，避免完整依赖树的
+			// 小文件安全打开与大型库读取串行占满启动时限。
 		} else {
 			return errors.New("运行时资源包含特殊文件")
 		}
 		files = append(files, item)
 		return nil
 	})
-	return files, err
+	if err != nil {
+		return nil, err
+	}
+	checks, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	var next, total atomic.Int64
+	var workers sync.WaitGroup
+	for range min(4, len(files)) {
+		workers.Go(func() {
+			for checks.Err() == nil {
+				index := next.Add(1) - 1
+				if index >= int64(len(files)) {
+					return
+				}
+				item := &files[index]
+				if item.Link != "" {
+					continue
+				}
+				var err error
+				item.SHA256, item.Size, err = hashFile(checks, root, item.Path)
+				if err != nil {
+					cancel(err)
+					return
+				}
+				if total.Add(item.Size) > maxPayloadBytes {
+					cancel(errors.New("运行时资源总大小超过限制"))
+					return
+				}
+			}
+		})
+	}
+	// 返回和关闭 Root 前等待所有校验工作者；失败会取消其他读取，不留下后台任务。
+	workers.Wait()
+	if err := context.Cause(checks); err != nil {
+		return nil, err
+	}
+	return files, nil
 }

@@ -47,7 +47,7 @@ func TestImageInputUsesSelectedModelType(t *testing.T) {
 					w.WriteHeader(400)
 					return
 				}
-				if len(request.Tools) != 6 || len(request.Messages) != 2 || request.Messages[0].Role != "system" || request.Messages[1].Role != "user" {
+				if len(request.Tools) != 9 || len(request.Messages) != 2 || request.Messages[0].Role != "system" || request.Messages[1].Role != "user" {
 					t.Error("图片请求缺少固定提示或用户消息")
 					w.WriteHeader(400)
 					return

@@ -79,7 +79,7 @@ func search(ctx context.Context, root *os.Root, file *os.File, a arguments, base
 			truncated = true
 			return nil
 		}
-		if protection.Contains(filepath.Join(base, path)) {
+		if protection.ReadProtected(filepath.Join(base, path)) {
 			return nil
 		}
 		visited++

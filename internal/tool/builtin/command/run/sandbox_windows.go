@@ -147,6 +147,9 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 	s := &p.sandboxState
 	s.journal = sandboxJournal{Version: sandboxJournalVersion, Name: "callum.command." + rand.Text(), Temporary: p.temporaryPath, ProtectedDirectory: p.protectedDirectory.actual}
 	paths := []string{p.directory.actual, filepath.Dir(p.executable.actual)}
+	if p.workDirectory != nil {
+		paths = append(paths, p.workDirectory.actual)
+	}
 	for _, root := range p.readOnlyDirectories {
 		paths = append(paths, root.actual)
 	}
@@ -157,7 +160,7 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 		if slices.ContainsFunc(s.roots, func(root *fixedPath) bool { return strings.EqualFold(root.actual, path) }) {
 			continue
 		}
-		if protection.Contains(path) {
+		if protection.ReadProtected(path) {
 			return tool.ErrDenied
 		}
 		root, err := pinPath(path, true)
@@ -166,6 +169,7 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 		}
 		s.roots = append(s.roots, root)
 		write := projectWrite && p.workspace != nil && strings.EqualFold(root.actual, p.workspace.actual)
+		write = write || (p.workDirectory != nil && strings.EqualFold(root.actual, p.workDirectory.actual))
 		if write && isWindowsSystemDirectory(root.actual, p.environment) {
 			return tool.ErrDenied
 		}
@@ -280,8 +284,11 @@ func (p *fixedCommand) collectSandboxACLs(ctx context.Context) error {
 				}
 				return nil
 			}
+			if block && !p.protection.ReadProtected(path) {
+				return filepath.SkipDir
+			}
 			// 应用数据保留独立拒绝条目，遍历不会进入其中。
-			protected := p.protection.Contains(path)
+			protected := p.protection.ReadProtected(path)
 			if !block && !strings.EqualFold(path, root) && protected {
 				return filepath.SkipDir
 			}
@@ -319,7 +326,16 @@ func (p *fixedCommand) collectSandboxACLs(ctx context.Context) error {
 			if exists && !deny {
 				mask |= old.Mask
 			}
-			entries[key] = sandboxACLEntry{Path: path, Identity: identity, Directory: info.IsDir(), Mask: mask, Deny: deny}
+			selfOnly := block && info.IsDir() && p.protection.ProtectsDescendant(path)
+			if selfOnly {
+				// 应用数据根目录保留禁止列举等权限，允许路径穿越至单独登记的 skills 子树；拒绝不向该子树继承。
+				mask &^= windows.FILE_TRAVERSE
+			}
+			entries[key] = sandboxACLEntry{Path: path, Identity: identity, Directory: info.IsDir(), Mask: mask, Deny: deny, SelfOnly: selfOnly}
+			if !block && p.protection.ReadOnlyContains(path) {
+				// 只读资源同时需要读取授权和独立写拒绝，不能只创建拒绝条目。
+				entries[key+"\x00readonly-read"] = sandboxACLEntry{Path: path, Identity: identity, Directory: info.IsDir(), Mask: windows.FILE_GENERIC_READ | windows.FILE_GENERIC_EXECUTE}
+			}
 			if !deny && info.IsDir() && p.protection.ProtectsDescendant(path) {
 				// 工作区父目录的继承 DELETE 授权不能抵消资源祖先的固定路径保护。
 				entries[key+"\x00ancestor"] = sandboxACLEntry{Path: path, Identity: identity, Directory: true, Mask: windows.DELETE | sandboxDeleteChild, Deny: true, SelfOnly: true}

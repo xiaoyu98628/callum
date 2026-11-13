@@ -153,7 +153,7 @@ func (s *Store) readSource(ctx context.Context, path, kind string) (_ []byte, _ 
 	if err != nil {
 		return nil, "", err
 	}
-	detected := strings.SplitN(http.DetectContentType(data), ";", 2)[0]
+	detected, _, _ := strings.Cut(http.DetectContentType(data), ";")
 	if kind == "image" && extensions[detected] == "" {
 		return nil, "", model.ErrImageFormat
 	}

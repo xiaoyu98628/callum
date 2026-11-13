@@ -17,6 +17,15 @@ func (e *Engine) requestParts(ctx context.Context, conv conversation.Conversatio
 	}
 	definitions = append(definitions, agent.UserInputDefinition())
 	fixed := []model.Message{{Role: model.RoleSystem, Content: conversationPrompt}}
+	if e.options.Skills != nil {
+		catalog, err := e.options.Skills(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		if catalog != "" {
+			fixed = append(fixed, model.Message{Role: model.RoleSystem, Content: catalog})
+		}
+	}
 	if conv.WorkspaceID != nil {
 		project, err := e.options.Workspace(ctx, *conv.WorkspaceID)
 		if err != nil {

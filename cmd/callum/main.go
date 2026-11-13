@@ -21,6 +21,9 @@ func main() {
 
 func run() int {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	if len(os.Args) > 1 && os.Args[1] == "resource-lock" {
+		return runResourceLock(os.Args[2:], logger)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "prepare-runtimes" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()

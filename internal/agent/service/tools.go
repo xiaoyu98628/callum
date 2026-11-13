@@ -22,7 +22,12 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 	scope, operationErr := e.toolScope(ctx, ex)
 	var prepared *toolexecutor.Prepared
 	if operationErr == nil {
-		permissions := tool.ExecutionPermissions{ConversationID: ex.Conversation.ID}
+		permissions := tool.ExecutionPermissions{ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, AllowImageInput: resolved.ImageInput}
+		if e.options.Attachments != nil {
+			if files, ok := e.options.Attachments.Files(ex.Conversation.ID, ex.Run.ID); ok {
+				permissions.InputDirectory, permissions.WorkDirectory = files.Inputs, files.Work
+			}
+		}
 		if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
 			permissions.SandboxMode = snapshot.SandboxMode
 		}
@@ -258,6 +263,9 @@ func (e *Engine) finishTool(ctx context.Context, ex conversation.Execution, step
 		return model.Message{}, err
 	}
 	message := model.Message{Role: model.RoleTool, Content: string(envelope), ToolCallID: call.ID}
+	if operationErr == nil && len(result.Images) > 0 {
+		message.Blocks = append([]model.Block{{Type: "text", Text: message.Content}}, result.Images...)
+	}
 	envelope, err = withContextMessage(envelope, message)
 	if err != nil {
 		return message, err

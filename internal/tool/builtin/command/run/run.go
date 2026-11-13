@@ -35,6 +35,7 @@ func NewWithRuntime(environment []string, protection tool.ProtectedData, bundle 
 		filtered = slices.DeleteFunc(filtered, func(entry string) bool { return strings.HasPrefix(entry, "PATH=") })
 		filtered = append(filtered, "PATH="+strings.Join(paths, string(filepath.ListSeparator)), "PYTHONDONTWRITEBYTECODE=1", "PYTHONNOUSERSITE=1", "PYTHONUTF8=1")
 		filtered = append(filtered, bundle.GitEnvironment()...)
+		filtered = append(filtered, bundle.WorkspaceEnvironment()...)
 		if !slices.Contains(protection.ReadOnlyDirectories, bundle.Directory()) {
 			protection.ReadOnlyDirectories = append(protection.ReadOnlyDirectories, bundle.Directory())
 		}
@@ -95,5 +96,14 @@ func (t *commandTool) PrepareWithPermissions(ctx context.Context, scope tool.Sco
 			a.Command[0] = executable
 		}
 	}
-	return prepare(ctx, scope, a, slices.Clone(t.environment), permissions, t.protection)
+	protection := t.protection
+	protection.ReadOnlyDirectories = slices.Clone(protection.ReadOnlyDirectories)
+	if permissions.InputDirectory != "" {
+		protection.ReadOnlyDirectories = append(protection.ReadOnlyDirectories, permissions.InputDirectory)
+	}
+	environment := slices.Clone(t.environment)
+	if permissions.WorkDirectory != "" {
+		environment = append(environment, "CALLUM_RUN_WORK_DIR="+permissions.WorkDirectory)
+	}
+	return prepare(ctx, scope, a, environment, permissions, protection)
 }

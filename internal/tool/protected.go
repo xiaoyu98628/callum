@@ -19,6 +19,20 @@ func (p ProtectedData) WriteProtected(path string) bool {
 	return p.Contains(path) || p.ReadOnlyContains(path)
 }
 
+// ReadProtected 仅向装配层登记的只读子树开放私有数据读取；写保护和 SQLite 身份检查保持独立。
+func (p ProtectedData) ReadProtected(path string) bool {
+	if !p.Contains(path) {
+		return false
+	}
+	for _, root := range p.ReadOnlyDirectories {
+		resource := ProtectedData{Directory: root}
+		if p.Contains(root) && !resource.Contains(p.Directory) && resource.Contains(path) {
+			return false
+		}
+	}
+	return true
+}
+
 // ReadOnlyContains 判断实际目标是否属于只读资源树，不限制读取。
 func (p ProtectedData) ReadOnlyContains(path string) bool {
 	for _, root := range p.ReadOnlyDirectories {

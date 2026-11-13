@@ -10,6 +10,45 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model/imageinput"
 )
 
+// ReadAttachmentChunk 只读当前分支中消息明确持有的副本，不接受客户端指定任意路径。
+// 每次核对完整哈希，再返回不超过 1 MiB 的片段，保持 stdio 响应有界。
+func (s *Service) ReadAttachmentChunk(ctx context.Context, conversationID, messageID string, index int, offset int64) (conversation.AttachmentChunk, error) {
+	var result conversation.AttachmentChunk
+	if !validID(conversationID) || !validID(messageID) || index < 0 || index >= 64 || offset < 0 {
+		return result, conversation.ErrInvalid
+	}
+	message, err := s.repository.Message(ctx, conversationID, messageID)
+	if err != nil {
+		return result, err
+	}
+	if index >= len(message.Content) {
+		return result, conversation.ErrNotFound
+	}
+	block := message.Content[index]
+	if (block.Type != "file" && block.Type != "image") || block.AttachmentRef == "" {
+		return result, conversation.ErrNotFound
+	}
+	data, mime, err := s.attachments.Read(ctx, block.AttachmentRef)
+	if err != nil {
+		return result, err
+	}
+	if offset > int64(len(data)) || (offset == int64(len(data)) && offset != 0) {
+		return result, conversation.ErrInvalid
+	}
+	end := min(offset+(1<<20), int64(len(data)))
+	chunk := make([]byte, end-offset)
+	copy(chunk, data[offset:end])
+	name := block.Name
+	if name == "" {
+		name = filepath.Base(filepath.FromSlash(block.AttachmentRef))
+	}
+	result = conversation.AttachmentChunk{Name: name, MIME: mime, Size: int64(len(data)), Offset: offset, Data: chunk}
+	if end < int64(len(data)) {
+		result.NextOffset = new(end)
+	}
+	return result, nil
+}
+
 // PreviewAttachment 返回有界预览。历史图从固定消息索引读取，草稿使用本地路径。
 func (s *Service) PreviewAttachment(ctx context.Context, conversationID, messageID string, index int, path string) ([]byte, string, error) {
 	var block model.Block

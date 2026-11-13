@@ -45,8 +45,8 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 					w.WriteHeader(400)
 					return
 				}
-				if len(input.Tools) != 6 {
-					t.Errorf("未提供六个工具定义: %d", len(input.Tools))
+				if len(input.Tools) != 9 {
+					t.Errorf("未提供完整的内置工具定义: %d", len(input.Tools))
 				}
 				if len(input.Messages) < 2 || input.Messages[0].Role != "system" || !strings.Contains(input.Messages[0].Content, "1～2句话") || !strings.Contains(input.Messages[0].Content, "正文 content") {
 					t.Error("主对话未发送操作前说明的固定提示")

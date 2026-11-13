@@ -209,7 +209,12 @@ func (s *Store) write(ctx context.Context, path string, data []byte) (retErr err
 	if err != nil {
 		return err
 	}
-	defer func() { retErr = errors.Join(retErr, file.Close()) }()
+	defer func() {
+		retErr = errors.Join(retErr, file.Close())
+		if retErr != nil {
+			retErr = errors.Join(retErr, s.root.Remove(path))
+		}
+	}()
 	for len(data) > 0 {
 		if err := ctx.Err(); err != nil {
 			return err

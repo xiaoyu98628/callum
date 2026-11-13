@@ -20,18 +20,16 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/tokens"
 	"github.com/xiaoyu98628/callum/internal/settings"
-	"github.com/xiaoyu98628/callum/internal/tool"
-	"github.com/xiaoyu98628/callum/internal/tool/builtin/command"
-	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem"
 )
 
 type compactModel struct {
-	mode       atomic.Int32
-	summaries  atomic.Int32
-	blockAfter atomic.Int32
-	mu         sync.Mutex
-	answers    map[string]string
-	started    chan struct{}
+	mode        atomic.Int32
+	summaries   atomic.Int32
+	blockAfter  atomic.Int32
+	mu          sync.Mutex
+	answers     map[string]string
+	definitions []model.ToolDefinition
+	started     chan struct{}
 }
 
 func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
@@ -39,7 +37,9 @@ func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
 	m := &compactModel{answers: map[string]string{}, started: make(chan struct{}, 8)}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
-			Tools    []json.RawMessage                `json:"tools"`
+			Tools []struct {
+				Function model.ToolDefinition `json:"function"`
+			} `json:"tools"`
 			Messages []struct{ Role, Content string } `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || len(input.Messages) == 0 {
@@ -86,6 +86,10 @@ func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
 			}
 			m.mu.Lock()
 			m.answers[last] = string(raw)
+			m.definitions = make([]model.ToolDefinition, len(input.Tools))
+			for i, definition := range input.Tools {
+				m.definitions[i] = definition.Function
+			}
 			m.mu.Unlock()
 		}
 		raw, err := json.Marshal(text)
@@ -294,6 +298,7 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 	compactSend(t, p, mid, "", "读取当前固定上下文")
 	upstream.mu.Lock()
 	probe := upstream.answers["读取当前固定上下文"]
+	definitions := append([]model.ToolDefinition(nil), upstream.definitions...)
 	upstream.mu.Unlock()
 	var requestMessages []model.Message
 	if err := json.Unmarshal([]byte(probe), &requestMessages); err != nil {
@@ -307,10 +312,6 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 	}
 	if len(fixed) != 1 || fixed[0].Content == "" {
 		t.Fatal("主对话缺少固定过程沟通提示")
-	}
-	definitions := []model.ToolDefinition{agent.UserInputDefinition()}
-	for _, instance := range append(filesystem.Tools(tool.ProtectedData{}), command.Tools(nil, tool.ProtectedData{})...) {
-		definitions = append(definitions, instance.Definition().ToolDefinition)
 	}
 	compression.TokenBudget, compression.RetainTurns = tokens.Estimate(fixed, definitions, compression.ImageTokenEstimate)+5700, 1
 	compactionSetting(t, p, compression)
@@ -418,10 +419,33 @@ func TestCompactionContinuesBeyondPreviousBatchLimit(t *testing.T) {
 			}
 			cfg.MaxConcurrentRuns = 1
 			p := startApp(t, cfg, io.Discard)
+			defer func() {
+				if t.Failed() {
+					for _, frame := range p.pending {
+						if frame.Method == "run.failed" {
+							t.Logf("实际执行失败: %s", frame.Params)
+						}
+					}
+				}
+			}()
 			mid := setupConversationModel(t, p, server.URL)
 			cid := manyBatchHistory(t, p, mid)
 			compression := settings.DefaultCompaction()
 			compression.Enabled, compression.TokenBudget, compression.RetainTurns = automatic, 5000, 1
+			if automatic {
+				// 答复请求额外携带附件和视觉工具；补入新增定义的真实固定开销，
+				// 摘要仍只能容纳一个完整历史轮次，下面继续核对十一批来源。
+				var added []model.ToolDefinition
+				upstream.mu.Lock()
+				for _, definition := range upstream.definitions {
+					switch definition.Name {
+					case "open_attachment", "view_image", "publish_artifact":
+						added = append(added, definition)
+					}
+				}
+				upstream.mu.Unlock()
+				compression.TokenBudget += tokens.Estimate(nil, added, compression.ImageTokenEstimate) - 16
+			}
 			compactionSetting(t, p, compression)
 			method := "conversation.compact"
 			params := map[string]any{"conversation_id": cid}

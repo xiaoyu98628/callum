@@ -212,12 +212,12 @@ func (r *Repository) Messages(ctx context.Context, id string, before int64, limi
 	return out, nil
 }
 
-// Attachment 只从当前用户消息分支查询引用。已替换消息和其他会话不授予读取权限。
+// Attachment 只从当前消息分支查询输入或交付引用。已替换消息和其他会话不授予读取权限。
 func (r *Repository) Attachment(ctx context.Context, conversationID, ref string) (model.Block, error) {
 	var values []struct{ Value string }
 	err := r.db.WithContext(ctx).Raw(`
 		SELECT entry.value FROM conversation_messages m, json_each(m.content) entry
-		WHERE m.conversation_id = ? AND m.role = 'user'
+		WHERE m.conversation_id = ? AND m.role IN ('user', 'assistant')
 		AND json_extract(entry.value, '$.attachment_ref') = ?
 		AND json_extract(entry.value, '$.type') = 'file'
 		LIMIT 1`, conversationID, ref).Scan(&values).Error

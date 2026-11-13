@@ -75,9 +75,9 @@ go run ./cmd/callum --max-concurrent-runs 2 --call-timeout 3m
 
 ## 内置运行时资源
 
-客户端携带资源并传入位置，Go 服务校验和执行。固定 Python 3.14.10（Astral `python-build-standalone` 的 `20261110 install_only_stripped`）、Node 26.13.0（Node 官方完整发行包）及 Git 2.56.1（Windows 为 2.56.1.windows.1，GitHub Desktop Dugite 发行包），覆盖 macOS Intel x64、Apple Silicon ARM64 和 Windows x64、ARM64。服务与运行时采用相同原生架构，来源与归档 SHA-256 维护在客户端 `resources/runtimes/sources.json`。
+客户端携带资源，在实例锁内安装到实际 `DataDir/runtimes/`，Go 校验和执行。四平台 Python 固定 3.12.14，Node 26.13.0，Git 2.56.1（Windows 为 2.56.1.windows.1）。macOS ARM64 Python 使用用户提供的完整技能环境；其他三个平台使用 Astral `20260929 install_only_stripped` 与 cp312 wheel。实际目录不带版本或平台层级，清单记录全部元数据。
 
-四平台的十二份完整归档位于客户端仓库 `resources/runtimes/archives/`，直接纳入普通 Git；标准库、许可证及配套资源保留。开发、构建、测试前，客户端调用随附服务的严格离线子命令：
+四平台的十二份基础归档、固定 Python wheel 及技能依赖归档位于客户端仓库 `resources/runtimes/archives/`；完整资源和来源校验值由客户端持有。开发、构建、测试前，客户端调用随附服务的严格离线子命令：
 
 ```sh
 /absolute/path/callum-desktop/resources/backend/darwin-arm64/callum prepare-runtimes \
@@ -101,7 +101,7 @@ go run -mod=readonly ./cmd/prepare-runtimes \
 
 该独立入口默认也保持离线，只有 `--download` 启用网络；随附 `callum prepare-runtimes` 始终拒绝这个参数。进度与错误使用结构化 JSON 写入 stderr，stdout 为空，`--help` 正常退出。
 
-来源清单与生成清单格式均为 `2`，该编号只用于格式校验，不加入资源目录。客户端固定使用 `unpacked/<平台>/`。已有目录不符合当前清单时仍拒绝覆盖；更新前应在新输出目录校验，在服务关闭后备份并替换生成资源。
+来源清单与生成清单格式均为 `3`，该编号只用于格式校验，不加入资源目录。客户端固定使用 `unpacked/<平台>/`。已有目录不符合当前清单时仍拒绝覆盖；更新前应在新输出目录校验，在服务关闭后备份并替换生成资源。
 
 准备过程检查归档 SHA-256，限制大小、条目和解压总量，拒绝越界路径、硬链接、特殊文件及越界链接，延后建立符号链接。校验成功后生成 `manifest.json` 并将资源设置为只读，再激活平台目录；失败清理本次暂存目录和锁。重复准备检查归档及所有已解压内容，不替换有效目录；损坏、版本不符或缺少清单均拒绝覆盖。版本更新应在新输出目录核验后，在服务关闭时替换生成资源，不在服务运行期升级解释器。
 
@@ -124,6 +124,22 @@ CALLUM_TEST_RUNTIME_DIR=/absolute/path/callum-desktop/resources/runtimes/unpacke
 macOS ARM64 实际运行已验证；其他架构的归档校验及交叉构建不能替代对应设备的原生验收。安装包的 ASAR 外资源复制尚未配置，以上命令不生成安装包。
 
 ## 检查与构建
+
+技能 YAML 元数据使用固定 `go.yaml.in/yaml/v3` v3.0.4，标准库没有对应解析能力。该依赖不执行技能脚本或加载供应商 SDK。
+
+技能包不放入 Go 仓库。客户端 `resources/skills/.system/` 保存自带技能并安装到 `DataDir/skills/.system/`，用户技能平铺，用户 name 覆盖同名系统技能。`callum resource-lock --data-dir <路径>` 仅持有同一实例锁，提供就绪与关闭响应，不打开业务数据库或执行业务工具。客户端安装并释放锁后再启动正式服务。
+
+当前完整技能依赖来自用户指定 macOS ARM64 资源，版本 `26.1111.10934-flat`，包含 Artifact Tool、LibreOffice、Poppler。Python 库统一进入 `python/`，Node 库进入 `node/node_modules/`，原生命令进入 `native/`；裸 `python3` 和技能查询共用 Python 3.12.14。其他三个平台的完整 Office 原生依赖仍未准备。
+
+真实客户端技能的后端调用链验证需显式传入资源目录，测试仍仅使用临时数据：
+
+```sh
+CALLUM_TEST_RUNTIME_DIR=/absolute/path/callum-desktop/resources/runtimes/unpacked/darwin-arm64 \
+CALLUM_TEST_SKILLS_DIR=/absolute/path/callum-desktop/resources/skills \
+  go test -mod=readonly -race -timeout 60s ./internal/app -run BundledOfficeSkills
+```
+
+客户端负责真实格式生成、修改、重算、渲染和交付文件的集成检查。受控模型回归与真实厂商模型验收分别记录。
 
 Shell 语法静态校验依赖固定的 `mvdan.cc/sh/v3` v3.14.1，仅使用 `syntax`，不使用其解释执行器；标准库没有对应 Shell 语法树解析能力。依赖更新必须同时复验简单包装拒绝与必要 Shell 保留。
 

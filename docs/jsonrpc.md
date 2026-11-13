@@ -636,7 +636,17 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 默认 workspace-write 模式下，`never` 允许纯读取、工作区内普通补丁及普通沙箱命令；read-only 模式下补丁修改需要审批并被 never 拒绝。其他情况下，纯读取及工作区内普通补丁修改仍可执行，无工作区或工作区外普通修改、大范围覆盖及其他需要审批的操作直接拒绝。删除、外发类别使用受控工具测试验证，并不表示存在相应产品工具。
 
-## 12. 图片输入
+## 12. 附件输入与文件交付
+
+普通文件以 `file` 内容块提交，不要求模型启用图片类型：
+
+```json
+{"jsonrpc":"2.0","id":"chat-file","method":"conversation.send","params":{"model_id":"<model_id>","stream":true,"content":[{"type":"text","text":"请分析文档。"},{"type":"file","path":"<absolute_file_path>","name":"report.docx"}]}}
+```
+
+服务受理时保存独立副本，消息块返回 `attachment_ref`、`name`、`mime`、`size`。零字节文件允许提交，JSON 中零大小可能省略。发送给模型的是附件元数据，正文由 Agent 按需读取：读取技能说明、用 `open_attachment` 获取本轮副本，再通过命令工具运行技能脚本或解释器。文件不经 Responses API 预处理，也不自动转成提示词全文。格式能力由客户端实际提供的技能和依赖决定。
+
+每条消息的图片和文件合计最多 8 个，单个原件最多 16 MiB，合计最多 32 MiB。选择、移除和保留文件使用与图片相同的消息受理及重发事务。以下图片能力和像素规则只作用于 `image` 内容块。
 
 仅在厂商模型实际支持图片输入时执行。以下完整更新记录模型能力，并通过 `model_type` 选择启用文本、图片类型；其余可选元数据会清空：
 
@@ -656,11 +666,21 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 每条消息最多 8 张图，原文件每张最多 16 MiB，合计最多 32 MiB。发送版的像素边界为长边 2048、32×32 像素块最多 2500，处理前限制 1600 万像素和单边 16384。PNG 和 JPEG 超过发送边界时等比缩小或重编码。GIF 和 WebP 以原编码发送，超限时提示转换或缩小。发送版单图最多 4 MiB，实际请求 JSON 上限 12 MiB。预检和发送复用本次执行的托管图片准备结果。图片读取、格式和处理上限错误在受理前返回，错误码为 `1013`，`data.kind` 为 `image_read`、`image_format`、`image_limit` 或 `input_limit`。
 
-`conversation.resend` 可提交 `expected_run_id` 和 `retained_attachments`。后者为原提问中保留图片块的零基索引数组，必须与原执行一同提交。服务器只接受该消息的图片索引，新选择的图片继续以 `content` 提交。消息或执行不匹配时拒绝重发。
+`conversation.resend` 可提交 `expected_run_id` 和 `retained_attachments`。后者为原提问中保留图片或文件块的零基索引数组，必须与原执行一同提交。服务器只接受该消息的附件索引，新选择的附件继续以 `content` 提交。消息或执行不匹配时拒绝重发。
 
 `conversation.attachment_preview` 接收 `conversation_id`、`message_id` 和零基 `index`，返回 `{ "mime": "image/png", "data": "<Base64>" }`。客户端可用独立的 `path` 参数预览尚未发送的草稿图。预览使用有界的发送尺寸，原图副本保持原字节。`conversation.context_usage` 接收可选的 `draft_images`，按设置中的单图估算计入草稿用量。
 
 图片读取只接受核对身份后的普通文件，使用已打开的固定句柄。Unix 使用非阻塞打开；路径在检查后被替换为命名管道时明确失败。会话附件属于本机应用数据，发送给模型时遵守上面的图片输入规则。
+
+`view_image` 的稳定图片引用保存在工具步骤上下文中；适配层在整批工具结果之后提供视觉输入。`publish_artifact` 保存独立交付副本，执行结束前追加到助手消息的 `file` 块；后续追问可通过 `open_attachment` 重新读取当前分支中的交付物，不依赖已删除的本轮中间目录。
+
+`conversation.attachment_read` 只接受当前会话、消息和内容块索引，读取原始附件或已发布交付物，不接受任意本地路径：
+
+```json
+{"jsonrpc":"2.0","id":"attachment-read","method":"conversation.attachment_read","params":{"conversation_id":"<conversation_id>","message_id":"<message_id>","index":1,"offset":0}}
+```
+
+返回 `{ "name": "report.docx", "mime": "...", "size": 4096, "offset": 0, "data": "<Base64>", "next_offset": null }`。每段不超过 1 MiB，始终核对完整文件哈希；`next_offset` 为下一段偏移，`null` 表示结束。客户端应校验名称、总量及偏移一致，不能仅凭某一段宣称读取完成。空文件返回空 Base64、大小 `0` 和 `next_offset:null`。已替换消息及跨会话索引拒绝读取。
 
 ## 13. 执行查询和取消
 
@@ -952,7 +972,7 @@ HTTP 状态，不暴露凭据、原始供应商响应体或底层错误链。
 
 ## 20. 非交互命令执行
 
-服务以 `--runtime-dir` 接入内置解释器后，`python`、`python3`、`node` 裸命令固定到可信资源清单入口，命令工具定义版本为 `6`。子进程 PATH 优先使用同套运行时；启动检查全部文件和链接，命令准备复核解释器完整性。审批 `details.read_only_roots` 展示实际只读资源目录，Windows 的 `readable_roots` 同时包含所需标准库和配套资源。工具说明每轮提供直接 `python3`/`node` 调用示例及内置绝对入口，默认不用登录 Shell 包装；只有确需 Shell 语法时才显式使用非登录 Shell 与内置绝对路径。参数及事件契约保持不变，完整资源和权限规则见 [Agent 工具与审批](tools-and-approvals.md#非交互命令执行)。
+服务以 `--runtime-dir` 接入内置解释器后，`python`、`python3`、`node` 裸命令固定到可信资源清单入口，命令工具定义版本为 `9`。子进程 PATH 优先使用同套运行时；启动检查全部文件和链接，命令准备复核解释器完整性。审批 `details.read_only_roots` 展示实际只读资源目录，Windows 的 `readable_roots` 同时包含所需标准库和配套资源。工具说明每轮提供直接 `python3`/`node` 调用示例及内置绝对入口，默认不用登录 Shell 包装；只有确需 Shell 语法时才显式使用非登录 Shell 与内置绝对路径。参数及事件契约保持不变，完整资源和权限规则见 [Agent 工具与审批](tools-and-approvals.md#非交互命令执行)。
 
 `run_command` 是模型工具，通过 `conversation.send` 请求任务，不能将以下工具参数直接作为 stdio 请求发送：
 

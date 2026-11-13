@@ -16,6 +16,9 @@ import (
 // Execute 只在受理响应已排队后运行；标题任务在终态前取消并等待退出。
 func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved) {
 	err := e.initialEvents(ex)
+	if err == nil && e.options.Attachments != nil {
+		_, err = e.options.Attachments.Begin(ctx, ex.Conversation.ID, ex.Run.ID)
+	}
 	e.beginContextUsage(ex, resolved)
 	defer e.endContextUsage(ex)
 	if ex.Run.SettingsSnapshot == nil || !ex.Run.SettingsSnapshot.Valid() {
@@ -34,6 +37,18 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	}
 	titleCancel()
 	titleWG.Wait()
+	if e.options.Attachments != nil {
+		if files, ok := e.options.Attachments.Files(ex.Conversation.ID, ex.Run.ID); ok && len(files.Artifacts) > 0 {
+			cleanup, cancel := cleanupContext(ctx)
+			message, readErr := e.latestMessage(cleanup, ex)
+			cancel()
+			if readErr == nil {
+				readErr = e.saveAnswer(ctx, ex, append(message.Content, files.Artifacts...), "")
+			}
+			err = errors.Join(err, readErr)
+		}
+		err = errors.Join(err, e.options.Attachments.End(ex.Run.ID))
+	}
 	if cancelErr := lease.Finishing(); cancelErr != nil {
 		err = errors.Join(cancelErr, err)
 	}

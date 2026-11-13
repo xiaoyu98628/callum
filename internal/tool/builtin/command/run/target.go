@@ -35,6 +35,7 @@ type fixedCommand struct {
 	launchArguments                                        []string
 	sandboxState                                           sandboxState
 	readOnlyDirectories                                    []*fixedPath
+	workDirectory                                          *fixedPath
 }
 
 func cleanDirectory(path string) (string, error) {
@@ -149,6 +150,15 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 		return nil, err
 	}
 	fixed.command[0] = fixed.executable.actual
+	if permissions.WorkDirectory != "" {
+		if !filepath.IsAbs(permissions.WorkDirectory) {
+			return nil, tool.ErrDenied
+		}
+		fixed.workDirectory, err = pinPath(permissions.WorkDirectory, true)
+		if err != nil {
+			return nil, err
+		}
+	}
 	fixed.environment = append(fixed.environment, "PWD="+fixed.directory.actual)
 	for _, directory := range protection.ReadOnlyDirectories {
 		if !filepath.IsAbs(directory) {
@@ -157,6 +167,10 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 		root, err := pinPath(directory, true)
 		if err != nil {
 			return nil, err
+		}
+		// 装配层传入真实路径。拒绝后续把只读根替换为链接而扩大应用数据读取例外。
+		if root.actual != filepath.Clean(directory) {
+			return nil, errors.Join(tool.ErrDenied, root.file.Close())
 		}
 		fixed.readOnlyDirectories = append(fixed.readOnlyDirectories, root)
 	}
@@ -191,6 +205,7 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 		WritableRoots            []string             `json:"writable_roots"`
 		ReadableRoots            []string             `json:"readable_roots,omitempty"`
 		ReadOnlyRoots            []string             `json:"read_only_roots,omitempty"`
+		RunWorkDirectory         string               `json:"run_work_directory,omitempty"`
 		TemporaryDirectoryPolicy string               `json:"temporary_directory_policy,omitempty"`
 		NetworkAccess            bool                 `json:"network_access"`
 		Justification            string               `json:"justification,omitempty"`
@@ -204,6 +219,10 @@ func prepare(ctx context.Context, scope tool.Scope, a arguments, environment []s
 		details.SandboxBackend = fixed.sandboxBackend()
 		details.ReadableRoots = fixed.sandboxState.readableRoots()
 		details.TemporaryDirectoryPolicy = "private-per-command"
+		if fixed.workDirectory != nil {
+			details.RunWorkDirectory = fixed.workDirectory.actual
+			details.TemporaryDirectoryPolicy = "private-per-command-and-run"
+		}
 		if fixed.workspace != nil && fixed.boundary.Mode == tool.SandboxWorkspaceWrite {
 			details.WritableRoots = append(details.WritableRoots, fixed.workspace.actual)
 		}
@@ -240,7 +259,7 @@ func (p *fixedCommand) check(ctx context.Context) error {
 			return err
 		}
 	}
-	for _, path := range []*fixedPath{p.sandboxExecutable, p.temporaryParent, p.protectedDirectory} {
+	for _, path := range []*fixedPath{p.sandboxExecutable, p.temporaryParent, p.protectedDirectory, p.workDirectory} {
 		if path != nil {
 			if err := path.check(path == p.sandboxExecutable); err != nil {
 				return err
@@ -260,7 +279,7 @@ func (p *fixedCommand) check(ctx context.Context) error {
 
 func (p *fixedCommand) close() error {
 	err := p.sandboxState.close()
-	for _, path := range append([]*fixedPath{p.executable, p.directory, p.workspace, p.sandboxExecutable, p.temporaryParent, p.protectedDirectory}, p.readOnlyDirectories...) {
+	for _, path := range append([]*fixedPath{p.executable, p.directory, p.workspace, p.sandboxExecutable, p.temporaryParent, p.protectedDirectory, p.workDirectory}, p.readOnlyDirectories...) {
 		if path != nil {
 			err = errors.Join(err, path.file.Close())
 		}

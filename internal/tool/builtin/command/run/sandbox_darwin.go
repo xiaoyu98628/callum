@@ -67,9 +67,26 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 		p.boundary.CreatesWorkspaceDirectory = p.createsWorkspaceDirectory()
 	}
 	p.profile = seatbeltProfile(projectWrite, p.protectedDirectory != nil)
+	if p.protectedDirectory != nil {
+		// deny 优先于 allow，必须从原有数据读取拒绝规则中排除固定的只读技能子树。
+		var exclusions strings.Builder
+		for i, root := range p.readOnlyDirectories {
+			if (tool.ProtectedData{Directory: p.protectedDirectory.actual}).Contains(root.actual) {
+				exclusions.WriteString(fmt.Sprintf(" (require-not (subpath (param \"RUNTIME_ROOT_%d\")))", i))
+			}
+		}
+		if exclusions.Len() > 0 {
+			// 原生程序解析资源绝对路径需要查询父目录元数据；根目录枚举仍单独拒绝。
+			p.profile = strings.Replace(p.profile, `(deny file-read* (subpath (param "APP_DATA")))`, `(deny file-read* (require-all (subpath (param "APP_DATA")) (require-not (literal (param "APP_DATA")))`+exclusions.String()+`))`+"\n"+`(deny file-read-data (literal (param "APP_DATA")))`, 1)
+		}
+	}
 	ancestorArguments := p.protectDataAncestors(projectWrite)
 	p.launchArguments = []string{p.sandboxExecutable.actual, "-p", p.profile, "-D", "COMMAND_TEMP=" + p.temporaryPath}
 	p.launchArguments = append(p.launchArguments, ancestorArguments...)
+	if p.workDirectory != nil {
+		p.profile += `(allow file-write* (require-all (subpath (param "RUN_WORK")) (require-not (regex #"(^|/)[.](git|codex|agents|aws)(/|$)"))))` + "\n"
+		p.launchArguments = append(p.launchArguments, "-D", "RUN_WORK="+p.workDirectory.actual)
+	}
 	for i, root := range p.readOnlyDirectories {
 		key := fmt.Sprintf("RUNTIME_ROOT_%d", i)
 		p.profile += fmt.Sprintf("(deny file-write* (subpath (param \"%s\")))\n", key)

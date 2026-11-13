@@ -61,7 +61,7 @@ func TestSeatbeltKeepsBundledResourcesReadOnlyInsideWorkspace(t *testing.T) {
 		}
 		result, executeErr := call.Execute(t.Context())
 		if err := errors.Join(executeErr, call.Close()); err != nil {
-			t.Fatal(err)
+			t.Fatalf("%v: %v %s", command, err, result.Output)
 		}
 		report := decodeReport(t, result)
 		if report.ExitCode == nil || *report.ExitCode == 0 {
@@ -70,6 +70,71 @@ func TestSeatbeltKeepsBundledResourcesReadOnlyInsideWorkspace(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("运行时目录出现了工具写入")
+	}
+}
+
+func TestSeatbeltAllowsSkillsOnlyWithinPrivateData(t *testing.T) {
+	workspace := t.TempDir()
+	workspace, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := filepath.Join(workspace, "data")
+	skills := filepath.Join(data, "skills")
+	if err := os.MkdirAll(skills, 0700); err != nil {
+		t.Fatal(err)
+	}
+	database := filepath.Join(data, "callum.db")
+	entry := filepath.Join(skills, "SKILL.md")
+	for path, content := range map[string]string{database: "private-database", entry: "skill-fixture"} {
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	instance := New(os.Environ(), tool.ProtectedData{Directory: data, Database: database, ReadOnlyDirectories: []string{skills}}).(*commandTool)
+	for _, test := range []struct {
+		command []string
+		success bool
+	}{
+		{[]string{"/bin/cat", entry}, true},
+		{[]string{"/usr/bin/stat", "-f", "%N", data}, true},
+		{[]string{"/bin/ls", data}, false},
+		{[]string{"/usr/bin/stat", "-f", "%N", database}, false},
+		{[]string{"/bin/cat", database}, false},
+		{[]string{"/usr/bin/touch", filepath.Join(skills, "blocked")}, false},
+	} {
+		raw, err := json.Marshal(arguments{Command: test.command, Cwd: workspace})
+		if err != nil {
+			t.Fatal(err)
+		}
+		call, err := instance.PrepareWithPermissions(t.Context(), tool.Scope{ID: "test", RootPath: workspace}, raw, tool.ExecutionPermissions{SandboxMode: tool.SandboxReadOnly})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, executeErr := call.Execute(t.Context())
+		if err := errors.Join(executeErr, call.Close()); err != nil {
+			t.Fatal(err)
+		}
+		report := decodeReport(t, result)
+		if report.ExitCode == nil || (*report.ExitCode == 0) != test.success {
+			t.Fatalf("技能读取边界错误: %v %s", test.command, result.Output)
+		}
+	}
+	if err := os.Rename(skills, filepath.Join(data, "old-skills")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(data, skills); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(arguments{Command: []string{"/bin/cat", database}, Cwd: workspace})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call, err := instance.PrepareWithPermissions(t.Context(), tool.Scope{ID: "test", RootPath: workspace}, raw, tool.ExecutionPermissions{SandboxMode: tool.SandboxReadOnly}); !errors.Is(err, tool.ErrDenied) {
+		if call != nil {
+			_ = call.Close()
+		}
+		t.Fatalf("技能根被链接替换后扩大了读取例外: %v", err)
 	}
 }
 
