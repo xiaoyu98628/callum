@@ -13,6 +13,8 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model"
 )
 
+var errSummaryTimeout = errors.New("生成历史摘要超时")
+
 // requestFailure 只保留受控错误信息，不保存可能回显凭据的供应商错误体。
 type requestFailure struct {
 	HTTPStatus int    `json:"http_status,omitempty"`
@@ -53,6 +55,8 @@ func failure(err error) (status, kind, message string) {
 		return status, "internal", "保存执行数据失败"
 	case errors.Is(err, context.Canceled):
 		return agent.Cancelled, "cancelled", "执行已取消"
+	case errors.Is(err, errSummaryTimeout):
+		return status, "timeout", "生成历史摘要超时，原有历史已保留"
 	case errors.Is(err, context.DeadlineExceeded):
 		return status, "timeout", "执行超时"
 	case errors.Is(err, agent.ErrOutputLimit):

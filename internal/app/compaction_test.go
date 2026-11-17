@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,8 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model/tokens"
 	"github.com/xiaoyu98628/callum/internal/settings"
 )
+
+const compactionFencedSummary = 4
 
 type compactModel struct {
 	mode        atomic.Int32
@@ -57,6 +60,8 @@ func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
 			switch m.mode.Load() {
 			case 1:
 				text = "不符合结构的摘要"
+			case compactionFencedSummary:
+				text = "```json\n" + text + "\n```"
 			case 3:
 				large := strings.Repeat("x", 14000)
 				content, err := json.Marshal(map[string][]string{"goals": {large}, "constraints": {large}, "decisions": {large}, "facts": {large}, "open_questions": {}})
@@ -291,6 +296,7 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.CallTimeout = 2 * time.Second
 	p := startApp(t, cfg, io.Discard)
 	mid := setupConversationModel(t, p, server.URL)
 	compression := settings.DefaultCompaction()
@@ -319,13 +325,63 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 	for i := range 2 {
 		cid = compactSend(t, p, mid, cid, fmt.Sprintf("较早问题%d-", i)+strings.Repeat("历史内容", 300))
 	}
-	cid = compactSend(t, p, mid, cid, "当前问题必须保持原样")
-	if versions := contextVersions(t, p, cid); len(versions) != 1 || versions[0].ThroughSequence != 2 {
+	before := readMessages(t, p, cid)
+	upstream.mode.Store(2)
+	const question = "当前问题必须保持原样"
+	const summaryTimeout = "生成历史摘要超时，原有历史已保留"
+	runID := resultString(t, p.call(t, "conversation.send", map[string]any{"conversation_id": cid, "model_id": mid, "stream": false, "content": messageBlocks(question)}), "run_id")
+	failure := p.event(t, "run.failed")
+	var terminal struct {
+		Run   agent.Run
+		Error struct{ Kind, Message string }
+	}
+	if err := json.Unmarshal(failure.Params, &terminal); err != nil ||
+		terminal.Run.ID != runID || terminal.Error.Kind != "timeout" || terminal.Error.Message != summaryTimeout {
+		t.Fatalf("摘要超时通知错误: %s, %v", failure.Params, err)
+	}
+	stepsFrame := p.call(t, "step.list", map[string]any{"run_id": runID})
+	requireOK(t, stepsFrame)
+	var failedSteps []agent.StepSummary
+	if err := json.Unmarshal(stepsFrame.Result, &failedSteps); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"压缩历史上下文", "生成历史摘要"} {
+		var found bool
+		for _, step := range failedSteps {
+			if step.Name != name {
+				continue
+			}
+			found = true
+			if step.Status != agent.Failed || step.ErrorKind == nil || *step.ErrorKind != "timeout" ||
+				step.ErrorMessage == nil || *step.ErrorMessage != summaryTimeout ||
+				step.StartedAt == nil || step.FinishedAt == nil || *step.FinishedAt <= *step.StartedAt {
+				t.Fatalf("摘要超时未保存正确步骤或计时: %s", stepsFrame.Result)
+			}
+		}
+		if !found {
+			t.Fatalf("缺少 %s 步骤: %s", name, stepsFrame.Result)
+		}
+	}
+	if versions := contextVersions(t, p, cid); len(versions) != 1 || versions[0].Status != "failed" || versions[0].ActivatedAt != nil {
+		t.Fatalf("超时后留下了有效摘要: %+v", versions)
+	}
+	failedRows := readMessages(t, p, cid)
+	if len(failedRows) != len(before)+2 || !reflect.DeepEqual(failedRows[:len(before)], before) {
+		t.Fatal("摘要超时后原有历史被改动")
+	}
+
+	upstream.mode.Store(compactionFencedSummary)
+	requireOK(t, p.call(t, "conversation.resend", map[string]any{"conversation_id": cid, "message_id": failedRows[len(before)].ID, "stream": false, "content": messageBlocks(question)}))
+	p.event(t, "run.completed")
+	if versions := contextVersions(t, p, cid); len(versions) != 2 || versions[0].Status != "active" || versions[0].ThroughSequence != 2 {
 		t.Fatalf("Token 预算或保留轮次错误: %+v", versions)
 	}
 	upstream.mu.Lock()
 	request := upstream.answers["当前问题必须保持原样"]
 	upstream.mu.Unlock()
+	if !strings.Contains(request, "conversation_context_summary") || strings.Contains(request, "```json") {
+		t.Fatal("后续回答未收到规范化的摘要 JSON")
+	}
 	if !strings.Contains(request, "当前问题必须保持原样") || !strings.Contains(request, "较早问题1") || strings.Contains(request, "较早问题0") {
 		t.Fatal("Token 触发压缩吞掉了保留轮次或当前问题")
 	}

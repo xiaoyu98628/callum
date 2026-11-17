@@ -21,7 +21,14 @@ func Validate(text string) (string, error) {
 	if len(text) > MaxSummaryBytes || !utf8.ValidString(text) {
 		return "", model.ErrInvalidResponse
 	}
-	d := json.NewDecoder(strings.NewReader(strings.TrimSpace(text)))
+	text = strings.TrimSpace(text)
+	// 只剥离包住整段响应的 JSON 围栏。解析器仍要求内容恰好是一个完整对象。
+	if header, rest, found := strings.Cut(text, "\n"); found && strings.TrimRight(header, " \t\r") == "```json" {
+		if body, footer, found := strings.CutLast(rest, "\n"); found && strings.TrimLeft(footer, " \t") == "```" {
+			text = strings.TrimSpace(body)
+		}
+	}
+	d := json.NewDecoder(strings.NewReader(text))
 	if token, err := d.Token(); err != nil || token != json.Delim('{') {
 		return "", model.ErrInvalidResponse
 	}

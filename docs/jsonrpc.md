@@ -462,6 +462,10 @@ result 包含 conversation_id（新对话为空）、model_id、可选 run_id、
 
 每批创建 `context_compression` 步骤，其 `input.trigger` 保存 type（manual/automatic）和 reason；自动触发另含 token_budget 和 estimate（input_tokens、method、可选 reference_input_tokens），另保存压缩设置版本、来源数量和覆盖顺序；子 `model_call` 的 purpose 为 `context_summary`，只由该子步骤保存实际 usage。摘要模型不获得工具。成功父步骤 output 包含 `compressed:true`、`context_version_id`、`size_stats`；摘要正文通过版本详情查询。回答模型步骤 input.context_version_id 指向实际使用的有效摘要；摘要模型步骤的 generated_context_version_id 指向它正在生成的版本，可另带实际输入的 context_version_id。
 
+摘要请求超时时，`run.failed` 及压缩和摘要步骤的 `error_kind` 为 `timeout`，`error_message` 为「生成历史摘要超时，原有历史已保留」。历史消息、审计记录及此前已生效的摘要继续可查。
+
+摘要模型可返回纯 JSON 或独立的单个 `json` Markdown 代码块。摘要版本和执行内检查点均保存规范化后的 JSON，摘要子步骤仍保留模型原始响应。
+
 摘要结构、大小、压缩收益及来源验证失败均保留旧有效版本，本次执行明确失败，不自动重试模型或工具。重启将未结束压缩执行标记为 interrupted、building 版本标记为 failed，不重放旧通知。已经事务提交的有效版本不会因随后取消或退出被回滚。
 
 #### conversation.context_versions / conversation.context_version
