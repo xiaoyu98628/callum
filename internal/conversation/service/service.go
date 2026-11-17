@@ -14,8 +14,10 @@ import (
 	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
 	"github.com/xiaoyu98628/callum/internal/attachment"
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/skills"
 )
 
 // Service 负责会话业务与发送受理；异步执行由注入的 Engine 完成。
@@ -25,13 +27,14 @@ type Service struct {
 	manager     *executor.Manager
 	engine      *agentservice.Engine
 	attachments *attachment.Store
+	skills      *skills.Store
 }
 
-func New(repository conversation.Repository, resolve agent.Resolver, manager *executor.Manager, engine *agentservice.Engine, attachments *attachment.Store) (*Service, error) {
-	if repository == nil || resolve == nil || manager == nil || engine == nil || attachments == nil {
+func New(repository conversation.Repository, resolve agent.Resolver, manager *executor.Manager, engine *agentservice.Engine, attachments *attachment.Store, skillStore *skills.Store) (*Service, error) {
+	if repository == nil || resolve == nil || manager == nil || engine == nil || attachments == nil || skillStore == nil {
 		return nil, conversation.ErrInvalid
 	}
-	return &Service{repository: repository, resolve: resolve, manager: manager, engine: engine, attachments: attachments}, nil
+	return &Service{repository: repository, resolve: resolve, manager: manager, engine: engine, attachments: attachments, skills: skillStore}, nil
 }
 
 func validID(id string) bool {
@@ -127,10 +130,16 @@ func validate(in conversation.Send) error {
 		return conversation.ErrInvalid
 	}
 	meaningful := len(in.RetainedAttachments) != 0
+	hasSkill := false
 	size := 0
 	for _, block := range in.Content {
 		size += len(block.Text) + len(block.Path) + len(block.AttachmentRef) + len(block.Name) + len(block.MIME)
 		switch block.Type {
+		case "skill":
+			if hasSkill || block.Name == "" || len(block.Name) > 128 || !utf8.ValidString(block.Name) || !filepath.IsAbs(block.Path) || filepath.Clean(block.Path) != block.Path || block.Text != "" || block.AttachmentRef != "" || block.MIME != "" || block.Size != 0 {
+				return conversation.ErrInvalid
+			}
+			hasSkill = true
 		case "text":
 			if block.Path != "" || block.AttachmentRef != "" || block.Name != "" || block.MIME != "" || block.Size != 0 || !utf8.ValidString(block.Text) {
 				return conversation.ErrInvalid
@@ -167,6 +176,9 @@ func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(
 		return err
 	}
 	in.Content = append([]model.Block(nil), in.Content...)
+	if err := s.validateSkills(ctx, in.Content); err != nil {
+		return err
+	}
 	create := in.ConversationID == ""
 	if create {
 		if in.ModelID == "" {
@@ -235,7 +247,7 @@ func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(
 		}
 		if validator, ok := resolved.Client.(model.InputValidator); ok {
 			req := model.Request{Model: resolved.Snapshot.RemoteModelID, AllowImageInput: resolved.ImageInput,
-				Messages: []model.Message{{Role: model.RoleUser, Blocks: in.Content}}}
+				Messages: []model.Message{{Role: model.RoleUser, Blocks: history.ModelContent(in.Content)}}}
 			if err := validator.ValidateInput(lookup, req); err != nil {
 				return errors.Join(err, batch.Discard())
 			}

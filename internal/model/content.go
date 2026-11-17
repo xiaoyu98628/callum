@@ -1,6 +1,7 @@
 package model
 
-// Block 是对话内容块。图片来源是导入路径或服务端保存的附件引用。
+// Block 是对话内容块。skill 使用 Name 和 Path 保存已核验的技能引用。
+// 图片来源是导入路径或服务端保存的附件引用。
 type Block struct {
 	Type          string `json:"type"`
 	Text          string `json:"text,omitempty"`

@@ -2,6 +2,7 @@ package history
 
 import (
 	"encoding/json"
+	"strings"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/conversation"
@@ -28,7 +29,7 @@ func Assemble(messages []conversation.Message, transcripts map[string][]model.Me
 		if message.Role == "assistant" && (len(transcripts[message.RunID]) > 0 || message.Status != agent.Completed) {
 			continue
 		}
-		out = append(out, model.Message{Role: model.Role(message.Role), Blocks: message.Content})
+		out = append(out, model.Message{Role: model.Role(message.Role), Blocks: ModelContent(message.Content)})
 		if message.Role == "user" {
 			out = append(out, transcripts[message.RunID]...)
 		}
@@ -44,6 +45,37 @@ func Assemble(messages []conversation.Message, transcripts map[string][]model.Me
 		return nil, &model.InputLimitError{Dimension: "历史准备字节", Actual: int64(len(raw)), Limit: 16 << 20}
 	}
 	return out, nil
+}
+
+// ModelContent 将已保存的技能引用转换为模型文本和定位元数据。
+// 原始文字保持独立，标题和消息展示可使用用户正文。
+func ModelContent(content []model.Block) []model.Block {
+	var references []model.Block
+	var names []string
+	for _, block := range content {
+		if block.Type == "skill" {
+			references = append(references, block)
+			names = append(names, "$"+block.Name)
+		}
+	}
+	if len(references) == 0 {
+		return content
+	}
+	blocks := []model.Block{{Type: "text", Text: strings.Join(names, " ")}}
+	first := true
+	for _, block := range content {
+		if block.Type == "skill" {
+			continue
+		}
+		if first && block.Type == "text" {
+			blocks[0].Text += " " + block.Text
+		} else {
+			blocks = append(blocks, block)
+		}
+		first = false
+	}
+	data, _ := json.Marshal(map[string]any{"skills": references}) // Block 的字段均可 JSON 编码。
+	return append(blocks, model.Block{Type: "text", Text: "\n\n" + string(data)})
 }
 
 // Check 限制消息数量和实际序列化大小，不估算 Token。

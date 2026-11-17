@@ -310,6 +310,14 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 ### conversation.send：首次提问，非流式模型响应
 
+选择技能时在 `content` 中附上独立的 `skill` 内容块，`name` 和规范绝对 `path` 必须来自 `skills.list`。每条消息支持一个引用，任务正文使用独立的 `text` 块。`conversation.resend` 使用相同约定，重发时可移除或替换技能。
+
+```json
+{"jsonrpc":"2.0","id":"chat-skill","method":"conversation.send","params":{"model_id":"<model_id>","content":[{"type":"skill","name":"documents","path":"<skills.list 返回的入口路径>"},{"type":"text","text":"解析一下"}]}}
+```
+
+服务受理时按当前目录核对名称和入口，同名覆盖、已删除或目录外入口匹配失败返回 `-32602`。引用和正文保存在消息内容中。模型上下文使用 `$documents 解析一下`，同时提供所选名称和路径的 JSON 元数据以区分同名技能。标题使用任务正文。技能引用沿用工具权限和审批规则。
+
 ```json
 {"jsonrpc":"2.0","id":"chat-first","method":"conversation.send","params":{"model_id":"<model_id>","stream":false,"content":[{"type":"text","text":"我叫小雨，请记住我的名字。"}]}}
 ```
