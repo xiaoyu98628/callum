@@ -42,6 +42,10 @@ func (s *Server) handle(c *transport.Connection, line []byte) (bool, error) {
 		value, err := s.settings.Handle(ctx, req)
 		return false, reply(value, err)
 	}
+	if req.Method == "skills.list" && s.skills != nil {
+		value, err := s.skills.List(ctx, req)
+		return false, reply(value, err)
+	}
 	var result any
 	var rpcErr *protocol.Error
 	stop := false

@@ -82,6 +82,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | 应用设置 | `settings.get`、`settings.update` |
 | 厂商 | `provider.create`、`provider.update`、`provider.get`、`provider.list`、`provider.delete` |
 | 模型配置 | `model.create`、`model.update`、`model.get`、`model.list`、`model.set_enabled`、`model.delete` |
+| 技能 | `skills.list` |
 | 无历史调用 | `model.invoke` |
 | 工作区 | `workspace.create`、`workspace.update`、`workspace.get`、`workspace.list`、`workspace.delete`、`workspace.restore` |
 | 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.history`、`conversation.attachment_preview`、`conversation.delete`、`conversation.restore` |
@@ -93,6 +94,14 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | 用户补充输入 | `user_input.get`、`user_input.list`、`user_input.submit` |
 
 不存在 `conversation.create` 或客户端直接执行工具的 JSON-RPC 方法。首次提问创建会话，工具由模型自主选择。
+
+### skills.list
+
+```json
+{"jsonrpc":"2.0","id":"skills-list","method":"skills.list","params":{}}
+```
+
+返回当前已发现的技能数组。每项包含 `name`、`description`、实际入口的绝对路径 `path`、`source`（`system` 或 `user`），以及为真时提供的 `explicit_only`。每次请求重新发现，沿用模型上下文的扫描边界和同名用户技能优先规则。空目录返回 `[]`，读取失败返回 `-32603`。列表只包含元数据。
 
 ## 3. 推荐测试顺序
 

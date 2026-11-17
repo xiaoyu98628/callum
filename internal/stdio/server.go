@@ -14,11 +14,13 @@ import (
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
 	settingsservice "github.com/xiaoyu98628/callum/internal/settings/service"
+	"github.com/xiaoyu98628/callum/internal/skills"
 	approvalhandler "github.com/xiaoyu98628/callum/internal/stdio/approval"
 	"github.com/xiaoyu98628/callum/internal/stdio/catalog"
 	conversationhandler "github.com/xiaoyu98628/callum/internal/stdio/conversation"
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
 	settingshandler "github.com/xiaoyu98628/callum/internal/stdio/settings"
+	skillshandler "github.com/xiaoyu98628/callum/internal/stdio/skills"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
 	userinputhandler "github.com/xiaoyu98628/callum/internal/stdio/userinput"
 	workspacehandler "github.com/xiaoyu98628/callum/internal/stdio/workspace"
@@ -35,12 +37,13 @@ type Server struct {
 	logger       *slog.Logger
 	approvals    *approvalhandler.Handler
 	settings     *settingshandler.Handler
+	skills       *skillshandler.Handler
 	inputs       *userinputhandler.Handler
 }
 
 // NewWithConversations 装配普通对话接口；所有服务和资源仍由 app 持有。
-func NewWithConversations(providers *providerservice.Service, runs *executor.Manager, workspaces *workspaceservice.Service, conversations *conversationservice.Service, persistent *agentservice.Engine, approvals *approval.Service, settings *settingsservice.Service, accepted func(string) error, logger *slog.Logger) (*Server, error) {
-	if workspaces == nil || conversations == nil || persistent == nil || approvals == nil || settings == nil || accepted == nil {
+func NewWithConversations(providers *providerservice.Service, runs *executor.Manager, workspaces *workspaceservice.Service, conversations *conversationservice.Service, persistent *agentservice.Engine, approvals *approval.Service, settings *settingsservice.Service, skillStore *skills.Store, accepted func(string) error, logger *slog.Logger) (*Server, error) {
+	if workspaces == nil || conversations == nil || persistent == nil || approvals == nil || settings == nil || skillStore == nil || accepted == nil {
 		return nil, errors.New("对话服务不能为空")
 	}
 	s, err := New(providers, runs, logger)
@@ -49,6 +52,7 @@ func NewWithConversations(providers *providerservice.Service, runs *executor.Man
 	}
 	s.approvals = approvalhandler.New(approvals)
 	s.settings = settingshandler.New(settings)
+	s.skills = skillshandler.New(skillStore)
 	s.inputs = userinputhandler.New(persistent)
 	s.workspace = workspacehandler.New(workspaces)
 	s.conversation = conversationhandler.New(conversations, accepted)

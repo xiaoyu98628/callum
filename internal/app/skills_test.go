@@ -11,13 +11,68 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/xiaoyu98628/callum/internal/config"
+	"github.com/xiaoyu98628/callum/internal/skills"
 )
+
+func TestSkillsListRefreshesWithoutExposingBody(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := startApp(t, cfg, io.Discard)
+	list := func() []skills.Entry {
+		t.Helper()
+		frame := p.call(t, "skills.list", struct{}{})
+		var entries []skills.Entry
+		if frame.Error != nil || json.Unmarshal(frame.Result, &entries) != nil || entries == nil {
+			t.Fatalf("技能目录结果无效: %+v", frame)
+		}
+		if strings.Contains(string(frame.Result), "正文哨兵") {
+			t.Fatal("技能列表包含技能正文")
+		}
+		return entries
+	}
+	if got := list(); len(got) != 0 {
+		t.Fatalf("空技能目录: %+v", got)
+	}
+	if got := p.call(t, "skills.list", map[string]string{"directory": t.TempDir()}); got.Error == nil || got.Error.Code != -32602 {
+		t.Fatalf("技能目录应拒绝调用方指定路径: %+v", got)
+	}
+	write := func(relative, description string) string {
+		t.Helper()
+		path := filepath.Join(cfg.DataDir, "skills", filepath.FromSlash(relative), "SKILL.md")
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("---\nname: review\ndescription: "+description+"\n---\n正文哨兵\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		actual, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return actual
+	}
+	bundled := write(".system/review", "系统示例")
+	user := write("review", "用户版本")
+	if got := list(); !slices.Equal(got, []skills.Entry{{Name: "review", Description: "用户版本", Path: user, Source: "user"}}) {
+		t.Fatalf("同名用户技能优先: %+v", got)
+	}
+	if err := os.Remove(user); err != nil {
+		t.Fatal(err)
+	}
+	if got := list(); !slices.Equal(got, []skills.Entry{{Name: "review", Description: "系统示例", Path: bundled, Source: "system"}}) {
+		t.Fatalf("删除后应恢复系统技能: %+v", got)
+	}
+}
 
 func TestBundledOfficeSkillsThroughAgentAndFollowUp(t *testing.T) {
 	t.Parallel()
