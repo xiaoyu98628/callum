@@ -32,13 +32,14 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 		var p struct {
 			ConversationID string `json:"conversation_id"`
 			MessageID      string `json:"message_id"`
+			ExpectedRunID  string `json:"expected_run_id,omitempty"`
 			Index          int    `json:"index"`
 			Offset         int64  `json:"offset"`
 		}
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
 			return reply(nil, rpcErr)
 		}
-		value, err = h.service.ReadAttachmentChunk(ctx, p.ConversationID, p.MessageID, p.Index, p.Offset)
+		value, err = h.service.ReadAttachmentChunk(ctx, p.ConversationID, p.MessageID, p.ExpectedRunID, p.Index, p.Offset)
 	case "conversation.history":
 		var p struct {
 			ConversationID string `json:"conversation_id"`

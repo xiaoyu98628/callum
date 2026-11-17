@@ -22,6 +22,8 @@ func publicError(err error) *protocol.Error {
 		return &protocol.Error{Code: 1006, Message: "该会话正在执行"}
 	case errors.Is(err, domain.ErrInactive):
 		return &protocol.Error{Code: 1003, Message: "会话或工作区已归档或删除"}
+	case errors.Is(err, domain.ErrAttachmentChanged):
+		return &protocol.Error{Code: 1003, Message: domain.ErrAttachmentChanged.Error()}
 	case errors.Is(err, domain.ErrConflict):
 		return &protocol.Error{Code: 1003, Message: "只能编辑最后一条用户消息并重发"}
 	default:

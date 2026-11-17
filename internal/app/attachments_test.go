@@ -2,7 +2,9 @@ package app
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"image"
 	"image/png"
@@ -117,11 +119,28 @@ func TestAttachmentHistoryResendAndRecovery(t *testing.T) {
 	if err := json.Unmarshal(preview.Result, &view); err != nil || view.MIME != "image/png" || !bytes.Equal(view.Data, original.Bytes()) {
 		t.Fatalf("重启预览不一致: %v", err)
 	}
+	read := func(expected string) wireFrame {
+		return p.call(t, "conversation.attachment_read", map[string]any{
+			"conversation_id": conv, "message_id": user, "expected_run_id": expected, "index": 0, "offset": 0,
+		})
+	}
+	firstRead := read(run)
+	requireOK(t, firstRead)
+	var chunk conversation.AttachmentChunk
+	digest := sha256.Sum256(original.Bytes())
+	if err := json.Unmarshal(firstRead.Result, &chunk); err != nil || chunk.RunID != run ||
+		chunk.SHA256 != hex.EncodeToString(digest[:]) || !bytes.Equal(chunk.Data, original.Bytes()) {
+		t.Fatalf("读取结果未绑定附件与消息版本: %+v %v", chunk, err)
+	}
 	resend := p.call(t, "conversation.resend", map[string]any{
 		"conversation_id": conv, "message_id": user, "model_id": modelID, "stream": false,
 		"expected_run_id": run, "retained_attachments": []int{0}, "content": []any{},
 	})
 	requireOK(t, resend)
+	if stale := read(run); stale.Error == nil || stale.Error.Code != 1003 {
+		t.Fatalf("旧消息版本仍可另存: %+v", stale)
+	}
+	requireOK(t, read(resultString(t, resend, "run_id")))
 	p.event(t, "run.completed")
 	if calls.Load() != 2 {
 		t.Fatalf("期待原图和重发两次调用，得到 %d", calls.Load())

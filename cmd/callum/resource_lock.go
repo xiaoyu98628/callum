@@ -10,15 +10,21 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"syscall"
+	"time"
 
 	"github.com/xiaoyu98628/callum/internal/config"
+	"github.com/xiaoyu98628/callum/internal/runtimeassets"
 	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 )
 
-// 资源安装由客户端执行；此模式仅持有与服务相同的实例锁，不打开数据库。
+var runtimeStageName = regexp.MustCompile(`^\.runtimes-install-[A-Za-z0-9]+$`)
+
+// 资源安装由客户端执行；此模式持有与服务相同的实例锁并校验安装目录，不打开数据库。
 // 标准流关闭或进程终止即释放锁，避免客户端异常退出留下过期锁状态。
 func runResourceLock(args []string, logger *slog.Logger) int {
 	flags := flag.NewFlagSet("resource-lock", flag.ContinueOnError)
@@ -68,6 +74,10 @@ func holdResourceLock(ctx context.Context, database string, in io.ReadCloser, ou
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, owner.Close()) }()
+	dataDir, err := filepath.EvalSymlinks(filepath.Dir(database))
+	if err != nil {
+		return err
+	}
 	if err := c.Notify("system.ready", map[string]any{"service": "callum", "protocol_version": 1, "max_request_bytes": transport.MaxRequestBytes, "max_response_bytes": transport.MaxResponseBytes, "resource_lock": true}); err != nil {
 		return err
 	}
@@ -89,9 +99,40 @@ func holdResourceLock(ctx context.Context, database string, in io.ReadCloser, ou
 		if req.Method == "system.shutdown" && protocol.DecodeParams(req.Params, &params) == nil {
 			return c.Reply(req, map[string]bool{"shutdown": true}, nil)
 		}
+		if req.Method == "runtime.validate" {
+			if err := validateRuntimeDirectory(c, req, dataDir); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := c.Reply(req, nil, protocol.MethodNotFound()); err != nil {
 			return err
 		}
 	}
 	return c.NormalizeError(scanner.Err())
+}
+
+func validateRuntimeDirectory(c *transport.Connection, req protocol.Request, dataDir string) error {
+	var params struct {
+		Name string `json:"name"`
+	}
+	if err := protocol.DecodeParams(req.Params, &params); err != nil {
+		return c.Reply(req, nil, err)
+	}
+	if params.Name != "runtimes" && !runtimeStageName.MatchString(params.Name) {
+		return c.Reply(req, nil, protocol.InvalidParams())
+	}
+	path := filepath.Join(dataDir, params.Name)
+	info, err := os.Lstat(path)
+	valid := false
+	if err == nil && info.IsDir() {
+		ctx, cancel := context.WithTimeout(c.Context(), 30*time.Second)
+		_, err = runtimeassets.Load(ctx, path)
+		cancel()
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return c.Reply(req, nil, &protocol.Error{Code: -32603, Message: "运行时目录校验未完成"})
+		}
+		valid = err == nil
+	}
+	return c.Reply(req, map[string]bool{"valid": valid}, nil)
 }

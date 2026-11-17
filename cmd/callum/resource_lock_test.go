@@ -31,6 +31,18 @@ func TestResourceLockExcludesServiceWithoutOpeningDatabase(t *testing.T) {
 		owner.Close()
 		t.Fatal("服务绕过了资源安装锁")
 	}
+	if _, err := io.WriteString(writer, "{\"jsonrpc\":\"2.0\",\"id\":\"validation\",\"method\":\"runtime.validate\",\"params\":{\"name\":\"runtimes\"}}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if !scanner.Scan() || !strings.Contains(scanner.Text(), `"valid":false`) {
+		t.Fatalf("缺失资源未报告校验失败: %s", scanner.Text())
+	}
+	if _, err := io.WriteString(writer, "{\"jsonrpc\":\"2.0\",\"id\":\"invalid\",\"method\":\"runtime.validate\",\"params\":{\"name\":\"../runtimes\"}}\n"); err != nil {
+		t.Fatal(err)
+	}
+	if !scanner.Scan() || !strings.Contains(scanner.Text(), `"code":-32602`) {
+		t.Fatalf("资源校验请求越过数据目录: %s", scanner.Text())
+	}
 	if _, err := io.WriteString(writer, "{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"system.shutdown\",\"params\":{}}\n"); err != nil {
 		t.Fatal(err)
 	}

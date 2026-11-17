@@ -139,12 +139,35 @@ func TestAccessRecoversOnlyRecordedPrivateDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// 同时覆盖正式标记和进程在原子改名之前退出的情况。
+	pendingRun := uuid.Must(uuid.NewV7()).String()
+	pending, err := first.Begin(t.Context(), conv, pendingRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(first.marker(pendingRun), filepath.Join(first.markers, pendingRun+".pending")); err != nil {
+		t.Fatal(err)
+	}
+	invalidRun := uuid.Must(uuid.NewV7()).String()
+	const truncated = `"incomplete`
+	if err := os.WriteFile(first.marker(invalidRun), []byte(truncated), 0600); err != nil {
+		t.Fatal(err)
+	}
 	second, err := OpenAccess(t.Context(), data, store, resolve)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(files.Work); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("异常退出的工作目录未恢复: %v", err)
+	for _, work := range []string{files.Work, pending.Work} {
+		if _, err := os.Stat(work); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("异常退出的工作目录未恢复: %v", err)
+		}
+	}
+	quarantined, err := os.ReadFile(filepath.Join(first.markers, invalidRun+".invalid"))
+	if err != nil || string(quarantined) != truncated {
+		t.Fatalf("未保留不完整标记: %q %v", quarantined, err)
+	}
+	if _, err := OpenAccess(t.Context(), data, store, resolve); err != nil {
+		t.Fatalf("遗留的不完整标记阻止重新启动: %v", err)
 	}
 	if err := second.Close(); err != nil {
 		t.Fatal(err)

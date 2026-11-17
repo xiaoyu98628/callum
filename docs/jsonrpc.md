@@ -672,15 +672,15 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 图片读取只接受核对身份后的普通文件，使用已打开的固定句柄。Unix 使用非阻塞打开；路径在检查后被替换为命名管道时明确失败。会话附件属于本机应用数据，发送给模型时遵守上面的图片输入规则。
 
-`view_image` 的稳定图片引用保存在工具步骤上下文中；适配层在整批工具结果之后提供视觉输入。`publish_artifact` 保存独立交付副本，执行结束前追加到助手消息的 `file` 块；后续追问可通过 `open_attachment` 重新读取当前分支中的交付物，不依赖已删除的本轮中间目录。
+`view_image` 的稳定图片引用保存在工具步骤上下文中；适配层在整批工具结果之后提供视觉输入。`publish_artifact` 保存独立交付副本，执行结束前追加到助手消息的 `file` 块。成功步骤已持久化后发生的中断，在启动时恢复当前分支的交付引用。后续追问可通过 `open_attachment` 重新读取当前分支中的交付物，不依赖已删除的本轮中间目录。
 
-`conversation.attachment_read` 只接受当前会话、消息和内容块索引，读取原始附件或已发布交付物，不接受任意本地路径：
+`conversation.attachment_read` 按当前会话、消息、内容块索引和偏移读取原件。可选的 `expected_run_id` 绑定消息版本，版本不符返回错误码 `1003`。桌面端的每个分片请求都携带所选消息的版本。
 
 ```json
-{"jsonrpc":"2.0","id":"attachment-read","method":"conversation.attachment_read","params":{"conversation_id":"<conversation_id>","message_id":"<message_id>","index":1,"offset":0}}
+{"jsonrpc":"2.0","id":"attachment-read","method":"conversation.attachment_read","params":{"conversation_id":"<conversation_id>","message_id":"<message_id>","expected_run_id":"<run_id>","index":1,"offset":0}}
 ```
 
-返回 `{ "name": "report.docx", "mime": "...", "size": 4096, "offset": 0, "data": "<Base64>", "next_offset": null }`。每段不超过 1 MiB，始终核对完整文件哈希；`next_offset` 为下一段偏移，`null` 表示结束。客户端应校验名称、总量及偏移一致，不能仅凭某一段宣称读取完成。空文件返回空 Base64、大小 `0` 和 `next_offset:null`。已替换消息及跨会话索引拒绝读取。
+返回 `{ "run_id": "<run_id>", "sha256": "<hex>", "name": "report.docx", "mime": "...", "size": 4096, "offset": 0, "data": "<Base64>", "next_offset": null }`。每段不超过 1 MiB，服务端核对完整文件哈希。`next_offset` 为下一段偏移，`null` 表示结束。客户端应逐片核对消息版本、摘要、名称、大小和偏移，并于保存前校验合并后的 SHA-256。空文件返回空 Base64、大小 `0` 和 `next_offset:null`。已替换消息及跨会话索引拒绝读取。
 
 ## 13. 执行查询和取消
 

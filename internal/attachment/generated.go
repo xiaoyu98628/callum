@@ -13,6 +13,13 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model/imageinput"
 )
 
+// ValidPublishedBlock 校验已持久化的交付物元数据及其会话和执行归属。
+func ValidPublishedBlock(block model.Block, conversationID, runID string) bool {
+	return block.Type == "file" && block.Path == "" && block.Text == "" &&
+		block.Name != "" && ValidName(block.Name) && block.Size >= 0 && block.Size <= imageinput.MaxSourceBytes &&
+		validReference(block.AttachmentRef, conversationID) && strings.Split(block.AttachmentRef, "/")[1] == runID
+}
+
 // saveGenerated 保留可信工具已经读取的固定内容；只对已受理执行写入会话存储。
 // 源路径不再读取，文件与校验结果始终来自同一份字节。
 func (s *Store) saveGenerated(ctx context.Context, conversationID, runID, kind, name string, data []byte) (model.Block, error) {

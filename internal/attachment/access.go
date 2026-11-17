@@ -88,11 +88,19 @@ func (a *Access) recover(ctx context.Context) (retErr error) {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			runID := strings.TrimSuffix(entry.Name(), ".json")
-			if !validID(runID) || entry.Name() != runID+".json" || !entry.Type().IsRegular() {
+			name := entry.Name()
+			if runID, ok := strings.CutSuffix(name, ".invalid"); ok && validID(runID) && entry.Type().IsRegular() {
+				continue
+			}
+			runID, recognized := strings.CutSuffix(name, ".json")
+			if !recognized {
+				runID, recognized = strings.CutSuffix(name, ".pending")
+			}
+			if !recognized || !validID(runID) || !entry.Type().IsRegular() {
 				return errors.New("附件工作目录恢复标记无效")
 			}
-			marker, err := os.OpenFile(a.marker(runID), readFlags, 0)
+			path := filepath.Join(a.markers, name)
+			marker, err := os.OpenFile(path, readFlags, 0)
 			if err != nil {
 				return err
 			}
@@ -107,6 +115,14 @@ func (a *Access) recover(ctx context.Context) (retErr error) {
 			if len(data) > 4096 {
 				return errors.New("附件工作目录恢复记录不可读")
 			}
+			if !json.Valid(data) {
+				// 旧版正式标记和新版待提交标记都可能只写了一部分。留下记录，
+				// 不从不完整的数据推断需要删除的目录。
+				if err := os.Rename(path, filepath.Join(a.markers, runID+".invalid")); err != nil {
+					return err
+				}
+				continue
+			}
 			var directory string
 			if json.Unmarshal(data, &directory) != nil || filepath.Dir(directory) != a.temporary || !strings.HasPrefix(filepath.Base(directory), "callum-attachments-"+runID+"-") {
 				return errors.New("附件工作目录恢复路径无效")
@@ -114,7 +130,7 @@ func (a *Access) recover(ctx context.Context) (retErr error) {
 			if err := os.RemoveAll(directory); err != nil {
 				return err
 			}
-			if err := os.Remove(a.marker(runID)); err != nil {
+			if err := os.Remove(path); err != nil {
 				return err
 			}
 		}
@@ -152,30 +168,53 @@ func (a *Access) Begin(ctx context.Context, conversationID, runID string) (_ Run
 			return RunFiles{}, err
 		}
 	}
+	if err := a.writeMarker(runID, directory); err != nil {
+		return RunFiles{}, err
+	}
+	a.runs[runID] = value
+	return *value, nil
+}
+
+func (a *Access) writeMarker(runID, directory string) (retErr error) {
+	path := a.marker(runID)
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		if err == nil {
+			return os.ErrExist
+		}
+		return err
+	}
 	data, err := json.Marshal(directory)
 	if err != nil {
-		return RunFiles{}, err
+		return err
 	}
-	marker, err := os.OpenFile(a.marker(runID), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	pending := filepath.Join(a.markers, runID+".pending")
+	marker, err := os.OpenFile(pending, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
-		return RunFiles{}, err
+		return err
 	}
+	defer func() {
+		if err := os.Remove(pending); err != nil && !errors.Is(err, os.ErrNotExist) {
+			retErr = errors.Join(retErr, err)
+		}
+	}()
 	_, writeErr := marker.Write(data)
 	if err := errors.Join(writeErr, marker.Sync(), marker.Close()); err != nil {
-		return RunFiles{}, errors.Join(err, os.Remove(a.marker(runID)))
+		return err
+	}
+	if err := os.Rename(pending, path); err != nil {
+		return err
 	}
 	// 文件内容先同步，恢复标记再固定，异常退出时仅按本实例记录回收。
 	if runtime.GOOS != "windows" {
 		parent, err := os.Open(a.markers)
 		if err != nil {
-			return RunFiles{}, err
+			return err
 		}
 		if err := errors.Join(parent.Sync(), parent.Close()); err != nil {
-			return RunFiles{}, err
+			return err
 		}
 	}
-	a.runs[runID] = value
-	return *value, nil
+	return nil
 }
 
 // Metadata 只从当前消息分支解析引用，并固定原件身份；调用者负责关闭 File。

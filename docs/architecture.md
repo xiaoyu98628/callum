@@ -57,7 +57,7 @@
 
 技能正文、脚本、参考资料、解释器和原生依赖由客户端持有，默认技能安装也在客户端完成。Go 从 `DataDir/skills` 扫描 `SKILL.md`，只向模型提供名称、说明和绝对入口；模型通过通用文件与命令工具按需加载。Go 不包含 Word、Excel、PowerPoint 或 PDF 的解析、生成、编辑和渲染实现。`load_workspace_dependencies` 只返回资源清单中的通用 Python、Node、模块及原生命令目录，不依赖特定文档格式。
 
-`attachment.Access` 为已受理执行管理私有输入副本和中间目录；命令子进程结束后由 Agent 回收，Runtime 关闭等待全部执行后再关闭访问器和附件存储。`open_attachment` 按当前分支校验文件引用；`view_image` 把固定图片保存为稳定工具上下文；`publish_artifact` 保存独立交付副本，结束前追加到回答。图片在适配层转换为整批工具结果之后的视觉输入，原始统一轨迹保持调用和结果配对，压缩和恢复继续复用同一轨迹契约。
+`attachment.Access` 为已受理执行管理私有输入副本和中间目录；命令子进程结束后由 Agent 回收，Runtime 关闭等待全部执行后再关闭访问器和附件存储。`open_attachment` 按当前分支校验文件引用；`view_image` 把固定图片保存为稳定工具上下文；`publish_artifact` 保存独立交付副本，结束前追加到回答。执行中断时，存储层在标记中断的事务内从当前分支的成功步骤恢复交付物引用。图片在适配层转换为整批工具结果之后的视觉输入，原始统一轨迹保持调用和结果配对，压缩和恢复继续复用同一轨迹契约。
 
 `internal/runtimeassets` 返回启动时校验的不可变资源描述，不持有文件、进程或后台任务；`Runtime` 将其借给命令工具并把实际资源根目录登记为只读保护范围。资源描述同时固定 Python、Node、Git 入口及 Git 配套资源路径，子进程专用环境由命令工具生成。命令调用仍独立持有并关闭固定入口和资源目录句柄，沿用审批、进程组/Job 与输出生命周期。`prepare` 同时由随附 `callum prepare-runtimes` 离线子命令及独立维护入口 `cmd/prepare-runtimes` 使用：前者严格禁止下载且不创建应用 Runtime，后者仅在显式 `--download` 时获取缺失归档；正常 stdio 服务不调用准备流程。
 

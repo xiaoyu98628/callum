@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"slices"
+	"strings"
 
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/model"
@@ -12,14 +13,17 @@ import (
 
 // ReadAttachmentChunk 只读当前分支中消息明确持有的副本，不接受客户端指定任意路径。
 // 每次核对完整哈希，再返回不超过 1 MiB 的片段，保持 stdio 响应有界。
-func (s *Service) ReadAttachmentChunk(ctx context.Context, conversationID, messageID string, index int, offset int64) (conversation.AttachmentChunk, error) {
+func (s *Service) ReadAttachmentChunk(ctx context.Context, conversationID, messageID, expectedRunID string, index int, offset int64) (conversation.AttachmentChunk, error) {
 	var result conversation.AttachmentChunk
-	if !validID(conversationID) || !validID(messageID) || index < 0 || index >= 64 || offset < 0 {
+	if !validID(conversationID) || !validID(messageID) || (expectedRunID != "" && !validID(expectedRunID)) || index < 0 || index >= 64 || offset < 0 {
 		return result, conversation.ErrInvalid
 	}
 	message, err := s.repository.Message(ctx, conversationID, messageID)
 	if err != nil {
 		return result, err
+	}
+	if expectedRunID != "" && expectedRunID != message.RunID {
+		return result, conversation.ErrAttachmentChanged
 	}
 	if index >= len(message.Content) {
 		return result, conversation.ErrNotFound
@@ -42,7 +46,9 @@ func (s *Service) ReadAttachmentChunk(ctx context.Context, conversationID, messa
 	if name == "" {
 		name = filepath.Base(filepath.FromSlash(block.AttachmentRef))
 	}
-	result = conversation.AttachmentChunk{Name: name, MIME: mime, Size: int64(len(data)), Offset: offset, Data: chunk}
+	// Read 已核对文件内容与引用中的摘要，跨分片再用它固定实际内容。
+	digest := strings.TrimSuffix(filepath.Base(filepath.FromSlash(block.AttachmentRef)), filepath.Ext(block.AttachmentRef))
+	result = conversation.AttachmentChunk{RunID: message.RunID, SHA256: digest, Name: name, MIME: mime, Size: int64(len(data)), Offset: offset, Data: chunk}
 	if end < int64(len(data)) {
 		result.NextOffset = new(end)
 	}
