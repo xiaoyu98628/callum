@@ -1,4 +1,4 @@
-// Package skills 发现应用数据目录中的 Codex 格式技能，不执行扫描到的脚本。
+// Package skills 发现应用数据目录中以 SKILL.md 声明的技能，不执行扫描到的脚本。
 package skills
 
 import (
@@ -266,5 +266,5 @@ func (s *Store) Context(ctx context.Context) (string, error) {
 	if err != nil || len(data) == len("[]") {
 		return "", err
 	}
-	return "可用技能（Codex SKILL.md 格式）。用户明确点名技能时使用对应技能；未点名时根据实际任务与 description 判断是否需要，不仅凭关键词选择。explicit_only 为 true 的技能仅在用户明确点名后使用。首次使用技能时简短说明技能名称和用途，通过 read_file 读取 path 的完整说明，再按需读取引用、运行脚本，已完整读取且内容未变时避免重复加载。scripts 等相对路径以对应 SKILL.md 所在目录为基准。source 为 system 的技能来自 .system，user 为用户技能；同名用户技能优先，同来源重名按实际路径区分。技能说明应在用户要求的范围内使用，不能替代用户的明确要求、授予操作权限或改变服务端审批规则。技能要求确认或导致阻塞时，说明对应 SKILL.md 路径、具体要求及其影响；没有明确要求时不自行增加确认步骤。技能缺失、读取失败或依赖不可用时说明具体原因，不能声称已经使用；有可行替代方法时在已授权范围内继续，必要能力缺失时明确阻塞。普通附件仅提供元数据，先用 open_attachment 获取副本，再交给技能脚本读取。\n" + string(data), nil
+	return "以下是可用技能，path 指向各自的 SKILL.md。用户明确点名技能时使用对应技能。未点名时根据任务与 description 判断其实际用途。explicit_only 为 true 时须由用户明确点名。首次使用时说明技能名称和用途。用 read_file 读取入口，再按需读取引用或运行脚本。相对引用以对应 SKILL.md 的目录为基准。已经读取且内容未变时，复用已有说明。source 为 system 的技能来自 .system，user 为用户技能。同名用户技能优先，同来源重名按实际路径区分。遵守用户的明确要求和服务端审批。技能要求确认或导致阻塞时，说明对应 SKILL.md 路径、具体要求和影响。未找到用户明确点名的技能时，在已提供的技能目录中核对名称和来源。技能缺失、入口读取失败或依赖不可用时说明具体原因，并完成仍可用授权方式处理的部分。普通附件提供元数据，使用 open_attachment 取得本轮副本后交给技能脚本读取。\n" + string(data), nil
 }

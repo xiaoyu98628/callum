@@ -154,7 +154,7 @@ r=Presentation(); s=r.slides.add_slide(r.slide_layouts[1]); s.shapes.title.text=
 				switch (number - 1) % 4 {
 				case 0:
 					toolName, arguments = "read_file", map[string]any{"path": filepath.Join(cfg.DataDir, "skills", ".system", sample.skill, "SKILL.md")}
-					if !strings.Contains(string(data), "Codex SKILL.md") {
+					if !strings.Contains(skillContext, "可用技能") || !strings.Contains(skillContext, "SKILL.md") {
 						t.Error("模型未收到技能目录")
 					}
 					if !strings.Contains(skillContext, filepath.Join(cfg.DataDir, "skills", ".system", sample.skill, "SKILL.md")) {
