@@ -46,8 +46,15 @@ type UserInputRepository interface {
 	CancelUserInput(context.Context, string) (Step, error)
 }
 
+// userInputPrompt 参考上游提问指引及选项描述，适配本服务的单问题和字符串选项。
+const userInputPrompt = `Ask the user for missing information, a preference, constraint, or clarification. Use the available read tools to establish facts first. Be mindful of cognitive load on the user and prefer multiple-choice questions.
+
+Ask one clear question at a time. Provide 2-3 mutually exclusive choices when appropriate. Put the recommended option first and suffix its label with "(Recommended)" or its equivalent in the user's language. Do not include an "Other" option. Each option is a single string and may briefly explain its tradeoff. Pass an empty options array if only a free-text answer is needed.
+
+Ask in the user's language. The user can choose an option, answer in their own words, or skip. Complete useful independent work before requesting an answer. If a reply is required, wait for an explicit answer before dependent work. Skipping is not consent. Use the service's approval flow for tool permissions.`
+
 func UserInputDefinition() model.ToolDefinition {
-	return model.ToolDefinition{Name: UserInputTool, Description: "仅在需要用户澄清影响正确性、任务范围或个人偏好的必要信息时提问，能通过可用读取工具查明的事实应自行查询。每次一个完整清晰的问题；有合适方案时优先给出2～3个互斥选项，推荐项置顶并标注推荐，简短说明取舍，不添加“其他”占位选项；仅需自由回复时 options 传空数组。用户可选择选项、自行回复或跳过，跳过或未回复不表示同意，必要答复缺失时不得继续依赖它的操作。不得用此工具申请文件、命令等操作权限；操作权限由服务端工具审批处理。", Parameters: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","minLength":1,"maxLength":4096},"options":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":1024}}},"required":["question","options"],"additionalProperties":false}`)}
+	return model.ToolDefinition{Name: UserInputTool, Description: userInputPrompt, Parameters: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","minLength":1,"maxLength":4096},"options":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":1024}}},"required":["question","options"],"additionalProperties":false}`)}
 }
 
 // ParseInputQuestion 拒绝重复、未知及大小写不匹配字段和尾随内容。

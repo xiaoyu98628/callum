@@ -50,6 +50,8 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 				}
 				if len(input.Messages) < 2 || input.Messages[0].Role != "system" || !strings.Contains(input.Messages[0].Content, "1～2句话") || !strings.Contains(input.Messages[0].Content, "正文 content") {
 					t.Error("主对话未发送操作前说明的固定提示")
+				} else if !strings.HasPrefix(input.Messages[0].Content, "You are Callum,") || !strings.Contains(input.Messages[0].Content, "# Autonomy and persistence") || strings.Contains(strings.ToLower(input.Messages[0].Content), "codex") {
+					t.Error("主对话未使用适配后的身份和任务推进指引")
 				}
 				for _, message := range input.Messages[1:] {
 					if message.Role == "system" {

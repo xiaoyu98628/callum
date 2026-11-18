@@ -59,6 +59,9 @@ func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
 			if last.Role != "user" || last.Content != compaction.Request || strings.Contains(strings.ToLower(input.Messages[0].Content+last.Content), "codex") {
 				t.Error("摘要请求未使用无品牌字样的纯文本交接指引")
 			}
+			if !strings.Contains(last.Content, "简体中文") {
+				t.Error("摘要请求未要求使用简体中文")
+			}
 			m.summaries.Add(1)
 			text = compactSummary
 			switch m.mode.Load() {

@@ -13,6 +13,7 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/config"
+	"github.com/xiaoyu98628/callum/internal/model"
 )
 
 func TestUserInputThroughStdio(t *testing.T) {
@@ -21,7 +22,10 @@ func TestUserInputThroughStdio(t *testing.T) {
 			var replies atomic.Int32
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var request struct {
-					Stream   bool `json:"stream"`
+					Stream bool `json:"stream"`
+					Tools  []struct {
+						Function model.ToolDefinition `json:"function"`
+					} `json:"tools"`
 					Messages []struct {
 						Role    string `json:"role"`
 						Content string `json:"content"`
@@ -36,6 +40,16 @@ func TestUserInputThroughStdio(t *testing.T) {
 					w.Header().Set("Content-Type", "application/json")
 					fmt.Fprint(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":""},"finish_reason":"stop"}]}`)
 					return
+				}
+				foundAsk := false
+				for _, definition := range request.Tools {
+					if definition.Function.Name == agent.UserInputTool {
+						foundAsk = strings.Contains(definition.Function.Description, "2-3 mutually exclusive choices") &&
+							!strings.Contains(strings.ToLower(definition.Function.Description), "codex")
+					}
+				}
+				if !foundAsk {
+					t.Error("模型未收到无品牌字样的互斥选项指引")
 				}
 				w.Header().Set("Content-Type", "text/event-stream")
 				last := request.Messages[len(request.Messages)-1]

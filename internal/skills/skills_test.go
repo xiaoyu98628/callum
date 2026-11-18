@@ -62,7 +62,7 @@ func TestDiscoveryRefreshesUserSkillsAndPreservesSources(t *testing.T) {
 		t.Fatalf("没有按需加载或策略丢失: %s %v", contextText, err)
 	}
 	guidance, _, found := strings.Cut(contextText, "\n[")
-	if !found || !strings.Contains(guidance, "SKILL.md") || strings.Contains(strings.ToLower(guidance), "codex") {
+	if !found || !strings.Contains(guidance, "# Using skills") || !strings.Contains(guidance, "Open the skill's SKILL.md with read_file") || strings.Contains(strings.ToLower(guidance), "codex") {
 		t.Fatalf("技能目录的内置指引应描述入口格式而不含其他产品名: %q", guidance)
 	}
 	if err := os.Remove(path); err != nil {

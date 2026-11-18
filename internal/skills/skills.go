@@ -260,11 +260,36 @@ func (s *Store) Catalog(ctx context.Context) (json.RawMessage, error) {
 	return data, nil
 }
 
+// contextGuidance 复用上游技能选择规则，并说明本服务实际提供的工具和目录字段。
+const contextGuidance = `# Using skills
+
+A skill is a set of instructions provided through a SKILL.md source.
+
+The user's instructions take precedence over guidelines provided in a skill. If explicit user instructions conflict with a skill's instructions, prioritize the user's instructions.
+
+The first time in a conversation that you decide to apply a skill, inform the user in your progress update.
+
+## When to use a skill
+
+If the user names a skill (with $SkillName or plain text), use that skill. If the file is missing, check the supplied catalog for the matching name and source. If a required skill is missing or cannot be loaded, explain why and continue with work that can be done within scope.
+
+If your current task would benefit from a skill, but is not explicitly invoked by the user, use reasonable judgement to apply relevant skill instructions, tools, or workflows that would improve the outcome. Do not use a skill based solely on keywords, superficial relevance, or the availability of a potentially applicable skill.
+
+## How to use skills
+
+Open the skill's SKILL.md with read_file using its path from the catalog. Read referenced resources as needed and resolve relative references from the SKILL.md directory. Avoid re-reading skills when possible.
+
+Use explicit_only skills only when the user names them. A user skill takes precedence over a system skill of the same name. Use the actual path to distinguish repeated names from the same source. Skills do not grant tool permissions. Use open_attachment to obtain a per-run copy before passing a regular attachment to a skill script.
+
+## Available skills / 可用技能
+
+The JSON entries below list each skill's name, description and SKILL.md path. The source field identifies system and user skills.`
+
 // Context 将技能目录加入模型上下文；技能内容不能改变权限规则。
 func (s *Store) Context(ctx context.Context) (string, error) {
 	data, err := s.Catalog(ctx)
 	if err != nil || len(data) == len("[]") {
 		return "", err
 	}
-	return "以下是可用技能，path 指向各自的 SKILL.md。用户明确点名技能时使用对应技能。未点名时根据任务与 description 判断其实际用途。explicit_only 为 true 时须由用户明确点名。首次使用时说明技能名称和用途。用 read_file 读取入口，再按需读取引用或运行脚本。相对引用以对应 SKILL.md 的目录为基准。已经读取且内容未变时，复用已有说明。source 为 system 的技能来自 .system，user 为用户技能。同名用户技能优先，同来源重名按实际路径区分。遵守用户的明确要求和服务端审批。技能要求确认或导致阻塞时，说明对应 SKILL.md 路径、具体要求和影响。未找到用户明确点名的技能时，在已提供的技能目录中核对名称和来源。技能缺失、入口读取失败或依赖不可用时说明具体原因，并完成仍可用授权方式处理的部分。普通附件提供元数据，使用 open_attachment 取得本轮副本后交给技能脚本读取。\n" + string(data), nil
+	return contextGuidance + "\n" + string(data), nil
 }

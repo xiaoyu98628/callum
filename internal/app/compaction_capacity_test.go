@@ -100,6 +100,10 @@ func TestSingleExecutionCompactsMessageBoundaryAndRestoresAfterRestart(t *testin
 		requirePairedInput(t, req)
 		if len(req.Tools) == 0 {
 			if req.Messages[0].Content == compaction.Prompt {
+				last := req.Messages[len(req.Messages)-1]
+				if last.Role != model.RoleUser || last.Content != compaction.Request || !strings.Contains(last.Content, "简体中文") {
+					t.Error("运行内检查点未使用简体中文摘要指引")
+				}
 				summaries.Add(1)
 				return model.Response{Text: capacitySummary, Usage: json.RawMessage(`{"total_tokens":17}`)}, nil
 			}

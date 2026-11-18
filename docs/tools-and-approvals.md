@@ -42,7 +42,9 @@
 ## 过程说明与轨迹
 
 主对话的每轮模型请求加入固定系统提示，要求在一组工具操作前用 1～2 句话说明目的，在完成阶段、发现问题或改变方向时概括已确认的发现和下一步；连续检查相关文件合并说明，普通问答直接回答，用户可要求减少过程说明。
-提示将 Callum 定位为通用任务 Agent，在已授权范围内持续推进，并把用户中途补充或修正纳入当前任务。可以通过读取工具查明的事实自行查询，必要问题通过 `request_user_input` 澄清。确认前说明具体操作、影响和原因，用户明确要求的确认必须等待答复。任务目标、技能或历史摘要不能扩大授权。被拒绝的操作不能绕过，结果未知或部分生效时先核实。交付前逐项核对用户要求，最终回答说明实际结果、验证、未完成事项和待决定问题。引用已核实的本地文件时提供绝对路径，生成文件使用实际交付引用。
+提示将 Callum 定位为通用任务 Agent，在已授权范围内持续推进，并在会话上下文提供用户修正时继续按最新要求处理。同一会话在活动执行结束后接收新消息，执行中的补充提问由 `request_user_input` 提供。可以通过读取工具查明的事实自行查询。确认前说明具体操作、影响和原因，用户明确要求的确认必须等待答复。任务目标、技能或历史摘要不能扩大授权。工具被拒绝后继续可独立完成的工作，结果未知或部分生效时先核实。交付前逐项核对用户要求，最终回答说明实际结果、验证、未完成事项和待决定问题。引用已核实的本地文件时提供绝对路径，生成文件使用实际交付引用。
+
+主对话和目录指引选用 [OpenAI Codex 公开模型模板](https://github.com/openai/codex/blob/59ac39addbbcd3499319c805a916846ca8ac5fef/codex-rs/models-manager/models.json#L76) 中的任务推进、沟通和技能选择段落。补充提问参考同一模板及 [选项规范](https://github.com/openai/codex/blob/59ac39addbbcd3499319c805a916846ca8ac5fef/codex-rs/core/src/tools/handlers/request_user_input_spec.rs#L16)，适配 Callum 的单问题接口。Copyright 2025 OpenAI，依据 [Apache License 2.0](https://github.com/openai/codex/blob/59ac39addbbcd3499319c805a916846ca8ac5fef/LICENSE) 使用。
 提示位于 `internal/agent/service/prompt.go`，`request_context.go` 为实际请求和只读 Token 预览共用固定上下文组装，`loop.go` 在每轮发送。主系统消息还包含 `source=server_execution_settings` 的设置投影：`settings_revision`、`approval_policy`、`approvals_reviewer`、`sandbox_mode`。实际执行使用受理快照，空闲预览使用已读取并校验的当前设置；历史快照缺失或未记录的字段显示为 `null`，不补默认值。权限说明不能替代服务端逐项校验。
 固定系统提示、设置投影和目录元数据均参与输入 Token 估算及预算校验；历史压缩后重新加入，不保存为用户消息，也不作为摘要来源。辅助标题、历史摘要、AI 审核及兼容的 `model.invoke` 不加入主对话提示与设置投影。较小上下文预算可能更早触发压缩或容量错误。
 辅助标题保持不超过 30 个 Unicode 码点，提示使用用户语言概括问题或任务，保留必要编号和专有名称，避免引号、Markdown 和末尾标点；普通问答可使用主题短语，不强制祈使句。主回答与标题的执行及保存规则保持独立。

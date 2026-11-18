@@ -53,6 +53,8 @@ Go 服务支持 `conversation.compact` 手动压缩，并在每次回答模型�
 
 摘要提示采用上游的纯文本交接指引，覆盖当前进展与决定、关键上下文和用户约束、剩余工作、后续所需的数据和引用。Callum 补充历史数据的使用边界，合并先前摘要和新增历史，保留明确确认要求，以及失败、部分生效和结果未知的操作状态与核实要求。
 
+手动压缩、自动压缩和运行内检查点均要求以简体中文输出摘要，代码、命令、文件路径、标识符和需引用的错误原文保持原样。
+
 提示词主体沿用 [OpenAI Codex 交接提示](https://github.com/openai/codex/blob/59ac39addbbcd3499319c805a916846ca8ac5fef/codex-rs/prompts/templates/compact/prompt.md)，Copyright 2025 OpenAI，依据 [Apache License 2.0](https://github.com/openai/codex/blob/59ac39addbbcd3499319c805a916846ca8ac5fef/LICENSE) 使用。出处记录在开发文档中。
 
 会话摘要与执行内步骤摘要的恢复说明均要求承接已确认进展、避免重复已完成操作；未知或部分生效操作先核实，不能直接重放。当前要求、实际操作事实和服务端权限配置优先。正文和容量校验仅验证可用的文本边界；摘要内容仍可追溯原文核对。
