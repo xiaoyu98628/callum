@@ -3,12 +3,43 @@ package migrations_test
 import (
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/xiaoyu98628/callum/internal/settings"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
+
+func TestLegacyJSONSummarySchemaRequiresNewDataDirectory(t *testing.T) {
+	path, pool := fixtureDatabase(t)
+	_, err := pool.ExecContext(t.Context(), `CREATE TABLE conversation_context_versions (
+		summary TEXT NOT NULL CONSTRAINT "ck_context_summary" CHECK (summary = '' OR (json_valid(summary) AND json_type(summary) = 'object'))
+	) STRICT`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.ExecContext(t.Context(), "PRAGMA user_version = 4"); err != nil {
+		t.Fatal(err)
+	}
+	const previous = `{"facts":["保留旧数据"]}`
+	if _, err := pool.ExecContext(t.Context(), "INSERT INTO conversation_context_versions VALUES (?)", previous); err != nil {
+		t.Fatal(err)
+	}
+	opened, err := sqlite.Open(t.Context(), path)
+	if opened != nil {
+		if closeErr := opened.Close(); closeErr != nil {
+			t.Error(closeErr)
+		}
+	}
+	if err == nil || !strings.Contains(err.Error(), "旧版上下文摘要结构，请使用独立的新数据目录") {
+		t.Fatalf("未提示旧摘要结构不受支持: %v", err)
+	}
+	var saved string
+	if err := pool.QueryRowContext(t.Context(), "SELECT summary FROM conversation_context_versions").Scan(&saved); err != nil || saved != previous {
+		t.Fatalf("拒绝启动时改写了旧数据: %q %v", saved, err)
+	}
+}
 
 func TestContextSettingsInitializationAndValidation(t *testing.T) {
 	custom := settings.DefaultCompaction()

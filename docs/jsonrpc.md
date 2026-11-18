@@ -1,6 +1,6 @@
 # JSON-RPC 通信与手工测试
 
-本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `3`，两者含义不同。
+本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `4`，两者含义不同。
 
 运行参数和开发检查见 [运行与开发](development.md)，配置空值和持久化规则见 [存储与模型配置](storage.md)，工具策略见 [Agent 工具与审批](tools-and-approvals.md)，Token 估算及压缩规则见 [上下文统计与压缩](context-compaction.md)。
 
@@ -481,9 +481,9 @@ result 包含 conversation_id（新对话为空）、model_id、可选 run_id、
 
 摘要请求超时时，`run.failed` 及压缩和摘要步骤的 `error_kind` 为 `timeout`，`error_message` 为「生成历史摘要超时，原有历史已保留」。历史消息、审计记录及此前已生效的摘要继续可查。
 
-摘要模型可返回纯 JSON 或独立的单个 `json` Markdown 代码块。摘要版本和执行内检查点均保存规范化后的 JSON，摘要子步骤仍保留模型原始响应。
+摘要模型返回纯文本交接摘要，可包含标题和列表。摘要版本和执行内检查点保存正文，摘要子步骤保留模型原始响应。
 
-摘要结构、大小、压缩收益及来源验证失败均保留旧有效版本，本次执行明确失败，不自动重试模型或工具。重启将未结束压缩执行标记为 interrupted、building 版本标记为 failed，不重放旧通知。已经事务提交的有效版本不会因随后取消或退出被回滚。
+摘要正文、大小、压缩收益及来源验证失败均保留上一份有效摘要，本次执行明确失败，不自动重试模型或工具。重启将未结束压缩执行标记为 interrupted、building 版本标记为 failed，不重放旧通知。已经事务提交的有效版本不会因随后取消或退出被回滚。
 
 #### conversation.context_versions / conversation.context_version
 
@@ -500,13 +500,13 @@ result 包含 conversation_id（新对话为空）、model_id、可选 run_id、
 | `base_version_id` | 被合并的旧摘要版本，可沿此追溯完整来源 |
 | `generated_by_step_id` | 生成该版本的 context_compression 步骤 |
 | `through_sequence` | 本版本累计覆盖到的消息顺序号 |
-| `summary` | 五个字符串数组组成的 JSON 文本，最多 64 KiB |
+| `summary` | 摘要正文为 UTF-8 文本，最多 64 KiB，通过 JSON 字符串返回 |
 | `source_manifest` | 本批新增覆盖消息的 message_id、run_id、sequence、fingerprint；指纹涵盖消息内容及对应统一工具轨迹 |
 | `size_stats` | before_messages、after_messages、before_bytes、after_bytes，以及新版本的 estimated_before_tokens、estimated_after_tokens、estimation_method（被摘要替换的历史部分）；估算不是 usage，旧版本可缺少估算字段 |
 | `status` | building、active、superseded、invalid、failed；同会话最多一个 active |
 | 时间字段 | created_at、updated_at、activated_at、invalidated_at，毫秒时间戳，可空时间为 null |
 
-原始消息和步骤不因压缩删除。编辑重发使覆盖被编辑消息的摘要失效，并清除摘要正文及对应模型结果副本；仍有效摘要的模型结果保留，旧分支审计不进入新上下文。待核实操作独立从当前分支审计恢复，摘要不能解除重新审批要求。结构校验不保证语义完全无损，实际输出可追溯原文核对。
+原始消息和步骤不因压缩删除。编辑重发使覆盖被编辑消息的摘要失效，并清除摘要正文及对应模型结果副本；仍有效摘要的模型结果保留，旧分支审计不进入新上下文。待核实操作独立从当前分支审计恢复，摘要不能解除重新审批要求。摘要内容可追溯原文核对。
 
 ## 10. 工作区
 

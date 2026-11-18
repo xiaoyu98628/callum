@@ -23,7 +23,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/settings"
 )
 
-const compactionFencedSummary = 4
+const compactSummary = "## 已完成进展\n- 保留用户约束\n- 历史操作需按审计核实\n\n下一步是继续完成任务。"
 
 type compactModel struct {
 	mode        atomic.Int32
@@ -55,21 +55,17 @@ func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
 			if len(input.Tools) != 0 {
 				t.Error("摘要模型获得工具")
 			}
+			last := input.Messages[len(input.Messages)-1]
+			if last.Role != "user" || last.Content != compaction.Request || strings.Contains(strings.ToLower(input.Messages[0].Content+last.Content), "codex") {
+				t.Error("摘要请求未使用无品牌字样的纯文本交接指引")
+			}
 			m.summaries.Add(1)
-			text = `{"goals":["继续完成任务"],"constraints":["保留用户约束"],"decisions":[],"facts":["历史操作需按审计核实"],"open_questions":[]}`
+			text = compactSummary
 			switch m.mode.Load() {
 			case 1:
-				text = "不符合结构的摘要"
-			case compactionFencedSummary:
-				text = "```json\n" + text + "\n```"
+				text = `{"goals":["继续完成任务"],"constraints":[],"decisions":[],"facts":[],"open_questions":[]}`
 			case 3:
-				large := strings.Repeat("x", 14000)
-				content, err := json.Marshal(map[string][]string{"goals": {large}, "constraints": {large}, "decisions": {large}, "facts": {large}, "open_questions": {}})
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				text = string(content)
+				text = strings.Repeat("x", compaction.MaxSummaryBytes+1)
 			case 2:
 				if after := m.blockAfter.Load(); after > 0 && m.summaries.Load() < after {
 					break
@@ -170,8 +166,8 @@ func TestCompactionManualFailureCancelAndRestartThroughStdio(t *testing.T) {
 	if err := json.Unmarshal(detail.Result, &active); err != nil {
 		t.Fatal(err)
 	}
-	if len(active.Sources) != 4 || active.Summary == "" || active.Sources[0].Fingerprint == "" {
-		t.Fatalf("摘要来源丢失: %+v", active)
+	if len(active.Sources) != 4 || active.Summary != compactSummary || active.Sources[0].Fingerprint == "" {
+		t.Fatalf("摘要正文或来源错误: %+v", active)
 	}
 	if len(readMessages(t, p, cid)) != len(before) {
 		t.Fatal("手动压缩创建或删除消息")
@@ -370,7 +366,7 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 		t.Fatal("摘要超时后原有历史被改动")
 	}
 
-	upstream.mode.Store(compactionFencedSummary)
+	upstream.mode.Store(0)
 	requireOK(t, p.call(t, "conversation.resend", map[string]any{"conversation_id": cid, "message_id": failedRows[len(before)].ID, "stream": false, "content": messageBlocks(question)}))
 	p.event(t, "run.completed")
 	if versions := contextVersions(t, p, cid); len(versions) != 2 || versions[0].Status != "active" || versions[0].ThroughSequence != 2 {
@@ -379,8 +375,8 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 	upstream.mu.Lock()
 	request := upstream.answers["当前问题必须保持原样"]
 	upstream.mu.Unlock()
-	if !strings.Contains(request, "conversation_context_summary") || strings.Contains(request, "```json") {
-		t.Fatal("后续回答未收到规范化的摘要 JSON")
+	if !strings.Contains(request, "conversation_context_summary") || !strings.Contains(request, "## 已完成进展") || !strings.Contains(request, "下一步是继续完成任务。") {
+		t.Fatal("后续回答未收到纯文本交接摘要")
 	}
 	if !strings.Contains(request, "当前问题必须保持原样") || !strings.Contains(request, "较早问题1") || strings.Contains(request, "较早问题0") {
 		t.Fatal("Token 触发压缩吞掉了保留轮次或当前问题")

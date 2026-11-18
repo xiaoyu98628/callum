@@ -53,30 +53,17 @@ func TestPlanBatchesWithinTokenBudgetWithoutSplittingTurns(t *testing.T) {
 	}
 }
 
-func TestSummaryRequiresBoundedStructuredData(t *testing.T) {
-	valid := `{"goals":["保留目标"],"constraints":["禁止重复执行"],"decisions":[],"facts":["结果未知"],"open_questions":[]}`
-	want, err := compaction.Validate(valid)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fenced := "```json\n" + valid + "\n```"
-	for _, input := range []string{fenced, "\r\n  " + strings.ReplaceAll(fenced, "\n", "\r\n") + "  \r\n"} {
-		if got, err := compaction.Validate(input); err != nil || got != want {
-			t.Fatalf("代码块摘要未规范化为相同 JSON: %q, %v", got, err)
+func TestSummaryRequiresBoundedPlainText(t *testing.T) {
+	const summary = "## 当前进展\n- 结果未知，不能重复执行\n\n参考值为 {\"status\":\"unknown\"}。"
+	for _, input := range []string{summary, "\r\n  " + summary + "  \r\n", strings.Repeat("x", compaction.MaxSummaryBytes)} {
+		if got, err := compaction.Validate(input); err != nil || got != strings.TrimSpace(input) {
+			t.Fatalf("未按原样保留文本摘要: %q, %v", got[:min(len(got), 100)], err)
 		}
 	}
-	for _, invalid := range []string{
-		"随意摘要", valid + " {}", strings.Repeat("x", compaction.MaxSummaryBytes+1),
-		"摘要如下\n" + fenced, fenced + "\n额外说明", fenced + "\n" + fenced,
-		"```json\n" + valid, "```json\n" + valid + " {}\n```",
-		"```yaml\n" + valid + "\n```", "```json\n" + strings.Repeat(" ", compaction.MaxSummaryBytes) + valid + "\n```",
-		strings.Replace(fenced, `"facts":["结果未知"]`, `"facts":null`, 1),
-		`{"goals":[],"constraints":[],"decisions":[],"facts":[],"open_questions":[]}`,
-		`{"goals":["任务"],"constraints":[],"decisions":[],"facts":null,"open_questions":[]}`,
-		`{"goals":["任务"],"constraints":[],"decisions":[],"facts":[],"facts":[],"open_questions":[]}`,
-	} {
-		if _, err := compaction.Validate(invalid); err == nil {
-			t.Fatalf("接受非法摘要: %s", invalid[:min(len(invalid), 100)])
+	const oldSummary = `{"goals":["任务"],"constraints":[],"decisions":[],"facts":[],"open_questions":[]}`
+	for _, invalid := range []string{"", " \r\n\t", "摘要\x00", "摘要\xff", strings.Repeat("x", compaction.MaxSummaryBytes+1), oldSummary, "```json\n" + oldSummary + "\n```", `["任务"]`} {
+		if _, err := compaction.Validate(invalid); !errors.Is(err, model.ErrInvalidResponse) {
+			t.Fatalf("未拒绝无效文本摘要: %q, %v", invalid[:min(len(invalid), 100)], err)
 		}
 	}
 }

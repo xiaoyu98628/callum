@@ -20,7 +20,7 @@ func checkpointInput(base *agent.ContextCheckpoint, messages []model.Message) []
 		input = append(input, base.Message())
 	}
 	input = append(input, messages...)
-	return append(input, model.Message{Role: model.RoleUser, Content: "请压缩上述已完成过程，只返回规定的 JSON 摘要。保留约束、已发生操作及未解决事项，不推断未执行操作的结果。"})
+	return append(input, model.Message{Role: model.RoleUser, Content: compaction.Request})
 }
 
 // compactRun 每次只消费完整模型及工具批次。before 保护正在执行的批次；keepLast 保留最近完整批次。
@@ -87,7 +87,7 @@ func (e *Engine) compactRun(ctx context.Context, ex conversation.Execution, reso
 	if err != nil {
 		return nil, 0, err
 	}
-	checkpoint := agent.ContextCheckpoint{Version: 1, ID: id.String(), ConversationID: ex.Conversation.ID, SourceRunID: runID, Through: cursor, Sources: sources}
+	checkpoint := agent.ContextCheckpoint{Version: agent.ContextCheckpointVersion, ID: id.String(), ConversationID: ex.Conversation.ID, SourceRunID: runID, Through: cursor, Sources: sources}
 	if base != nil {
 		checkpoint.BaseID, checkpoint.After = base.ID, base.Through
 	}

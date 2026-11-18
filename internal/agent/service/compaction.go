@@ -155,7 +155,7 @@ func (e *Engine) compactOld(ctx context.Context, ex *conversation.Execution, res
 
 func summaryInput(version *conversation.ContextVersion, messages []model.Message) []model.Message {
 	input := append([]model.Message{{Role: model.RoleSystem, Content: compaction.Prompt}}, contextMessages(version, messages)...)
-	return append(input, model.Message{Role: model.RoleUser, Content: "请压缩上述历史，只返回规定的 JSON 摘要。"})
+	return append(input, model.Message{Role: model.RoleUser, Content: compaction.Request})
 }
 
 func (e *Engine) compressionPlan(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, traces map[string][]model.Message, retain int) (compaction.Plan, error) {
