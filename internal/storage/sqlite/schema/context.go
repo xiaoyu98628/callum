@@ -14,7 +14,7 @@ type ContextVersion struct {
 	BaseVersionID     *string                      `gorm:"type:text;check:ck_context_base,base_version_id IS NULL OR base_version_id <> id"`
 	GeneratedByStepID string                       `gorm:"type:text;not null"`
 	ThroughSequence   int64                        `gorm:"not null;check:ck_context_sequence,through_sequence > 0"`
-	Summary           string                       `gorm:"type:text;not null;check:ck_context_summary,length(CAST(summary AS BLOB)) <= 65536 AND (summary = '' OR (json_valid(summary) AND json_type(summary) = 'object'))"`
+	Summary           string                       `gorm:"type:text;not null;check:ck_context_summary_text,length(CAST(summary AS BLOB)) <= 65536"`
 	Sources           []conversation.ContextSource `gorm:"column:source_manifest;type:text;not null;serializer:json;check:ck_context_sources,json_valid(source_manifest) AND json_type(source_manifest) = 'array' AND json_array_length(source_manifest) BETWEEN 1 AND 256 AND length(CAST(source_manifest AS BLOB)) <= 131072"`
 	Stats             json.RawMessage              `gorm:"column:size_stats;type:text;serializer:json;check:ck_context_stats,size_stats IS NULL OR (json_valid(size_stats) AND json_type(size_stats) = 'object' AND length(CAST(size_stats AS BLOB)) <= 4096)"`
 	Status            string                       `gorm:"type:text;not null;check:ck_context_status,status IN ('building','active','superseded','invalid','failed')"`

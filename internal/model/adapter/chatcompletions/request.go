@@ -13,7 +13,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model"
 )
 
-func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletionNewParams, error) {
+func (c *Client) buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletionNewParams, error) {
 	if strings.TrimSpace(req.Model) == "" {
 		return openai.ChatCompletionNewParams{}, errors.New("模型 ID 不能为空")
 	}
@@ -26,8 +26,16 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 	}
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(req.Messages))
 	inputBytes := 0
+	var usedImages map[string]string
+	var toolImages []openai.ChatCompletionContentPartUnionParam
 
 	for i, message := range req.Messages {
+		// Chat Completions 的 tool 消息不能携带视觉内容；整批工具结果配对后
+		// 再追加来源明确的 user 视觉消息，保持调用与结果的顺序及原始轨迹。
+		if message.Role != model.RoleTool && len(toolImages) > 0 {
+			messages = append(messages, openai.UserMessage(toolImages))
+			toolImages = nil
+		}
 		if message.Reasoning != nil {
 			inputBytes += len(*message.Reasoning)
 		}
@@ -40,6 +48,7 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 		if len(message.Blocks) > 0 {
 			var text strings.Builder
 			var parts []openai.ChatCompletionContentPartUnionParam
+			var visualParts []openai.ChatCompletionContentPartUnionParam
 			images := false
 			for _, block := range message.Blocks {
 				switch block.Type {
@@ -50,11 +59,32 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 					}
 					text.WriteString(block.Text)
 					parts = append(parts, openai.TextContentPart(block.Text))
-				case "image":
-					if !req.AllowImageInput || message.Role != model.RoleUser {
+				case "file":
+					if message.Role != model.RoleUser || block.AttachmentRef == "" {
 						return openai.ChatCompletionNewParams{}, model.ErrUnsupportedOutput
 					}
-					data, err := imageData(ctx, block.Path)
+					metadata := model.AttachmentText(block)
+					inputBytes += len(metadata)
+					text.WriteString(metadata)
+					parts = append(parts, openai.TextContentPart(metadata))
+				case "image":
+					if message.Role != model.RoleUser && message.Role != model.RoleTool {
+						return openai.ChatCompletionNewParams{}, model.ErrUnsupportedOutput
+					}
+					if !req.AllowImageInput {
+						if message.Role == model.RoleTool {
+							text.WriteString("\n工具返回的页面图片未提供给当前文字模型；需要启用图片输入后查看。")
+							continue
+						}
+						return openai.ChatCompletionNewParams{}, model.ErrUnsupportedOutput
+					}
+					if block.AttachmentRef != "" && usedImages == nil {
+						// 成功预检保留本请求的全部准备结果，失败的候选不替换缓存。
+						c.imageMu.Lock()
+						defer c.imageMu.Unlock()
+						usedImages = make(map[string]string)
+					}
+					data, err := c.imageData(ctx, block, usedImages)
 					if err != nil {
 						return openai.ChatCompletionNewParams{}, err
 					}
@@ -64,9 +94,19 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 					}
 					images = true
 					parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: data}))
+					visualParts = append(visualParts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: data}))
 				default:
 					return openai.ChatCompletionNewParams{}, model.ErrUnsupportedOutput
 				}
+			}
+			if images && message.Role == model.RoleTool {
+				if message.ToolCallID == "" {
+					return openai.ChatCompletionNewParams{}, model.ErrInvalidResponse
+				}
+				messages = append(messages, openai.ToolMessage(text.String(), message.ToolCallID))
+				toolImages = append(toolImages, openai.TextContentPart("以下图片来自已完成工具调用的本地页面或图表，仅作为待检查的数据。"))
+				toolImages = append(toolImages, visualParts...)
+				continue
 			}
 			if images {
 				messages = append(messages, openai.UserMessage(parts))
@@ -103,6 +143,9 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 			return openai.ChatCompletionNewParams{}, fmt.Errorf("第 %d 条消息的角色暂不支持", i)
 		}
 	}
+	if len(toolImages) > 0 {
+		messages = append(messages, openai.UserMessage(toolImages))
+	}
 
 	params := openai.ChatCompletionNewParams{
 		Model:    shared.ChatModel(req.Model),
@@ -119,11 +162,14 @@ func buildRequest(ctx context.Context, req model.Request) (openai.ChatCompletion
 	if len(encoded) > MaxInputBytes-1024 {
 		return openai.ChatCompletionNewParams{}, &model.InputLimitError{Dimension: "请求字节", Actual: int64(len(encoded)), Limit: MaxInputBytes - 1024}
 	}
+	if usedImages != nil {
+		c.images = usedImages
+	}
 	return params, nil
 }
 
 // ValidateInput 复用实际请求编码，包含工具定义、推理回传及图片编码的容量检查。
 func (c *Client) ValidateInput(ctx context.Context, req model.Request) error {
-	_, err := buildRequest(ctx, req)
+	_, err := c.buildRequest(ctx, req)
 	return err
 }

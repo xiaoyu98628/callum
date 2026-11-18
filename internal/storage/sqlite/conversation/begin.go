@@ -70,7 +70,7 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			if err := tx.Model(&schema.Message{}).Where("conversation_id = ? AND role = 'user'", conv.ID).Select("COALESCE(MAX(sequence),0)").Scan(&latest).Error; err != nil {
 				return err
 			}
-			if user.Sequence != latest {
+			if user.Sequence != latest || (in.ResendRunID != "" && user.RunID != in.ResendRunID) {
 				return domain.ErrConflict
 			}
 			if err := invalidateContexts(tx, conv.ID, user.Sequence, now); err != nil {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,18 +21,18 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/tokens"
 	"github.com/xiaoyu98628/callum/internal/settings"
-	"github.com/xiaoyu98628/callum/internal/tool"
-	"github.com/xiaoyu98628/callum/internal/tool/builtin/command"
-	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem"
 )
 
+const compactSummary = "## 已完成进展\n- 保留用户约束\n- 历史操作需按审计核实\n\n下一步是继续完成任务。"
+
 type compactModel struct {
-	mode       atomic.Int32
-	summaries  atomic.Int32
-	blockAfter atomic.Int32
-	mu         sync.Mutex
-	answers    map[string]string
-	started    chan struct{}
+	mode        atomic.Int32
+	summaries   atomic.Int32
+	blockAfter  atomic.Int32
+	mu          sync.Mutex
+	answers     map[string]string
+	definitions []model.ToolDefinition
+	started     chan struct{}
 }
 
 func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
@@ -39,7 +40,9 @@ func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
 	m := &compactModel{answers: map[string]string{}, started: make(chan struct{}, 8)}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
-			Tools    []json.RawMessage                `json:"tools"`
+			Tools []struct {
+				Function model.ToolDefinition `json:"function"`
+			} `json:"tools"`
 			Messages []struct{ Role, Content string } `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil || len(input.Messages) == 0 {
@@ -52,19 +55,20 @@ func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
 			if len(input.Tools) != 0 {
 				t.Error("摘要模型获得工具")
 			}
+			last := input.Messages[len(input.Messages)-1]
+			if last.Role != "user" || last.Content != compaction.Request || strings.Contains(strings.ToLower(input.Messages[0].Content+last.Content), "codex") {
+				t.Error("摘要请求未使用无品牌字样的纯文本交接指引")
+			}
+			if !strings.Contains(last.Content, "简体中文") {
+				t.Error("摘要请求未要求使用简体中文")
+			}
 			m.summaries.Add(1)
-			text = `{"goals":["继续完成任务"],"constraints":["保留用户约束"],"decisions":[],"facts":["历史操作需按审计核实"],"open_questions":[]}`
+			text = compactSummary
 			switch m.mode.Load() {
 			case 1:
-				text = "不符合结构的摘要"
+				text = `{"goals":["继续完成任务"],"constraints":[],"decisions":[],"facts":[],"open_questions":[]}`
 			case 3:
-				large := strings.Repeat("x", 14000)
-				content, err := json.Marshal(map[string][]string{"goals": {large}, "constraints": {large}, "decisions": {large}, "facts": {large}, "open_questions": {}})
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				text = string(content)
+				text = strings.Repeat("x", compaction.MaxSummaryBytes+1)
 			case 2:
 				if after := m.blockAfter.Load(); after > 0 && m.summaries.Load() < after {
 					break
@@ -86,6 +90,10 @@ func compactionEndpoint(t *testing.T) (*compactModel, *httptest.Server) {
 			}
 			m.mu.Lock()
 			m.answers[last] = string(raw)
+			m.definitions = make([]model.ToolDefinition, len(input.Tools))
+			for i, definition := range input.Tools {
+				m.definitions[i] = definition.Function
+			}
 			m.mu.Unlock()
 		}
 		raw, err := json.Marshal(text)
@@ -161,8 +169,8 @@ func TestCompactionManualFailureCancelAndRestartThroughStdio(t *testing.T) {
 	if err := json.Unmarshal(detail.Result, &active); err != nil {
 		t.Fatal(err)
 	}
-	if len(active.Sources) != 4 || active.Summary == "" || active.Sources[0].Fingerprint == "" {
-		t.Fatalf("摘要来源丢失: %+v", active)
+	if len(active.Sources) != 4 || active.Summary != compactSummary || active.Sources[0].Fingerprint == "" {
+		t.Fatalf("摘要正文或来源错误: %+v", active)
 	}
 	if len(readMessages(t, p, cid)) != len(before) {
 		t.Fatal("手动压缩创建或删除消息")
@@ -263,14 +271,14 @@ func TestAutomaticCompactionSurvivesLongHistoryAndKeepsConversationsIsolated(t *
 	if len(versions) < 2 || versions[0].Status != "active" || versions[0].BaseVersionID == nil || upstream.summaries.Load() < 2 {
 		t.Fatalf("长对话未连续压缩: %+v", versions)
 	}
-	page := p.call(t, "conversation.messages", map[string]any{"conversation_id": cid, "limit": 200})
-	requireOK(t, page)
-	var messages []conversation.Message
-	if err := json.Unmarshal(page.Result, &messages); err != nil {
-		t.Fatal(err)
-	}
-	if len(messages) != 200 || messages[len(messages)-1].Sequence != 258 {
+	messages := readMessages(t, p, cid)
+	if len(messages) != 258 {
 		t.Fatal("长对话丢失原文或超过旧上限后未继续")
+	}
+	for i, message := range messages {
+		if message.Sequence != int64(i+1) {
+			t.Fatalf("长对话消息缺失、重复或顺序错误: 第 %d 条的 sequence=%d", i+1, message.Sequence)
+		}
 	}
 	other := compactSend(t, p, mid, "", "独立会话问题")
 	upstream.mu.Lock()
@@ -287,6 +295,7 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg.CallTimeout = 2 * time.Second
 	p := startApp(t, cfg, io.Discard)
 	mid := setupConversationModel(t, p, server.URL)
 	compression := settings.DefaultCompaction()
@@ -294,6 +303,7 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 	compactSend(t, p, mid, "", "读取当前固定上下文")
 	upstream.mu.Lock()
 	probe := upstream.answers["读取当前固定上下文"]
+	definitions := append([]model.ToolDefinition(nil), upstream.definitions...)
 	upstream.mu.Unlock()
 	var requestMessages []model.Message
 	if err := json.Unmarshal([]byte(probe), &requestMessages); err != nil {
@@ -308,23 +318,69 @@ func TestAutomaticCompactionTokenTriggerKeepsCurrentQuestion(t *testing.T) {
 	if len(fixed) != 1 || fixed[0].Content == "" {
 		t.Fatal("主对话缺少固定过程沟通提示")
 	}
-	definitions := []model.ToolDefinition{agent.UserInputDefinition()}
-	for _, instance := range append(filesystem.Tools(tool.ProtectedData{}), command.Tools(nil, tool.ProtectedData{})...) {
-		definitions = append(definitions, instance.Definition().ToolDefinition)
-	}
 	compression.TokenBudget, compression.RetainTurns = tokens.Estimate(fixed, definitions, compression.ImageTokenEstimate)+5700, 1
 	compactionSetting(t, p, compression)
 	cid := ""
 	for i := range 2 {
 		cid = compactSend(t, p, mid, cid, fmt.Sprintf("较早问题%d-", i)+strings.Repeat("历史内容", 300))
 	}
-	cid = compactSend(t, p, mid, cid, "当前问题必须保持原样")
-	if versions := contextVersions(t, p, cid); len(versions) != 1 || versions[0].ThroughSequence != 2 {
+	before := readMessages(t, p, cid)
+	upstream.mode.Store(2)
+	const question = "当前问题必须保持原样"
+	const summaryTimeout = "生成历史摘要超时，原有历史已保留"
+	runID := resultString(t, p.call(t, "conversation.send", map[string]any{"conversation_id": cid, "model_id": mid, "stream": false, "content": messageBlocks(question)}), "run_id")
+	failure := p.event(t, "run.failed")
+	var terminal struct {
+		Run   agent.Run
+		Error struct{ Kind, Message string }
+	}
+	if err := json.Unmarshal(failure.Params, &terminal); err != nil ||
+		terminal.Run.ID != runID || terminal.Error.Kind != "timeout" || terminal.Error.Message != summaryTimeout {
+		t.Fatalf("摘要超时通知错误: %s, %v", failure.Params, err)
+	}
+	stepsFrame := p.call(t, "step.list", map[string]any{"run_id": runID})
+	requireOK(t, stepsFrame)
+	var failedSteps []agent.StepSummary
+	if err := json.Unmarshal(stepsFrame.Result, &failedSteps); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"压缩历史上下文", "生成历史摘要"} {
+		var found bool
+		for _, step := range failedSteps {
+			if step.Name != name {
+				continue
+			}
+			found = true
+			if step.Status != agent.Failed || step.ErrorKind == nil || *step.ErrorKind != "timeout" ||
+				step.ErrorMessage == nil || *step.ErrorMessage != summaryTimeout ||
+				step.StartedAt == nil || step.FinishedAt == nil || *step.FinishedAt <= *step.StartedAt {
+				t.Fatalf("摘要超时未保存正确步骤或计时: %s", stepsFrame.Result)
+			}
+		}
+		if !found {
+			t.Fatalf("缺少 %s 步骤: %s", name, stepsFrame.Result)
+		}
+	}
+	if versions := contextVersions(t, p, cid); len(versions) != 1 || versions[0].Status != "failed" || versions[0].ActivatedAt != nil {
+		t.Fatalf("超时后留下了有效摘要: %+v", versions)
+	}
+	failedRows := readMessages(t, p, cid)
+	if len(failedRows) != len(before)+2 || !reflect.DeepEqual(failedRows[:len(before)], before) {
+		t.Fatal("摘要超时后原有历史被改动")
+	}
+
+	upstream.mode.Store(0)
+	requireOK(t, p.call(t, "conversation.resend", map[string]any{"conversation_id": cid, "message_id": failedRows[len(before)].ID, "stream": false, "content": messageBlocks(question)}))
+	p.event(t, "run.completed")
+	if versions := contextVersions(t, p, cid); len(versions) != 2 || versions[0].Status != "active" || versions[0].ThroughSequence != 2 {
 		t.Fatalf("Token 预算或保留轮次错误: %+v", versions)
 	}
 	upstream.mu.Lock()
 	request := upstream.answers["当前问题必须保持原样"]
 	upstream.mu.Unlock()
+	if !strings.Contains(request, "conversation_context_summary") || !strings.Contains(request, "## 已完成进展") || !strings.Contains(request, "下一步是继续完成任务。") {
+		t.Fatal("后续回答未收到纯文本交接摘要")
+	}
 	if !strings.Contains(request, "当前问题必须保持原样") || !strings.Contains(request, "较早问题1") || strings.Contains(request, "较早问题0") {
 		t.Fatal("Token 触发压缩吞掉了保留轮次或当前问题")
 	}
@@ -394,14 +450,14 @@ func TestManualCompactionWithoutEarlierHistoryIsAnExplicitNoop(t *testing.T) {
 	}
 }
 
-func manyBatchHistory(t *testing.T, p *appPeer, modelID string) string {
+func manyBatchHistory(t *testing.T, p *appPeer, modelID string, repeats int) string {
 	t.Helper()
 	compression := settings.DefaultCompaction()
 	compression.Enabled, compression.RetainTurns = false, 1
 	compactionSetting(t, p, compression)
 	cid := ""
 	for i := range 11 {
-		cid = compactSend(t, p, modelID, cid, fmt.Sprintf("历史问题%d-", i)+strings.Repeat("历史内容", 300))
+		cid = compactSend(t, p, modelID, cid, fmt.Sprintf("历史问题%d-", i)+strings.Repeat("历史内容", repeats))
 	}
 	return compactSend(t, p, modelID, cid, "最近轮次必须保留")
 }
@@ -418,10 +474,26 @@ func TestCompactionContinuesBeyondPreviousBatchLimit(t *testing.T) {
 			}
 			cfg.MaxConcurrentRuns = 1
 			p := startApp(t, cfg, io.Discard)
+			defer func() {
+				if t.Failed() {
+					for _, frame := range p.pending {
+						if frame.Method == "run.failed" {
+							t.Logf("实际执行失败: %s", frame.Params)
+						}
+					}
+				}
+			}()
 			mid := setupConversationModel(t, p, server.URL)
-			cid := manyBatchHistory(t, p, mid)
+			base := readContextUsage(t, p, mid, "", "")
+			if base.EstimatedTokens == nil {
+				t.Fatal("未取得固定上下文预算")
+			}
 			compression := settings.DefaultCompaction()
-			compression.Enabled, compression.TokenBudget, compression.RetainTurns = automatic, 5000, 1
+			// 为主调用的固定提示、设置和工具定义留出实际开销，另留摘要及最近轮次空间。
+			// 每条历史问题约占一半预算，加上回答和摘要提示后仍只能逐轮压缩。
+			compression.Enabled, compression.TokenBudget, compression.RetainTurns = automatic, max(5000, *base.EstimatedTokens+2048), 1
+			repeats := int(compression.TokenBudget / (2 * tokens.Text("历史内容")))
+			cid := manyBatchHistory(t, p, mid, repeats)
 			compactionSetting(t, p, compression)
 			method := "conversation.compact"
 			params := map[string]any{"conversation_id": cid}
@@ -487,7 +559,7 @@ func TestCompactionCanCancelBeyondPreviousBatchLimit(t *testing.T) {
 	cfg.MaxConcurrentRuns = 1
 	p := startApp(t, cfg, io.Discard)
 	mid := setupConversationModel(t, p, server.URL)
-	cid := manyBatchHistory(t, p, mid)
+	cid := manyBatchHistory(t, p, mid, 300)
 	compression := settings.DefaultCompaction()
 	compression.Enabled, compression.TokenBudget, compression.RetainTurns = false, 5000, 1
 	compactionSetting(t, p, compression)

@@ -28,6 +28,18 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 	var value any
 	var err error
 	switch req.Method {
+	case "conversation.attachment_read":
+		var p struct {
+			ConversationID string `json:"conversation_id"`
+			MessageID      string `json:"message_id"`
+			ExpectedRunID  string `json:"expected_run_id,omitempty"`
+			Index          int    `json:"index"`
+			Offset         int64  `json:"offset"`
+		}
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		value, err = h.service.ReadAttachmentChunk(ctx, p.ConversationID, p.MessageID, p.ExpectedRunID, p.Index, p.Offset)
 	case "conversation.history":
 		var p struct {
 			ConversationID string `json:"conversation_id"`
@@ -38,6 +50,21 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 			return reply(nil, rpcErr)
 		}
 		value, err = h.service.History(ctx, p.ConversationID, p.BeforeRunID, p.Limit)
+	case "conversation.attachment_preview":
+		var p struct {
+			ConversationID string `json:"conversation_id,omitempty"`
+			MessageID      string `json:"message_id,omitempty"`
+			Index          int    `json:"index,omitempty"`
+			Path           string `json:"path,omitempty"`
+		}
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		data, mime, previewErr := h.service.PreviewAttachment(ctx, p.ConversationID, p.MessageID, p.Index, p.Path)
+		if previewErr != nil {
+			return reply(nil, publicError(previewErr))
+		}
+		return reply(map[string]any{"data": data, "mime": mime}, nil)
 	case "conversation.context_usage":
 		var p domain.ContextUsageRequest
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
@@ -90,16 +117,6 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 			return reply(nil, rpcErr)
 		}
 		value, err = h.service.Update(ctx, p.ID, p.Update)
-	case "conversation.messages":
-		var p struct {
-			ConversationID string `json:"conversation_id"`
-			BeforeSequence int64  `json:"before_sequence,omitempty"`
-			Limit          int    `json:"limit,omitempty"`
-		}
-		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
-			return reply(nil, rpcErr)
-		}
-		value, err = h.service.Messages(ctx, p.ConversationID, p.BeforeSequence, p.Limit)
 	default:
 		return reply(nil, protocol.MethodNotFound())
 	}

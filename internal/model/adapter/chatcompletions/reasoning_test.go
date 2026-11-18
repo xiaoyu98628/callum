@@ -38,7 +38,7 @@ func TestReasoningResponseAndToolRoundTrip(t *testing.T) {
 	}
 	req := testRequest()
 	req.Messages = append(req.Messages, model.Message{Role: model.RoleAssistant, Reasoning: new("分析"), ToolCalls: []model.ToolCall{{ID: "c", Name: "read_file", Arguments: json.RawMessage(`{}`)}}}, model.Message{Role: model.RoleTool, ToolCallID: "c", Content: "结果"})
-	params, err := buildRequest(t.Context(), req)
+	params, err := (&Client{}).buildRequest(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
 	}

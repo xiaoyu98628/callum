@@ -6,10 +6,12 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/google/uuid v1.6.0
 	github.com/openai/openai-go/v3 v3.90.0
+	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/sys v0.49.0
 	gorm.io/driver/sqlite v1.6.0
 	gorm.io/gorm v1.31.2
 	modernc.org/sqlite v1.61.0
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (

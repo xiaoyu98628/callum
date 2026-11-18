@@ -13,6 +13,8 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model"
 )
 
+var errSummaryTimeout = errors.New("生成历史摘要超时")
+
 // requestFailure 只保留受控错误信息，不保存可能回显凭据的供应商错误体。
 type requestFailure struct {
 	HTTPStatus int    `json:"http_status,omitempty"`
@@ -53,6 +55,8 @@ func failure(err error) (status, kind, message string) {
 		return status, "internal", "保存执行数据失败"
 	case errors.Is(err, context.Canceled):
 		return agent.Cancelled, "cancelled", "执行已取消"
+	case errors.Is(err, errSummaryTimeout):
+		return status, "timeout", "生成历史摘要超时，原有历史已保留"
 	case errors.Is(err, context.DeadlineExceeded):
 		return status, "timeout", "执行超时"
 	case errors.Is(err, agent.ErrOutputLimit):
@@ -64,12 +68,23 @@ func failure(err error) (status, kind, message string) {
 	case errors.Is(err, model.ErrIncomplete), errors.Is(err, io.ErrUnexpectedEOF):
 		return status, "incomplete", "模型输出未完整完成"
 	case errors.Is(err, model.ErrInvalidResponse):
+		if detail, ok := errors.AsType[*model.ToolArgumentsError](err); ok {
+			return status, "invalid_response", detail.Error()
+		}
+		if detail, ok := errors.AsType[*model.ToolCorrectionStalledError](err); ok {
+			return status, "invalid_response", detail.Error()
+		}
 		return status, "invalid_response", "模型响应格式无效"
+	case errors.Is(err, model.ErrImageLimit):
+		return status, "image_limit", model.ErrImageLimit.Error()
 	case errors.Is(err, model.ErrImageRead):
 		return status, "image_read", "图片文件不可读取"
 	case errors.Is(err, model.ErrImageFormat):
 		return status, "image_format", "图片格式不支持"
 	case errors.Is(err, model.ErrInputLimit):
+		if arguments, ok := errors.AsType[*model.ToolArgumentsError](err); ok {
+			return status, "tool_arguments_limit", arguments.Error()
+		}
 		if limit, ok := errors.AsType[*model.InputLimitError](err); ok {
 			return status, "input_limit", limit.Error()
 		}

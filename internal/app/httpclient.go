@@ -13,7 +13,8 @@ func newHTTPClient(maxConnections int) (*http.Client, *http.Transport) {
 		DialContext:       (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2: true, MaxIdleConns: 64, MaxIdleConnsPerHost: maxConnections,
 		MaxConnsPerHost: maxConnections, IdleConnTimeout: 90 * time.Second,
-		TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second,
+		// 响应头和响应体共用模型调用方的期限，非流式生成可能在完成后才发送响应头。
+		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: time.Second,
 	}
 	client := &http.Client{Transport: boundedTransport{transport}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

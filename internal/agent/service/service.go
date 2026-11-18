@@ -10,6 +10,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/agent/approval"
 	"github.com/xiaoyu98628/callum/internal/agent/executor"
+	"github.com/xiaoyu98628/callum/internal/attachment"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	toolexecutor "github.com/xiaoyu98628/callum/internal/tool/executor"
 	"github.com/xiaoyu98628/callum/internal/workspace"
@@ -35,6 +36,8 @@ type Options struct {
 	Tools       *toolexecutor.Executor
 	Approvals   *approval.Service
 	Workspace   func(context.Context, string) (workspace.Workspace, error)
+	Skills      func(context.Context) (string, error)
+	Attachments *attachment.Access
 	CallTimeout time.Duration
 }
 

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
@@ -106,11 +107,19 @@ func TestSettingsStdioConflictAndRestart(t *testing.T) {
 }
 
 func TestSettingsUpdateIsolatesRunningApprovalAndNewRun(t *testing.T) {
+	type projection struct {
+		Source   string `json:"source"`
+		Revision int64  `json:"settings_revision"`
+		Policy   string `json:"approval_policy"`
+		Question string `json:"-"`
+	}
+	projections := make(chan projection, 8)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
 			Tools    []json.RawMessage `json:"tools"`
 			Messages []struct {
-				Role string `json:"role"`
+				Role    string `json:"role"`
+				Content string `json:"content"`
 			} `json:"messages"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -119,6 +128,25 @@ func TestSettingsUpdateIsolatesRunningApprovalAndNewRun(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if len(input.Tools) > 0 {
+			var value projection
+			system := input.Messages[0].Content
+			if json.Unmarshal([]byte(system[strings.LastIndex(system, "\n")+1:]), &value) != nil {
+				t.Error("主请求缺少执行设置投影")
+			}
+			for _, message := range input.Messages {
+				if message.Role == "user" && (message.Content == "旧任务" || message.Content == "新任务") {
+					value.Question = message.Content
+				}
+			}
+			select {
+			case projections <- value:
+			default:
+				t.Error("模型请求超出预期轮次")
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+		}
 		count := 0
 		for _, m := range input.Messages {
 			if m.Role == "tool" {
@@ -170,6 +198,27 @@ func TestSettingsUpdateIsolatesRunningApprovalAndNewRun(t *testing.T) {
 	}
 	requireOK(t, p.call(t, "approval.decide", map[string]any{"approval_id": secondApproval.ID, "decision": "approved"}))
 	nextBusiness(t, sub, "run.completed", oldRun)
+	for range 6 { // 两个任务各经过两轮工具调用及一轮最终回答。
+		var value projection
+		select {
+		case value = <-projections:
+		case <-t.Context().Done():
+			t.Fatal(t.Context().Err())
+		}
+		want := oldSettings
+		if value.Question == "新任务" {
+			want = newSettings
+		} else if value.Question != "旧任务" {
+			t.Fatalf("无法确定请求所属任务: %+v", value)
+		}
+		var execution settings.Execution
+		if err := json.Unmarshal(want.Value, &execution); err != nil {
+			t.Fatal(err)
+		}
+		if value.Source != "server_execution_settings" || value.Revision != want.Revision || value.Policy != string(execution.ApprovalPolicy) {
+			t.Fatalf("模型请求混用了其他执行的设置: %+v want=%+v", value, want)
+		}
+	}
 	steps, err := runtime.Runs().Steps(t.Context(), oldRun, 0, 20)
 	if err != nil {
 		t.Fatal(err)

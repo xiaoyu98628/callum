@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"net/http"
+	"slices"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/attachment"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/adapter/chatcompletions"
@@ -26,7 +28,7 @@ func newModelResolver(providers *providerservice.Service, client *http.Client) i
 	}
 }
 
-func newConversationResolver(providers *providerservice.Service, client *http.Client) agent.Resolver {
+func newConversationResolver(providers *providerservice.Service, client *http.Client, attachments *attachment.Store) agent.Resolver {
 	return func(ctx context.Context, id string) (agent.Resolved, error) {
 		runtime, err := providers.Resolve(ctx, id)
 		if err != nil {
@@ -35,11 +37,11 @@ func newConversationResolver(providers *providerservice.Service, client *http.Cl
 		if runtime.Protocol != "chatcompletions" {
 			return agent.Resolved{}, inference.ErrUnsupported
 		}
-		adapter, err := chatcompletions.New(chatcompletions.Config{BaseURL: runtime.BaseURL, APIKey: runtime.APIKey}, client)
+		adapter, err := chatcompletions.New(chatcompletions.Config{BaseURL: runtime.BaseURL, APIKey: runtime.APIKey, ReadAttachment: attachments.Read}, client)
 		if err != nil {
 			return agent.Resolved{}, err
 		}
-		resolved := agent.Resolved{Client: adapter, Protocol: runtime.Protocol, ImageInput: runtime.Model.Capabilities["image_input"], Snapshot: model.Snapshot{ID: runtime.Model.ID, DisplayName: runtime.Model.DisplayName, RemoteModelID: runtime.Model.RemoteModelID, Provider: model.ProviderSnapshot{ID: runtime.Model.ProviderID, Name: runtime.ProviderName}}}
+		resolved := agent.Resolved{Client: adapter, Protocol: runtime.Protocol, ImageInput: slices.Contains(runtime.Model.ModelType, "image"), Snapshot: model.Snapshot{ID: runtime.Model.ID, DisplayName: runtime.Model.DisplayName, RemoteModelID: runtime.Model.RemoteModelID, Provider: model.ProviderSnapshot{ID: runtime.Model.ProviderID, Name: runtime.ProviderName}}}
 		if runtime.Model.ContextWindow != nil {
 			resolved.ContextWindow = *runtime.Model.ContextWindow
 		}

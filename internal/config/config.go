@@ -11,6 +11,7 @@ import (
 type Config struct {
 	DataDir           string
 	DatabasePath      string
+	RuntimeDir        string
 	MaxConcurrentRuns int
 	CallTimeout       time.Duration
 	ToolTimeout       time.Duration

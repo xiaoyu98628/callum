@@ -75,3 +75,17 @@ func TestDecodeBoundsInputAndNesting(t *testing.T) {
 		t.Fatalf("未限制嵌套深度: %v", err)
 	}
 }
+
+func TestDecodeFieldFeedbackPreservesNestedTypeWithoutValues(t *testing.T) {
+	for _, test := range []struct{ raw, field string }{
+		{`{"command":"private-value"}`, "command"},
+		{`{"versions":[{"path":"a","sha256":12345}]}`, "versions.0.sha256"},
+	} {
+		var dst input
+		_, err := arguments.Decode(json.RawMessage(test.raw), &dst)
+		detail, ok := errors.AsType[*tool.ArgumentError](err)
+		if !ok || detail.Field != test.field || !strings.Contains(detail.Message, "字符串") || strings.Contains(detail.Error(), "private-value") || strings.Contains(detail.Error(), "12345") {
+			t.Fatalf("字段诊断不准确或回显了值: %v", err)
+		}
+	}
+}

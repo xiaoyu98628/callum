@@ -16,6 +16,9 @@
 | `internal/model/provider/service` | 配置业务校验、UUIDv7 分配及启用规则 | 已实现业务服务 |
 | `internal/credentials`、`system` | 凭据加密、系统主密钥及关闭时清理 | 已实现，平台验证分别说明 |
 | `internal/config` | 应用配置加载及启动参数 | 已实现 |
+| `internal/skills` | 从数据目录发现通用技能及生成有界目录上下文，不安装或内嵌技能 | 已实现 |
+| `internal/attachment` | 托管输入和交付副本、本轮工作副本及异常退出清理 | 已实现 |
+| `internal/runtimeassets`、`prepare` | 运行时清单及文件校验；开发侧固定归档下载、安全解压与资源准备 | 已实现；运行期只读，不修改全局环境 |
 | `internal/settings`、`service` | 配置组契约、执行快照、值校验与版本更新 | 已实现 |
 | `internal/storage/sqlite/settings` | 应用设置持久化和版本冲突校验 | 已实现 |
 | `internal/stdio/settings` | 应用设置查询、更新接口 | 已实现 |
@@ -51,6 +54,12 @@
 | `internal/stdio/workspace`、`conversation` | 工作区和对话接口 | 已实现 |
 
 ## 业务边界与执行恢复
+
+技能正文、脚本、参考资料、解释器和原生依赖由客户端持有，默认技能安装也在客户端完成。Go 从 `DataDir/skills` 扫描 `SKILL.md`，只向模型提供名称、说明和绝对入口；模型通过通用文件与命令工具按需加载。Go 不包含 Word、Excel、PowerPoint 或 PDF 的解析、生成、编辑和渲染实现。`load_workspace_dependencies` 只返回资源清单中的通用 Python、Node、模块及原生命令目录，不依赖特定文档格式。
+
+`attachment.Access` 为已受理执行管理私有输入副本和中间目录；命令子进程结束后由 Agent 回收，Runtime 关闭等待全部执行后再关闭访问器和附件存储。`open_attachment` 按当前分支校验文件引用；`view_image` 把固定图片保存为稳定工具上下文；`publish_artifact` 保存独立交付副本，结束前追加到回答。执行中断时，存储层在标记中断的事务内从当前分支的成功步骤恢复交付物引用。图片在适配层转换为整批工具结果之后的视觉输入，原始统一轨迹保持调用和结果配对，压缩和恢复继续复用同一轨迹契约。
+
+`internal/runtimeassets` 返回启动时校验的不可变资源描述，不持有文件、进程或后台任务；`Runtime` 将其借给命令工具并把实际资源根目录登记为只读保护范围。资源描述同时固定 Python、Node、Git 入口及 Git 配套资源路径，子进程专用环境由命令工具生成。命令调用仍独立持有并关闭固定入口和资源目录句柄，沿用审批、进程组/Job 与输出生命周期。`prepare` 同时由随附 `callum prepare-runtimes` 离线子命令及独立维护入口 `cmd/prepare-runtimes` 使用：前者严格禁止下载且不创建应用 Runtime，后者仅在显式 `--download` 时获取缺失归档；正常 stdio 服务不调用准备流程。
 
 `internal/conversation/compaction` 负责完整轮次的压缩规划、来源指纹与摘要校验，执行编排位于 `internal/agent/service`。用户补充输入使用现有步骤持久化，支持选项、文字、跳过和取消。工具和审批业务不依赖 stdio，后续入口复用同一 Agent 与审批服务。
 会话更新通过 `conversation.Update` 接收模型 ID 及可更新字段，业务服务校验后生成仓储使用的 `conversation.Change`，模型快照由服务端解析；JSON-RPC 的请求、响应和通知字段保持兼容。
@@ -107,3 +116,5 @@ app 创建连接、配置服务及执行管理器，并负责资源关闭顺序�
 `Close` 停止入口、取消并等待所有任务及连接，关闭发布器、HTTP 空闲连接，清空 Vault 主密钥缓存并关闭数据库，最后释放实例锁，可以重复调用。
 HTTP、WebSocket 和 CLI 入口尚未实现；接入时复用同一运行时和业务事件，各自转换请求、错误、响应和推送格式。
 macOS/Linux 标准流副本与非阻塞标志的恢复封装在 `stdio/transport`，入口不直接操作文件描述符。
+
+工具参数纠正由模型适配器报告完整响应中的参数错误，再由 Agent 服务在确认本轮未执行任何工具后编排新请求；适配器不依赖 Agent 或审批层。临时纠正信息由单次执行持有、计入请求预算，失败响应及 usage 由模型步骤持久化；不改变数据库结构。命令工具的 Shell 语法解析仅发生在参数校验阶段，不启动 Shell 或解释脚本。

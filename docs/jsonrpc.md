@@ -1,6 +1,6 @@
 # JSON-RPC 通信与手工测试
 
-本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `3`，两者含义不同。
+本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `4`，两者含义不同。
 
 运行参数和开发检查见 [运行与开发](development.md)，配置空值和持久化规则见 [存储与模型配置](storage.md)，工具策略见 [Agent 工具与审批](tools-and-approvals.md)，Token 估算及压缩规则见 [上下文统计与压缩](context-compaction.md)。
 
@@ -82,9 +82,10 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | 应用设置 | `settings.get`、`settings.update` |
 | 厂商 | `provider.create`、`provider.update`、`provider.get`、`provider.list`、`provider.delete` |
 | 模型配置 | `model.create`、`model.update`、`model.get`、`model.list`、`model.set_enabled`、`model.delete` |
+| 技能 | `skills.list` |
 | 无历史调用 | `model.invoke` |
 | 工作区 | `workspace.create`、`workspace.update`、`workspace.get`、`workspace.list`、`workspace.delete`、`workspace.restore` |
-| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.messages`、`conversation.history`、`conversation.delete`、`conversation.restore` |
+| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.history`、`conversation.attachment_preview`、`conversation.delete`、`conversation.restore` |
 | 上下文压缩 | `conversation.context_usage`、`conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
 | 执行 | `run.get`、`run.list`、`run.cancel` |
 | 步骤 | `step.get`、`step.list`、`step.data` |
@@ -93,6 +94,14 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | 用户补充输入 | `user_input.get`、`user_input.list`、`user_input.submit` |
 
 不存在 `conversation.create` 或客户端直接执行工具的 JSON-RPC 方法。首次提问创建会话，工具由模型自主选择。
+
+### skills.list
+
+```json
+{"jsonrpc":"2.0","id":"skills-list","method":"skills.list","params":{}}
+```
+
+返回当前已发现的技能数组。每项包含 `name`、`description`、实际入口的绝对路径 `path`、`source`（`system` 或 `user`），以及为真时提供的 `explicit_only`。每次请求重新发现，沿用模型上下文的扫描边界和同名用户技能优先规则。空目录返回 `[]`，读取失败返回 `-32603`。列表只包含元数据。
 
 ## 3. 推荐测试顺序
 
@@ -250,12 +259,12 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | `enabled` | boolean | 必须显式提交 `true` 或 `false` |
 | `context_window` | integer/null | 已确认的上下文窗口；填写时必须大于零，未知则省略或 `null` |
 | `max_output_tokens` | integer/null | 已确认的最大输出 Token 数；填写时必须大于零 |
-| `capabilities` | object/null | 具体能力，支持 `image_input`、`tools`、`reasoning` 布尔值；`tools` 仅保留兼容元数据，不作为开关 |
-| `model_type` | string[] | 可多选的内容类型：`text`、`image`、`audio`、`video`，不能重复；空数组表示尚未标注 |
+| `capabilities` | object/null | 模型拥有的能力，支持 `image_input`、`tools`、`reasoning` 布尔值；不代表用户已选择启用 |
+| `model_type` | string[] | 用户选中启用的类型：`text`、`image`、`audio`、`video`，不能重复；包含 `image` 时启用图片输入 |
 | `reasoning_levels` | object[]/null | 每项包含 `display_name`、`remote_value`；远端值以真实厂商定义为准 |
 
 普通对话与 Agent 默认向所有模型提供工具，无需填写 `capabilities.tools`，也不在 `model_type` 中选择工具。`capabilities:null`、`model_type:[]` 的配置同样可以调用工具。
-`reasoning` 和推理等级仅作元数据，不自动传入推理参数，也不阻止文本请求。图片输入需 `capabilities.image_input:true`；标注 `model_type:["image"]` 不自动声明图片输入或输出。图片输出及音视频输入输出尚未接入，类型字段只保存元数据。
+`reasoning` 和推理等级仅作元数据，不自动传入推理参数，也不阻止文本请求。图片输入以 `model_type` 包含 `image` 为启用依据；仅有 `capabilities.image_input:true` 而未选中 `image` 时不启用，缺少能力声明不会覆盖用户的选择。类型数组为空仍可发送文本和调用工具。图片输出及音视频输入输出尚未接入。
 模型响应或流式分片含非 NULL 的 `audio` 字段时，执行明确失败，错误类型为 `unsupported`；`audio:null` 和未知厂商元数据可以保留。合法空文本响应仍可成功，音频内容不会被当作空文本成功处理。
 
 上下文窗口和最大输出 Token 用于解析会话压缩预算；它们不会自动变成每次请求的 max_tokens 或其他输出参数。推理等级仍为元数据。自动压缩启用且窗口未知时，必须在 context_compaction 设置显式 token_budget；model.update 完整替换时需保留所需容量字段。model.invoke 不应用会话压缩预算。
@@ -301,6 +310,14 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 ### conversation.send：首次提问，非流式模型响应
 
+选择技能时在 `content` 中附上独立的 `skill` 内容块，`name` 和规范绝对 `path` 必须来自 `skills.list`。每条消息支持一个引用，任务正文使用独立的 `text` 块。`conversation.resend` 使用相同约定，重发时可移除或替换技能。
+
+```json
+{"jsonrpc":"2.0","id":"chat-skill","method":"conversation.send","params":{"model_id":"<model_id>","content":[{"type":"skill","name":"documents","path":"<skills.list 返回的入口路径>"},{"type":"text","text":"解析一下"}]}}
+```
+
+服务受理时按当前目录核对名称和入口，同名覆盖、已删除或目录外入口匹配失败返回 `-32602`。引用和正文保存在消息内容中。模型上下文使用 `$documents 解析一下`，同时提供所选名称和路径的 JSON 元数据以区分同名技能。标题使用任务正文。技能引用沿用工具权限和审批规则。
+
 ```json
 {"jsonrpc":"2.0","id":"chat-first","method":"conversation.send","params":{"model_id":"<model_id>","stream":false,"content":[{"type":"text","text":"我叫小雨，请记住我的名字。"}]}}
 ```
@@ -317,7 +334,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 - 等待 `message.updated` 获取完整回答，并以 `run.completed`、`run.failed`、`run.cancelled` 判断终态。
 
 默认标题为首条问题文字去首尾空白后前 30 个 Unicode 码点，英文按字母、空格、标点计数，仅图片默认“新对话”。
-标题调用与首次回答并行，使用当前模型，最多 10 秒且受模型请求超时约束；容量不足时跳过，主回答结束即取消并等待尚未完成的标题任务。
+标题调用与首次回答并行，只使用提问中的文字，纯图片提问保留默认标题。标题使用当前模型，最多 10 秒且受模型请求超时约束；容量不足时跳过，主回答结束即取消并等待尚未完成的标题任务。
 标题成功通过 conversation.updated 更新；人工改名和问题内容变化会阻止旧标题覆盖。标题失败不导致回答失败。
 
 ### conversation.send：继续同一会话，流式回答
@@ -338,23 +355,6 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 文本片段不保证按词、句或完整 JSON 切分，客户端按对应消息追加。收到 `message.updated` 时使用其中完整的 `message.content` 替换本地消息内容。
 
-### conversation.messages
-
-```json
-{"jsonrpc":"2.0","id":"messages-latest","method":"conversation.messages","params":{"conversation_id":"<conversation_id>","limit":100}}
-{"jsonrpc":"2.0","id":"messages-before","method":"conversation.messages","params":{"conversation_id":"<conversation_id>","before_sequence":3,"limit":100}}
-```
-
-返回消息数组。`before_sequence` 为严格小于该顺序号，省略时读取最近一页；每页内部按 `sequence` 升序排列。`limit` 默认 100，范围 1 至 200；消息页还有 7 MiB 保护，可能少于请求数量。使用当前页最小 `sequence` 作为下一次 `before_sequence`，直到空数组。
-
-消息对象示例：
-
-```json
-{"id":"<message_id>","conversation_id":"<conversation_id>","run_id":"<run_id>","sequence":2,"role":"assistant","content":[{"type":"text","text":"好的，我记住了，你叫小雨。"}],"status":"completed","created_at":1700000000000,"updated_at":1700000001000,"completed_at":1700000001000}
-```
-
-顺序从 1 开始：用户问题为 1、模型回答为 2、下一条问题为 3，不使用 `parent_message_id`。工具调用和审批保存在步骤表，不作为对话消息插入，跨表关系使用外键、唯一约束和事务校验。
-
 ### conversation.history
 
 ```json
@@ -364,7 +364,15 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 返回 `{"messages":[],"runs":[],"before_run_id":"","has_more":false}`。`limit` 默认和上限均为 25，按执行 ID 严格向前翻页；页内执行按 UUIDv7 升序、消息按 sequence 升序排列。每个执行的消息完整返回，消息 content 编码累计最多 4 MiB，超过时缩短页面；单轮超过边界明确报错。`runs` 使用既有执行对象格式。
 
-仅包含当前消息分支的执行和独立手动压缩执行，重发旧分支审计仍可单独查询，但不进入展示历史。压缩执行没有消息，因此空 messages 不表示历史结束；以 `has_more` 判断，用非空 `before_run_id` 继续查询。执行和消息在同一读事务内查询，客户端不必从最新 `run.list` 窗口推测旧消息的运行状态。`conversation.messages` 保持原有兼容语义。
+仅包含当前消息分支的执行和独立手动压缩执行，重发旧分支审计仍可单独查询，但不进入展示历史。压缩执行没有消息，因此空 messages 不表示历史结束；以 `has_more` 判断，用非空 `before_run_id` 继续查询。执行和消息在同一读事务内查询，客户端不必从最新 `run.list` 窗口推测旧消息的运行状态。
+
+`messages` 中的消息对象示例：
+
+```json
+{"id":"<message_id>","conversation_id":"<conversation_id>","run_id":"<run_id>","sequence":2,"role":"assistant","content":[{"type":"text","text":"好的，我记住了，你叫小雨。"}],"status":"completed","created_at":1700000000000,"updated_at":1700000001000,"completed_at":1700000001000}
+```
+
+顺序从 1 开始：用户问题为 1、模型回答为 2、下一条问题为 3，不使用 `parent_message_id`。工具调用和审批保存在步骤表，不作为对话消息插入，跨表关系使用外键、唯一约束和事务校验。
 
 ### conversation.resend
 
@@ -471,7 +479,11 @@ result 包含 conversation_id（新对话为空）、model_id、可选 run_id、
 
 每批创建 `context_compression` 步骤，其 `input.trigger` 保存 type（manual/automatic）和 reason；自动触发另含 token_budget 和 estimate（input_tokens、method、可选 reference_input_tokens），另保存压缩设置版本、来源数量和覆盖顺序；子 `model_call` 的 purpose 为 `context_summary`，只由该子步骤保存实际 usage。摘要模型不获得工具。成功父步骤 output 包含 `compressed:true`、`context_version_id`、`size_stats`；摘要正文通过版本详情查询。回答模型步骤 input.context_version_id 指向实际使用的有效摘要；摘要模型步骤的 generated_context_version_id 指向它正在生成的版本，可另带实际输入的 context_version_id。
 
-摘要结构、大小、压缩收益及来源验证失败均保留旧有效版本，本次执行明确失败，不自动重试模型或工具。重启将未结束压缩执行标记为 interrupted、building 版本标记为 failed，不重放旧通知。已经事务提交的有效版本不会因随后取消或退出被回滚。
+摘要请求超时时，`run.failed` 及压缩和摘要步骤的 `error_kind` 为 `timeout`，`error_message` 为「生成历史摘要超时，原有历史已保留」。历史消息、审计记录及此前已生效的摘要继续可查。
+
+摘要模型返回纯文本交接摘要，可包含标题和列表。摘要版本和执行内检查点保存正文，摘要子步骤保留模型原始响应。
+
+摘要正文、大小、压缩收益及来源验证失败均保留上一份有效摘要，本次执行明确失败，不自动重试模型或工具。重启将未结束压缩执行标记为 interrupted、building 版本标记为 failed，不重放旧通知。已经事务提交的有效版本不会因随后取消或退出被回滚。
 
 #### conversation.context_versions / conversation.context_version
 
@@ -488,13 +500,13 @@ result 包含 conversation_id（新对话为空）、model_id、可选 run_id、
 | `base_version_id` | 被合并的旧摘要版本，可沿此追溯完整来源 |
 | `generated_by_step_id` | 生成该版本的 context_compression 步骤 |
 | `through_sequence` | 本版本累计覆盖到的消息顺序号 |
-| `summary` | 五个字符串数组组成的 JSON 文本，最多 64 KiB |
+| `summary` | 摘要正文为 UTF-8 文本，最多 64 KiB，通过 JSON 字符串返回 |
 | `source_manifest` | 本批新增覆盖消息的 message_id、run_id、sequence、fingerprint；指纹涵盖消息内容及对应统一工具轨迹 |
 | `size_stats` | before_messages、after_messages、before_bytes、after_bytes，以及新版本的 estimated_before_tokens、estimated_after_tokens、estimation_method（被摘要替换的历史部分）；估算不是 usage，旧版本可缺少估算字段 |
 | `status` | building、active、superseded、invalid、failed；同会话最多一个 active |
 | 时间字段 | created_at、updated_at、activated_at、invalidated_at，毫秒时间戳，可空时间为 null |
 
-原始消息和步骤不因压缩删除。编辑重发使覆盖被编辑消息的摘要失效，并清除摘要正文及对应模型结果副本；仍有效摘要的模型结果保留，旧分支审计不进入新上下文。待核实操作独立从当前分支审计恢复，摘要不能解除重新审批要求。结构校验不保证语义完全无损，实际输出可追溯原文核对。
+原始消息和步骤不因压缩删除。编辑重发使覆盖被编辑消息的摘要失效，并清除摘要正文及对应模型结果副本；仍有效摘要的模型结果保留，旧分支审计不进入新上下文。待核实操作独立从当前分支审计恢复，摘要不能解除重新审批要求。摘要内容可追溯原文核对。
 
 ## 10. 工作区
 
@@ -553,7 +565,7 @@ result 包含 conversation_id（新对话为空）、model_id、可选 run_id、
 
 Agent 不设固定模型轮次、累计工具次数或单次响应工具调用数量上限，也不再因调用次数产生 iteration_limit。执行持续到模型完成、用户取消、连接/应用退出或不可继续的错误。历史执行中已有的错误记录保留原值。并发、单次模型/工具超时、审批、Token 预算及内容边界继续生效。
 
-工具定义种类数不设本地固定上限，由实际请求大小和远端协议校验；每个工具参数不超过 16 KiB，响应中调用 ID、名称和参数的累计字段字节不超过 8 MiB，原始上游响应不超过 16 MiB。工具调用参数完整后才执行；执行前检查整批调用及最小结果结构容量，实际结果逐次检查累计上下文。触及资源边界停止并保留已发生操作及结果，不自动重试；当前问题和正在执行的工具批次保留原文，较早完成的批次可通过步骤摘要继续复用。
+工具定义种类数不设本地固定上限，由实际请求大小和远端协议校验；每个工具参数不超过 16 KiB，响应中调用 ID、名称和参数的累计字段字节不超过 8 MiB，原始上游响应不超过 16 MiB。工具调用参数完整后才执行；执行前检查整批调用及最小结果结构容量，实际结果逐次检查累计上下文。执行期间触及资源边界停止并保留已发生操作及结果，不自动重试；整批尚未执行的单项参数超限按下文参数纠正规则处理。当前问题和正在执行的工具批次保留原文，较早完成的批次可通过步骤摘要继续复用。
 
 ### 11.1 默认工具调用
 
@@ -645,15 +657,25 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 默认 workspace-write 模式下，`never` 允许纯读取、工作区内普通补丁及普通沙箱命令；read-only 模式下补丁修改需要审批并被 never 拒绝。其他情况下，纯读取及工作区内普通补丁修改仍可执行，无工作区或工作区外普通修改、大范围覆盖及其他需要审批的操作直接拒绝。删除、外发类别使用受控工具测试验证，并不表示存在相应产品工具。
 
-## 12. 图片输入
+## 12. 附件输入与文件交付
 
-仅在厂商模型实际支持图片输入时执行。以下完整更新声明图片输入能力，并标注文本、图片内容类型；其余可选元数据会清空：
+普通文件以 `file` 内容块提交，不要求模型启用图片类型：
+
+```json
+{"jsonrpc":"2.0","id":"chat-file","method":"conversation.send","params":{"model_id":"<model_id>","stream":true,"content":[{"type":"text","text":"请分析文档。"},{"type":"file","path":"<absolute_file_path>","name":"report.docx"}]}}
+```
+
+服务受理时保存独立副本，消息块返回 `attachment_ref`、`name`、`mime`、`size`。零字节文件允许提交，JSON 中零大小可能省略。发送给模型的是附件元数据，正文由 Agent 按需读取：读取技能说明、用 `open_attachment` 获取本轮副本，再通过命令工具运行技能脚本或解释器。文件不经 Responses API 预处理，也不自动转成提示词全文。格式能力由客户端实际提供的技能和依赖决定。
+
+每条消息的图片和文件合计最多 8 个，单个原件最多 16 MiB，合计最多 32 MiB。选择、移除和保留文件使用与图片相同的消息受理及重发事务。以下图片能力和像素规则只作用于 `image` 内容块。
+
+仅在厂商模型实际支持图片输入时执行。以下完整更新记录模型能力，并通过 `model_type` 选择启用文本、图片类型；其余可选元数据会清空：
 
 ```json
 {"jsonrpc":"2.0","id":"model-enable-image","method":"model.update","params":{"id":"<model_id>","provider_id":"<provider_id>","display_name":"测试模型","remote_model_id":"<remote_model_id>","enabled":true,"capabilities":{"image_input":true},"model_type":["text","image"]}}
 ```
 
-工具默认提供，不需要为图片与工具组合另设开关。类型数组可以为空；是否允许图片输入取决于 `capabilities.image_input`，不从类型数组推断。
+工具默认提供，不需要为图片与工具组合另设开关。图片输入只在类型数组包含 `image` 时启用；`capabilities.image_input` 记录模型能力，不作为用户启用开关。
 
 图片内容块使用本地绝对路径：
 
@@ -661,10 +683,25 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 {"jsonrpc":"2.0","id":"chat-image","method":"conversation.send","params":{"model_id":"<model_id>","stream":true,"content":[{"type":"text","text":"请描述这张图片。"},{"type":"image","path":"<absolute_image_path>"}]}}
 ```
 
-图片要求使用规范绝对路径、普通对话启用 image_input，并由具体端点支持；服务读取 PNG、JPEG、GIF、WebP 为内联数据发送，不把本地路径直接交给远端。
-单图最多 4 MiB，实际请求 JSON 上限 12 MiB；图片读取失败、格式不支持、超限均明确失败，不静默丢弃内容块。
-当前适配器不生成图片，附件管理未接入，编辑或删除消息不删除图片源文件。图片原文件不复制、不版本化，历史再次调用仍依赖该路径指向的可读文件。客户端不传 Base64 或远端协议格式。
-读取只接受核对身份后的普通文件，使用已打开的固定句柄。Unix 使用非阻塞打开；路径在检查后被替换为命名管道时明确失败，不等待管道写端。
+图片要求使用规范绝对路径、模型的 `model_type` 包含 `image`，并由具体端点支持。Go 在受理时把原图写入数据目录下的 `attachments/<conversation_id>/<run_id>/<sha256>.<ext>`。消息内容块保存 `type: "image"` 和相对 `attachment_ref`。旧消息中的绝对 `path` 仍可读取，编辑重发时导入副本。模型请求将图片编码为内联数据 URL，原文件路径保留在本机。
+
+每条消息最多 8 张图，原文件每张最多 16 MiB，合计最多 32 MiB。发送版的像素边界为长边 2048、32×32 像素块最多 2500，处理前限制 1600 万像素和单边 16384。PNG 和 JPEG 超过发送边界时等比缩小或重编码。GIF 和 WebP 以原编码发送，超限时提示转换或缩小。发送版单图最多 4 MiB，实际请求 JSON 上限 12 MiB。预检和发送复用本次执行的托管图片准备结果。图片读取、格式和处理上限错误在受理前返回，错误码为 `1013`，`data.kind` 为 `image_read`、`image_format`、`image_limit` 或 `input_limit`。
+
+`conversation.resend` 可提交 `expected_run_id` 和 `retained_attachments`。后者为原提问中保留图片或文件块的零基索引数组，必须与原执行一同提交。服务器只接受该消息的附件索引，新选择的附件继续以 `content` 提交。消息或执行不匹配时拒绝重发。
+
+`conversation.attachment_preview` 接收 `conversation_id`、`message_id` 和零基 `index`，返回 `{ "mime": "image/png", "data": "<Base64>" }`。客户端可用独立的 `path` 参数预览尚未发送的草稿图。预览使用有界的发送尺寸，原图副本保持原字节。`conversation.context_usage` 接收可选的 `draft_images`，按设置中的单图估算计入草稿用量。
+
+图片读取只接受核对身份后的普通文件，使用已打开的固定句柄。Unix 使用非阻塞打开；路径在检查后被替换为命名管道时明确失败。会话附件属于本机应用数据，发送给模型时遵守上面的图片输入规则。
+
+`view_image` 的稳定图片引用保存在工具步骤上下文中；适配层在整批工具结果之后提供视觉输入。`publish_artifact` 保存独立交付副本，执行结束前追加到助手消息的 `file` 块。成功步骤已持久化后发生的中断，在启动时恢复当前分支的交付引用。后续追问可通过 `open_attachment` 重新读取当前分支中的交付物，不依赖已删除的本轮中间目录。
+
+`conversation.attachment_read` 按当前会话、消息、内容块索引和偏移读取原件。可选的 `expected_run_id` 绑定消息版本，版本不符返回错误码 `1003`。桌面端的每个分片请求都携带所选消息的版本。
+
+```json
+{"jsonrpc":"2.0","id":"attachment-read","method":"conversation.attachment_read","params":{"conversation_id":"<conversation_id>","message_id":"<message_id>","expected_run_id":"<run_id>","index":1,"offset":0}}
+```
+
+返回 `{ "run_id": "<run_id>", "sha256": "<hex>", "name": "report.docx", "mime": "...", "size": 4096, "offset": 0, "data": "<Base64>", "next_offset": null }`。每段不超过 1 MiB，服务端核对完整文件哈希。`next_offset` 为下一段偏移，`null` 表示结束。客户端应逐片核对消息版本、摘要、名称、大小和偏移，并于保存前校验合并后的 SHA-256。空文件返回空 Base64、大小 `0` 和 `next_offset:null`。已替换消息及跨会话索引拒绝读取。
 
 ## 13. 执行查询和取消
 
@@ -722,6 +759,10 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 步骤包含 `id`、`conversation_id`、`run_id`、`parent_step_id`、`sequence`、`type`、`name`、`status`、`input`、模型身份、请求／工具调用标识、错误和时间字段，以及 `output_bytes`、`usage_bytes`、`definition_bytes`。
 
 通知、列表和 `step.get` 均将大型 `output`、`usage`、`definition` 置为 `null`，这不代表数据库中没有数据。通过下面的 `step.data` 获取原始字段。
+
+参数纠正期间执行保持 running。完整模型响应中的工具参数 JSON 损坏时，失败模型步骤保留原响应和 usage，本轮不创建任何工具步骤；下一模型步骤 input.tool_arguments_correction 记录 source_step_id 和从 0 开始的 call_index。该反馈仅用于本次请求且计入容量校验，不是用户输入或授权。纠正后重新校验和审批；重复同一坏参数且无进展时通过 run.failed 的 invalid_response 和具体安全说明结束。类型错误或简单 Shell 包装则产生 failed 工具步骤，error_kind=invalid_arguments，error_message 提供字段纠正说明，operation.outcome=not_applied。详见 [Agent 工具与审批](tools-and-approvals.md#非交互命令执行)。
+
+单项参数超过 16 KiB 时，失败模型步骤的 `error_kind` 为 `tool_arguments_limit`，说明包含工具名、接收字节数和上限。流式响应可在结束标记前因该边界关闭。确认整批工具未执行且无其他失败后进入同一纠正流程，`input.tool_arguments_correction` 额外记录 `tool`、`actual_bytes`、`limit_bytes`。超限片段及缺失的结束标记保留在失败模型结果中，缺失 usage 不补造。
 
 模型步骤 input.token_budget 保存按受理策略解析的规划 input_limit、context_window、max_output_tokens、estimated_input_tokens、estimation_method，估算和模型身份/设置快照分开于实际 usage。关闭自动压缩时普通回答不强制执行该规划预算，且无法解析预算时不附加此字段。
 
@@ -953,6 +994,8 @@ HTTP 状态，不暴露凭据、原始供应商响应体或底层错误链。
 
 
 ## 20. 非交互命令执行
+
+服务以 `--runtime-dir` 接入内置解释器后，`python`、`python3`、`node` 裸命令固定到可信资源清单入口，命令工具定义版本为 `9`。子进程 PATH 优先使用同套运行时；启动检查全部文件和链接，命令准备复核解释器完整性。审批 `details.read_only_roots` 展示实际只读资源目录，Windows 的 `readable_roots` 同时包含所需标准库和配套资源。工具说明每轮提供直接 `python3`/`node` 调用示例及内置绝对入口，默认不用登录 Shell 包装；只有确需 Shell 语法时才显式使用非登录 Shell 与内置绝对路径。参数及事件契约保持不变，完整资源和权限规则见 [Agent 工具与审批](tools-and-approvals.md#非交互命令执行)。
 
 `run_command` 是模型工具，通过 `conversation.send` 请求任务，不能将以下工具参数直接作为 stdio 请求发送：
 

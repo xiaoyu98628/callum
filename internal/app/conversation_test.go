@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -46,13 +47,39 @@ func messageBlocks(text string) []map[string]string {
 
 func readMessages(t *testing.T, p *appPeer, id string) []conversation.Message {
 	t.Helper()
-	frame := p.call(t, "conversation.messages", map[string]any{"conversation_id": id})
-	requireOK(t, frame)
 	var rows []conversation.Message
-	if err := json.Unmarshal(frame.Result, &rows); err != nil {
+	before := ""
+	for {
+		frame := p.call(t, "conversation.history", map[string]any{"conversation_id": id, "before_run_id": before, "limit": 25})
+		requireOK(t, frame)
+		var page conversation.HistoryPage
+		if err := json.Unmarshal(frame.Result, &page); err != nil {
+			t.Fatal(err)
+		}
+		rows = append(page.Messages, rows...)
+		// 独立压缩页可能没有消息；只按服务端结束标记停止，并拒绝不推进的游标。
+		if !page.HasMore {
+			return rows
+		}
+		if page.BeforeRunID == "" || (before != "" && page.BeforeRunID >= before) {
+			t.Fatalf("历史分页游标未推进: %q -> %q", before, page.BeforeRunID)
+		}
+		before = page.BeforeRunID
+	}
+}
+
+func TestConversationMessagesMethodIsUnavailable(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+	if err != nil {
 		t.Fatal(err)
 	}
-	return rows
+	p := startApp(t, cfg, io.Discard)
+	frame := p.call(t, "conversation.messages", map[string]any{"conversation_id": "019a4f39-0000-7000-8000-000000000001"})
+	if frame.Error == nil || frame.Error.Code != -32601 {
+		t.Fatalf("已移除接口未返回 method not found: %+v", frame.Error)
+	}
+	p.stop(t)
 }
 
 func TestConversationLifecycleThroughStdio(t *testing.T) {
@@ -61,7 +88,7 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 	releaseFirst := func() { once.Do(func() { close(finishFirst) }) }
 	t.Cleanup(releaseFirst)
 	var mu sync.Mutex
-	historyCount := map[string]int{}
+	histories := map[string][]string{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer fake-dialogue-key" {
 			t.Error("未使用配置快照中的测试凭据")
@@ -89,10 +116,10 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 		}
 		text := input.Messages[len(input.Messages)-1].Content
 		mu.Lock()
-		// 主对话的固定系统提示不属于持久化历史。
+		// 固定上下文可以增加元数据，持久化历史仍须按原文和顺序恢复。
 		for _, message := range input.Messages {
 			if message.Role != "system" {
-				historyCount[text]++
+				histories[text] = append(histories[text], message.Content)
 			}
 		}
 		mu.Unlock()
@@ -183,10 +210,11 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 	oldAnswer := resultString(t, second, "message_id")
 	p.event(t, "run.completed")
 	mu.Lock()
-	count := historyCount["第二个问题"]
+	assembled := histories["第二个问题"]
 	mu.Unlock()
-	if count != 3 {
-		t.Fatalf("未组装前两条历史: %d", count)
+	wantHistory := []string{question, "流式正文", "第二个问题"}
+	if len(assembled) < len(wantHistory) || !slices.Equal(assembled[len(assembled)-len(wantHistory):], wantHistory) {
+		t.Fatalf("历史内容或顺序错误: %q", assembled)
 	}
 	resend := p.call(t, "conversation.resend", map[string]any{"conversation_id": convID, "message_id": secondUser, "stream": false, "content": messageBlocks("修改后的问题")})
 	newRun := resultString(t, resend, "run_id")

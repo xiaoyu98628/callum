@@ -18,7 +18,6 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/agent/events"
 	"github.com/xiaoyu98628/callum/internal/config"
-	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/tool"
@@ -46,11 +45,13 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 					w.WriteHeader(400)
 					return
 				}
-				if len(input.Tools) != 6 {
-					t.Errorf("未提供六个工具定义: %d", len(input.Tools))
+				if len(input.Tools) != 9 {
+					t.Errorf("未提供完整的内置工具定义: %d", len(input.Tools))
 				}
 				if len(input.Messages) < 2 || input.Messages[0].Role != "system" || !strings.Contains(input.Messages[0].Content, "1～2句话") || !strings.Contains(input.Messages[0].Content, "正文 content") {
 					t.Error("主对话未发送操作前说明的固定提示")
+				} else if !strings.HasPrefix(input.Messages[0].Content, "You are Callum,") || !strings.Contains(input.Messages[0].Content, "# Autonomy and persistence") || strings.Contains(strings.ToLower(input.Messages[0].Content), "codex") {
+					t.Error("主对话未使用适配后的身份和任务推进指引")
 				}
 				for _, message := range input.Messages[1:] {
 					if message.Role == "system" {
@@ -273,11 +274,8 @@ func TestAgentToolsAndApprovalThroughStdio(t *testing.T) {
 				accepted := p.call(t, "conversation.send", map[string]any{"conversation_id": convID, "stream": false, "content": messageBlocks("继续")})
 				requireOK(t, accepted)
 				p.event(t, "run.completed")
-				messagesFrame := p.call(t, "conversation.messages", map[string]any{"conversation_id": convID})
-				requireOK(t, messagesFrame)
-				var rows []conversation.Message
-				if err := json.Unmarshal(messagesFrame.Result, &rows); err != nil || len(rows) != 4 {
-					t.Fatalf("消息与工具轨迹混存: %s %v", messagesFrame.Result, err)
+				if rows := readMessages(t, p, convID); len(rows) != 4 {
+					t.Fatalf("消息与工具轨迹混存: %+v", rows)
 				}
 			}
 			p.stop(t)

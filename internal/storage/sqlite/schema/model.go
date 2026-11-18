@@ -18,9 +18,9 @@ type Model struct {
 	ContextWindow *int64 `gorm:"check:ck_context_window,context_window > 0"`
 	// MaxOutputTokens 是模型允许的最大输出 Token 数，NULL 表示未知。
 	MaxOutputTokens *int64 `gorm:"check:ck_max_output,max_output_tokens > 0"`
-	// Capabilities 以 JSON 对象保存模型能力；NULL 或缺少键表示未知。tools 不作为工具调用开关。
+	// Capabilities 以 JSON 对象保存模型拥有的能力；NULL 或缺少键表示未知，不作为用户启用开关。
 	Capabilities map[string]bool `gorm:"type:text;serializer:json;check:ck_capabilities,capabilities IS NULL OR (json_valid(capabilities) AND json_type(capabilities) = 'object')"`
-	// ModelType 保存 text、image、audio、video 内容类型元数据；空数组表示尚未标注。
+	// ModelType 保存用户选中的 text、image、audio、video 类型；包含 image 时启用图片输入。
 	ModelType []string `gorm:"type:text;serializer:json;not null;default:('[]');check:ck_model_type,json_valid(model_type) AND json_type(model_type) = 'array'"`
 	// ReasoningLevels 保存推理等级的展示名称和远端值；NULL 表示未知，空数组表示没有选项。
 	ReasoningLevels []provider.ReasoningLevel `gorm:"type:text;serializer:json;check:ck_reasoning_levels,reasoning_levels IS NULL OR (json_valid(reasoning_levels) AND json_type(reasoning_levels) = 'array')"`

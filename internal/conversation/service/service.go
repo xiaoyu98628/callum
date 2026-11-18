@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -11,24 +12,29 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/agent/executor"
 	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
+	"github.com/xiaoyu98628/callum/internal/attachment"
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/skills"
 )
 
 // Service 负责会话业务与发送受理；异步执行由注入的 Engine 完成。
 type Service struct {
-	repository conversation.Repository
-	resolve    agent.Resolver
-	manager    *executor.Manager
-	engine     *agentservice.Engine
+	repository  conversation.Repository
+	resolve     agent.Resolver
+	manager     *executor.Manager
+	engine      *agentservice.Engine
+	attachments *attachment.Store
+	skills      *skills.Store
 }
 
-func New(repository conversation.Repository, resolve agent.Resolver, manager *executor.Manager, engine *agentservice.Engine) (*Service, error) {
-	if repository == nil || resolve == nil || manager == nil || engine == nil {
+func New(repository conversation.Repository, resolve agent.Resolver, manager *executor.Manager, engine *agentservice.Engine, attachments *attachment.Store, skillStore *skills.Store) (*Service, error) {
+	if repository == nil || resolve == nil || manager == nil || engine == nil || attachments == nil || skillStore == nil {
 		return nil, conversation.ErrInvalid
 	}
-	return &Service{repository: repository, resolve: resolve, manager: manager, engine: engine}, nil
+	return &Service{repository: repository, resolve: resolve, manager: manager, engine: engine, attachments: attachments, skills: skillStore}, nil
 }
 
 func validID(id string) bool {
@@ -59,16 +65,6 @@ func (s *Service) List(ctx context.Context, f conversation.Filter) ([]conversati
 		return nil, conversation.ErrInvalid
 	}
 	return s.repository.List(ctx, f)
-}
-
-func (s *Service) Messages(ctx context.Context, id string, before int64, limit int) ([]conversation.Message, error) {
-	if limit == 0 {
-		limit = 100
-	}
-	if !validID(id) || before < 0 || limit < 1 || limit > 200 {
-		return nil, conversation.ErrInvalid
-	}
-	return s.repository.Messages(ctx, id, before, limit)
 }
 
 // History 按执行边界返回有界历史，独立压缩即使没有对应消息也可继续翻页。
@@ -124,21 +120,36 @@ func validate(in conversation.Send) error {
 	if in.MessageID != "" && (!validID(in.MessageID) || in.ConversationID == "") {
 		return conversation.ErrInvalid
 	}
-	if len(in.Content) == 0 || len(in.Content) > 64 {
+	if in.ExpectedRunID != "" && (in.MessageID == "" || !validID(in.ExpectedRunID)) {
 		return conversation.ErrInvalid
 	}
-	meaningful := false
+	if len(in.RetainedAttachments) > 0 && (in.MessageID == "" || in.ExpectedRunID == "") {
+		return conversation.ErrInvalid
+	}
+	if len(in.Content)+len(in.RetainedAttachments) > 64 {
+		return conversation.ErrInvalid
+	}
+	meaningful := len(in.RetainedAttachments) != 0
+	hasSkill := false
 	size := 0
 	for _, block := range in.Content {
-		size += len(block.Text) + len(block.Path)
+		size += len(block.Text) + len(block.Path) + len(block.AttachmentRef) + len(block.Name) + len(block.MIME)
 		switch block.Type {
+		case "skill":
+			if hasSkill || block.Name == "" || len(block.Name) > 128 || !utf8.ValidString(block.Name) || !filepath.IsAbs(block.Path) || filepath.Clean(block.Path) != block.Path || block.Text != "" || block.AttachmentRef != "" || block.MIME != "" || block.Size != 0 {
+				return conversation.ErrInvalid
+			}
+			hasSkill = true
 		case "text":
-			if block.Path != "" || !utf8.ValidString(block.Text) {
+			if block.Path != "" || block.AttachmentRef != "" || block.Name != "" || block.MIME != "" || block.Size != 0 || !utf8.ValidString(block.Text) {
 				return conversation.ErrInvalid
 			}
 			meaningful = meaningful || strings.TrimSpace(block.Text) != ""
-		case "image":
-			if block.Text != "" || !filepath.IsAbs(block.Path) || filepath.Clean(block.Path) != block.Path {
+		case "image", "file":
+			if block.Text != "" || (block.AttachmentRef != "" && (block.Path != "" || in.MessageID == "")) || (block.AttachmentRef == "" && (!filepath.IsAbs(block.Path) || filepath.Clean(block.Path) != block.Path)) {
+				return conversation.ErrInvalid
+			}
+			if !attachment.ValidName(block.Name) || len(block.MIME) > 255 || block.Size < 0 {
 				return conversation.ErrInvalid
 			}
 			meaningful = true
@@ -165,6 +176,9 @@ func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(
 		return err
 	}
 	in.Content = append([]model.Block(nil), in.Content...)
+	if err := s.validateSkills(ctx, in.Content); err != nil {
+		return err
+	}
 	create := in.ConversationID == ""
 	if create {
 		if in.ModelID == "" {
@@ -208,16 +222,43 @@ func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(
 	if resolved.Client == nil || resolved.Snapshot.ID != in.ModelID || strings.TrimSpace(resolved.Snapshot.RemoteModelID) == "" {
 		return conversation.ErrInvalid
 	}
+	if len(in.RetainedAttachments) > 0 {
+		in.Content, err = s.retainedAttachments(lookup, in)
+		if err != nil {
+			return err
+		}
+	}
+	hasAttachments := false
 	for _, block := range in.Content {
-		if block.Type == "image" && !resolved.ImageInput {
-			return inference.ErrUnsupported
+		if block.Type == "image" {
+			if !resolved.ImageInput {
+				return inference.ErrUnsupported
+			}
+		}
+		if block.Type == "image" || block.Type == "file" {
+			hasAttachments = true
+		}
+	}
+	var batch *attachment.Batch
+	if hasAttachments {
+		batch, err = s.attachments.Stage(lookup, in.ConversationID, ids[0], in.Content)
+		if err != nil {
+			return err
+		}
+		if validator, ok := resolved.Client.(model.InputValidator); ok {
+			req := model.Request{Model: resolved.Snapshot.RemoteModelID, AllowImageInput: resolved.ImageInput,
+				Messages: []model.Message{{Role: model.RoleUser, Blocks: history.ModelContent(in.Content)}}}
+			if err := validator.ValidateInput(lookup, req); err != nil {
+				return errors.Join(err, batch.Discard())
+			}
 		}
 	}
 	stream := true
 	if in.Stream != nil {
 		stream = *in.Stream
 	}
-	ex, err := s.repository.Begin(lookup, conversation.Begin{Create: create, ConversationID: in.ConversationID, WorkspaceID: in.WorkspaceID, RunID: ids[0], UserMessageID: ids[1], AssistantMessageID: ids[2], StepID: ids[3], ResendMessageID: in.MessageID, Model: resolved.Snapshot, Protocol: resolved.Protocol, Content: in.Content, Stream: stream})
+	ex, err := s.repository.Begin(lookup, conversation.Begin{Create: create, ConversationID: in.ConversationID, WorkspaceID: in.WorkspaceID, RunID: ids[0], UserMessageID: ids[1], AssistantMessageID: ids[2], StepID: ids[3], ResendMessageID: in.MessageID, ResendRunID: in.ExpectedRunID, Model: resolved.Snapshot, Protocol: resolved.Protocol, Content: in.Content, Stream: stream})
+	batch.Finish(lookup, err == nil)
 	if err != nil {
 		return err
 	}

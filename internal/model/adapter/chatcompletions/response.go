@@ -15,7 +15,7 @@ import (
 
 // Generate 返回文本响应；错误时结果可能包含尚未完整生成的文本。
 func (c *Client) Generate(ctx context.Context, req model.Request) (result model.Response, retErr error) {
-	params, err := buildRequest(ctx, req)
+	params, err := c.buildRequest(ctx, req)
 	if err != nil {
 		return model.Response{}, err
 	}
@@ -84,18 +84,18 @@ func (c *Client) Generate(ctx context.Context, req model.Request) (result model.
 	result.Text = choice.Message.Content
 	result.Content = []model.Block{{Type: "text", Text: result.Text}}
 
-	result.FinishReason = choice.FinishReason
-	result.ToolCalls, err = responseCalls(choice.Message.RawJSON(), choice.FinishReason, len(req.Tools) > 0)
-	if err != nil {
-		return result, wrapError("decode response", httpResponse, err)
-	}
-
 	if choice.Message.Refusal != "" {
 		return result, wrapError(
 			"decode response",
 			httpResponse,
 			model.ErrRefused,
 		)
+	}
+
+	result.FinishReason = choice.FinishReason
+	result.ToolCalls, err = responseCalls(choice.Message.RawJSON(), choice.FinishReason, len(req.Tools) > 0)
+	if err != nil {
+		return result, wrapError("decode response", httpResponse, err)
 	}
 
 	if err := checkToolFinishReason(choice.FinishReason, len(req.Tools) > 0); err != nil {

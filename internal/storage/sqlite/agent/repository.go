@@ -190,6 +190,9 @@ func (r *Repository) Recover(ctx context.Context) error {
 			return err
 		}
 		active := []string{"pending", "running", "awaiting_approval", "awaiting_user_input"}
+		if err := recoverPublishedArtifacts(tx, append(active, domain.Interrupted)); err != nil {
+			return err
+		}
 		for _, table := range []any{&schema.Step{}, &schema.Run{}} {
 			if err := tx.Model(table).Where("status IN ?", active).Updates(map[string]any{"status": domain.Interrupted, "finished_at": now, "updated_at": now, "error_kind": "interrupted", "error_message": "服务退出导致执行中断"}).Error; err != nil {
 				return err

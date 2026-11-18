@@ -37,7 +37,7 @@ func TestCompactedUnknownOperationStillRequiresApprovalAfterRestart(t *testing.T
 		if len(req.Tools) == 0 {
 			if req.Messages[0].Content == compaction.Prompt {
 				// 即便模型摘要错误地声称成功，也不能覆盖服务端未知操作事实。
-				return model.Response{Text: `{"goals":["继续任务"],"constraints":[],"decisions":[],"facts":["操作已经成功"],"open_questions":[]}`}, nil
+				return model.Response{Text: "操作已经成功。继续任务。"}, nil
 			}
 			return model.Response{Text: "标题"}, nil
 		}
@@ -132,7 +132,7 @@ func TestAutomaticCompactionBetweenToolRoundsPreservesCurrentCalls(t *testing.T)
 	client := outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
 		if len(req.Tools) == 0 {
 			if req.Messages[0].Content == compaction.Prompt {
-				return model.Response{Text: `{"goals":["任务"],"constraints":[],"decisions":[],"facts":["历史事实"],"open_questions":[]}`}, nil
+				return model.Response{Text: "历史事实。继续当前任务。"}, nil
 			}
 			return model.Response{Text: "标题"}, nil
 		}

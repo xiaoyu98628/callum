@@ -54,6 +54,14 @@ func DescribeError(err error) Failure {
 		e.Message, e.Kind = "服务正在关闭", "closing"
 	case errors.Is(err, ErrOutputLimit):
 		e.Message, e.Kind = "模型文本超过大小限制", "output_limit"
+	case errors.Is(err, model.ErrImageRead):
+		e.Message, e.Kind = "图片文件不可读取，请重新添加", "image_read"
+	case errors.Is(err, model.ErrImageFormat):
+		e.Message, e.Kind = "图片损坏或格式不支持", "image_format"
+	case errors.Is(err, model.ErrImageLimit):
+		e.Message, e.Kind = model.ErrImageLimit.Error(), "image_limit"
+	case errors.Is(err, model.ErrInputLimit):
+		e.Message, e.Kind = "模型请求超过字节上限，请减少图片或文字", "input_limit"
 	case errors.Is(err, model.ErrIncomplete):
 		e.Message, e.Kind = "模型输出未完整完成", "incomplete"
 	case errors.Is(err, model.ErrRefused):

@@ -16,6 +16,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent/events"
 	agentexecutor "github.com/xiaoyu98628/callum/internal/agent/executor"
 	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
+	"github.com/xiaoyu98628/callum/internal/attachment"
 	"github.com/xiaoyu98628/callum/internal/config"
 	conversationservice "github.com/xiaoyu98628/callum/internal/conversation/service"
 	"github.com/xiaoyu98628/callum/internal/credentials"
@@ -23,8 +24,10 @@ import (
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
+	"github.com/xiaoyu98628/callum/internal/runtimeassets"
 	"github.com/xiaoyu98628/callum/internal/settings"
 	settingsservice "github.com/xiaoyu98628/callum/internal/settings/service"
+	"github.com/xiaoyu98628/callum/internal/skills"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite"
 	agentstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/agent"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/catalog"
@@ -32,8 +35,11 @@ import (
 	settingsstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/settings"
 	workspacestore "github.com/xiaoyu98628/callum/internal/storage/sqlite/workspace"
 	"github.com/xiaoyu98628/callum/internal/tool"
+	openattachment "github.com/xiaoyu98628/callum/internal/tool/builtin/attachment/open"
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/command"
 	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem"
+	"github.com/xiaoyu98628/callum/internal/tool/builtin/filesystem/artifact"
+	runtimetool "github.com/xiaoyu98628/callum/internal/tool/builtin/runtime"
 	toolexecutor "github.com/xiaoyu98628/callum/internal/tool/executor"
 	"github.com/xiaoyu98628/callum/internal/tool/registry"
 	workspaceservice "github.com/xiaoyu98628/callum/internal/workspace/service"
@@ -42,27 +48,30 @@ import (
 // Runtime 持有业务服务、共享调度器、事件发布器和存储，不依赖通信连接。
 // 创建者必须 Close；借用的业务服务不得在 Close 返回后继续使用。
 type Runtime struct {
-	ctx           context.Context
-	cancel        context.CancelFunc
-	logger        *slog.Logger
-	db            *sqlite.Database
-	ownership     *sqlite.Ownership
-	httpTransport *http.Transport
-	manager       *agentexecutor.Manager
-	events        *events.Hub
-	providers     *providerservice.Service
-	workspaces    *workspaceservice.Service
-	conversations *conversationservice.Service
-	engine        *agentservice.Engine
-	approvals     *approval.Service
-	settings      *settingsservice.Service
-	credentials   *credentials.Vault
-	calls         *executor.Manager
-	mu            sync.Mutex
-	closed        bool
-	sessions      sync.WaitGroup
-	closeOnce     sync.Once
-	closeErr      error
+	ctx              context.Context
+	cancel           context.CancelFunc
+	logger           *slog.Logger
+	db               *sqlite.Database
+	ownership        *sqlite.Ownership
+	httpTransport    *http.Transport
+	manager          *agentexecutor.Manager
+	events           *events.Hub
+	providers        *providerservice.Service
+	workspaces       *workspaceservice.Service
+	conversations    *conversationservice.Service
+	engine           *agentservice.Engine
+	approvals        *approval.Service
+	settings         *settingsservice.Service
+	credentials      *credentials.Vault
+	attachments      *attachment.Store
+	attachmentAccess *attachment.Access
+	skills           *skills.Store
+	calls            *executor.Manager
+	mu               sync.Mutex
+	closed           bool
+	sessions         sync.WaitGroup
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 // New 装配与协议无关的运行时；ctx 是应用运行上下文，初始化使用独立短超时。
@@ -89,6 +98,13 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	initCtx, initCancel := context.WithTimeout(runtimeCtx, 10*time.Second)
 	defer initCancel()
 	var err error
+	var bundle *runtimeassets.Bundle
+	if cfg.RuntimeDir != "" {
+		bundle, err = runtimeassets.Load(initCtx, cfg.RuntimeDir)
+		if err != nil {
+			return nil, fmt.Errorf("加载内置运行时: %w", err)
+		}
+	}
 	// 实例锁覆盖迁移与恢复，另一个运行时不能在启动失败前改写活动实例的结构。
 	r.ownership, err = sqlite.AcquireOwnership(cfg.DatabasePath)
 	if err != nil {
@@ -136,6 +152,22 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	if err := runRepository.Recover(initCtx); err != nil {
 		return nil, err
 	}
+	r.attachments, err = attachment.Open(initCtx, canonicalDir, func(ctx context.Context, conversationID, runID string) (bool, error) {
+		run, err := runRepository.Get(ctx, runID)
+		if errors.Is(err, agent.ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		if run.ConversationID != conversationID {
+			return false, errors.New("附件恢复记录的会话归属不匹配")
+		}
+		return true, nil
+	}, logger)
+	if err != nil {
+		return nil, err
+	}
 	workspaceRepository, err := workspacestore.NewRepository(r.db.DB)
 	if err != nil {
 		return nil, err
@@ -177,9 +209,38 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	if err != nil {
 		return nil, fmt.Errorf("解析应用数据目录: %w", err)
 	}
-	protection := tool.ProtectedData{Directory: protectedDir, Database: filepath.Join(protectedDir, filepath.Base(cfg.DatabasePath))}
+	r.skills, err = skills.Open(initCtx, canonicalDir, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	protection := tool.ProtectedData{Directory: protectedDir, Database: filepath.Join(protectedDir, filepath.Base(cfg.DatabasePath)), ReadOnlyDirectories: []string{r.skills.Directory()}}
+	if bundle != nil {
+		expectedRuntime := filepath.Join(protectedDir, "runtimes")
+		if (protection.Contains(bundle.Directory()) && bundle.Directory() != expectedRuntime) || (tool.ProtectedData{Directory: bundle.Directory()}).Contains(protectedDir) {
+			return nil, errors.New("运行时资源与私有数据目录不得重叠")
+		}
+		protection.ReadOnlyDirectories = append(protection.ReadOnlyDirectories, bundle.Directory())
+	}
 	registry := registry.New()
-	for _, instance := range append(filesystem.Tools(protection), command.Tools(os.Environ(), protection)...) {
+	if bundle != nil && bundle.HasWorkspaceDependencies() {
+		if err := registry.Register(runtimetool.New(bundle)); err != nil {
+			return nil, err
+		}
+	}
+	r.attachmentAccess, err = attachment.OpenAccess(initCtx, canonicalDir, r.attachments, conversationRepository.Attachment)
+	if err != nil {
+		return nil, err
+	}
+	if err := registry.Register(openattachment.New(r.attachmentAccess)); err != nil {
+		return nil, err
+	}
+	for _, instance := range artifact.Tools(r.attachmentAccess, protection) {
+		if err := registry.Register(instance); err != nil {
+			return nil, err
+		}
+	}
+	for _, instance := range append(filesystem.Tools(protection), command.ToolsWithRuntime(os.Environ(), protection, bundle)...) {
 		if err := registry.Register(instance); err != nil {
 			return nil, err
 		}
@@ -188,11 +249,11 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	if err != nil {
 		return nil, err
 	}
-	r.engine, err = agentservice.New(runRepository, conversationRepository, r.manager, r.events.Publish, logger, agentservice.Options{Tools: tools, Approvals: r.approvals, Workspace: r.workspaces.Get, CallTimeout: cfg.CallTimeout})
+	r.engine, err = agentservice.New(runRepository, conversationRepository, r.manager, r.events.Publish, logger, agentservice.Options{Tools: tools, Approvals: r.approvals, Workspace: r.workspaces.Get, Skills: r.skills.Context, Attachments: r.attachmentAccess, CallTimeout: cfg.CallTimeout})
 	if err != nil {
 		return nil, err
 	}
-	r.conversations, err = conversationservice.New(conversationRepository, newConversationResolver(r.providers, client), r.manager, r.engine)
+	r.conversations, err = conversationservice.New(conversationRepository, newConversationResolver(r.providers, client, r.attachments), r.manager, r.engine, r.attachments, r.skills)
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +315,12 @@ func (r *Runtime) Close() error {
 		}
 		if r.credentials != nil {
 			r.closeErr = errors.Join(r.closeErr, r.credentials.Close())
+		}
+		if r.attachments != nil {
+			if r.attachmentAccess != nil {
+				r.closeErr = errors.Join(r.closeErr, r.attachmentAccess.Close())
+			}
+			r.closeErr = errors.Join(r.closeErr, r.attachments.Close())
 		}
 		if r.db != nil {
 			r.closeErr = errors.Join(r.closeErr, r.db.Close())

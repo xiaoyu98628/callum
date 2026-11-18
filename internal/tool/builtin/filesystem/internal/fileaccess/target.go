@@ -55,7 +55,7 @@ func Prepare(ctx context.Context, scope tool.Scope, path string, kind Kind, prot
 	if err != nil {
 		return nil, tool.ErrUnavailable
 	}
-	if protection.Contains(resolved) {
+	if protection.ReadProtected(resolved) {
 		return nil, tool.ErrDenied
 	}
 	info, err := os.Stat(resolved)

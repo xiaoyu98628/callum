@@ -46,8 +46,15 @@ type UserInputRepository interface {
 	CancelUserInput(context.Context, string) (Step, error)
 }
 
+// userInputPrompt 参考上游提问指引及选项描述，适配本服务的单问题和字符串选项。
+const userInputPrompt = `Ask the user for missing information, a preference, constraint, or clarification. Use the available read tools to establish facts first. Be mindful of cognitive load on the user and prefer multiple-choice questions.
+
+Ask one clear question at a time. Provide 2-3 mutually exclusive choices when appropriate. Put the recommended option first and suffix its label with "(Recommended)" or its equivalent in the user's language. Do not include an "Other" option. Each option is a single string and may briefly explain its tradeoff. Pass an empty options array if only a free-text answer is needed.
+
+Ask in the user's language. The user can choose an option, answer in their own words, or skip. Complete useful independent work before requesting an answer. If a reply is required, wait for an explicit answer before dependent work. Skipping is not consent. Use the service's approval flow for tool permissions.`
+
 func UserInputDefinition() model.ToolDefinition {
-	return model.ToolDefinition{Name: UserInputTool, Description: "需要用户澄清目标、选择方案或补充信息时提问。用户可选择选项、自行回复或跳过。不得用此工具申请文件、命令等操作权限；操作权限由服务端工具审批处理。", Parameters: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","minLength":1,"maxLength":4096},"options":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":1024}}},"required":["question","options"],"additionalProperties":false}`)}
+	return model.ToolDefinition{Name: UserInputTool, Description: userInputPrompt, Parameters: json.RawMessage(`{"type":"object","properties":{"question":{"type":"string","minLength":1,"maxLength":4096},"options":{"type":"array","maxItems":8,"items":{"type":"string","minLength":1,"maxLength":1024}}},"required":["question","options"],"additionalProperties":false}`)}
 }
 
 // ParseInputQuestion 拒绝重复、未知及大小写不匹配字段和尾随内容。

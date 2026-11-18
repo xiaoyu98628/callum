@@ -12,9 +12,10 @@ import (
 )
 
 type liveContextUsage struct {
-	value    conversation.ContextUsage
-	actual   *int64
-	lastEmit time.Time
+	value       conversation.ContextUsage
+	actual      *int64
+	imageTokens int64
+	lastEmit    time.Time
 }
 
 func copyInt(value *int64) *int64 {
@@ -57,7 +58,7 @@ func (e *Engine) beginContextUsage(ex conversation.Execution, resolved agent.Res
 	}
 	value := usageBase(ex.Conversation.ID, ex.Run.ID, resolved, ex.Run.SettingsSnapshot.Compaction.Compaction)
 	e.usageMu.Lock()
-	e.usage[ex.Conversation.ID] = liveContextUsage{value: value}
+	e.usage[ex.Conversation.ID] = liveContextUsage{value: value, imageTokens: ex.Run.SettingsSnapshot.Compaction.ImageTokenEstimate}
 	e.usageMu.Unlock()
 	e.storeContextUsage(value, true)
 }
@@ -110,13 +111,14 @@ func (e *Engine) endContextUsage(ex conversation.Execution) {
 	e.emitContextUsage(value)
 }
 
-func withDraft(value conversation.ContextUsage, draft string) conversation.ContextUsage {
+func withDraft(value conversation.ContextUsage, draft string, imageCount int, imageTokens int64) conversation.ContextUsage {
 	value = cloneUsage(value)
+	value.DraftTokens = int64(imageCount) * imageTokens
 	if draft = strings.TrimSpace(draft); draft != "" {
-		value.DraftTokens = tokens.Estimate([]model.Message{{Role: model.RoleUser, Content: draft}}, nil, 0) - 16
-		if value.EstimatedTokens != nil {
-			*value.EstimatedTokens += value.DraftTokens
-		}
+		value.DraftTokens += tokens.Estimate([]model.Message{{Role: model.RoleUser, Content: draft}}, nil, 0) - 16
+	}
+	if value.EstimatedTokens != nil {
+		*value.EstimatedTokens += value.DraftTokens
 	}
 	return value
 }
@@ -133,7 +135,7 @@ func (e *Engine) LiveContextUsage(in conversation.ContextUsageRequest) (conversa
 	if in.ModelID != "" && in.ModelID != value.ModelID {
 		return value, true, conversation.ErrBusy
 	}
-	return withDraft(value, in.Draft), true, nil
+	return withDraft(value, in.Draft, in.DraftImages, live.imageTokens), true, nil
 }
 
 func (e *Engine) recordContext(ex conversation.Execution, resolved agent.Resolved, messages []model.Message, definitions []model.ToolDefinition, meter *tokens.Meter, force bool) {

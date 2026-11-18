@@ -22,7 +22,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
-const capacitySummary = `{"goals":["完成任务"],"constraints":["保留当前要求"],"decisions":[],"facts":["早期工具批次已完成，真实操作以服务端审计为准"],"open_questions":[]}`
+const capacitySummary = "早期工具批次已完成，真实操作以服务端审计为准。继续完成任务，保留当前要求。"
 
 func capacitySettings(t *testing.T, rt *Runtime, enabled bool, budget int64) {
 	t.Helper()
@@ -100,6 +100,10 @@ func TestSingleExecutionCompactsMessageBoundaryAndRestoresAfterRestart(t *testin
 		requirePairedInput(t, req)
 		if len(req.Tools) == 0 {
 			if req.Messages[0].Content == compaction.Prompt {
+				last := req.Messages[len(req.Messages)-1]
+				if last.Role != model.RoleUser || last.Content != compaction.Request || !strings.Contains(last.Content, "简体中文") {
+					t.Error("运行内检查点未使用简体中文摘要指引")
+				}
 				summaries.Add(1)
 				return model.Response{Text: capacitySummary, Usage: json.RawMessage(`{"total_tokens":17}`)}, nil
 			}
@@ -134,7 +138,7 @@ func TestSingleExecutionCompactsMessageBoundaryAndRestoresAfterRestart(t *testin
 		t.Fatalf("长执行失败: %+v", terminal.Data)
 	}
 	checkpoint, err := runs.LatestCheckpoint(t.Context(), ex.Conversation.ID, ex.Run.ID)
-	if err != nil || checkpoint == nil || checkpoint.BaseID == "" || summaries.Load() < 2 || instance.calls.Load() != 420 {
+	if err != nil || checkpoint == nil || checkpoint.Version != agent.ContextCheckpointVersion || checkpoint.Summary != capacitySummary || checkpoint.BaseID == "" || summaries.Load() < 2 || instance.calls.Load() != 420 {
 		t.Fatalf("未连续压缩或重复执行: checkpoint=%+v summaries=%d calls=%d err=%v", checkpoint, summaries.Load(), instance.calls.Load(), err)
 	}
 	var sources int64
@@ -160,7 +164,7 @@ func TestSingleExecutionCompactsMessageBoundaryAndRestoresAfterRestart(t *testin
 		}
 		requirePairedInput(t, req)
 		for _, m := range req.Messages {
-			if strings.Contains(m.Content, "execution_context_summary") {
+			if strings.Contains(m.Content, "execution_context_summary") && strings.Contains(m.Content, capacitySummary) {
 				checked.Store(true)
 			}
 		}
@@ -356,12 +360,11 @@ func TestFailedCheckpointKeepsActiveSummaryAndOriginalOperations(t *testing.T) {
 						}
 						switch mode {
 						case "malformed":
-							return model.Response{Text: "摘要结构不合法"}, nil
+							return model.Response{Text: `{"facts":["旧格式摘要"]}`}, nil
 						case "cancelled":
 							return model.Response{}, context.Canceled
 						default:
-							raw, _ := json.Marshal(map[string][]string{"goals": {strings.Repeat("x", 14000), strings.Repeat("y", 14000)}, "constraints": {}, "decisions": {}, "facts": {}, "open_questions": {}})
-							return model.Response{Text: string(raw)}, nil
+							return model.Response{Text: strings.Repeat("增加摘要长度 ", 2000)}, nil
 						}
 					}
 					if len(req.Tools) == 0 {
@@ -406,7 +409,7 @@ func TestCancelledCheckpointCannotEraseUnknownOperationOnContinuation(t *testing
 		outcomeTestModel: outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
 			if req.Messages[0].Content == compaction.Prompt {
 				summaries.Add(1)
-				return model.Response{Text: `{"goals":["继续任务"],"constraints":[],"decisions":[],"facts":["操作已经成功，无需核实"],"open_questions":[]}`}, nil
+				return model.Response{Text: "操作已经成功，无需核实。继续任务。"}, nil
 			}
 			if len(req.Tools) == 0 {
 				return model.Response{Text: "标题"}, nil

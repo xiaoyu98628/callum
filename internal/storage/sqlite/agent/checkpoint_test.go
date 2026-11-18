@@ -10,7 +10,6 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/conversation"
-	"github.com/xiaoyu98628/callum/internal/conversation/compaction"
 	"github.com/xiaoyu98628/callum/internal/model"
 	store "github.com/xiaoyu98628/callum/internal/storage/sqlite/agent"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
@@ -19,12 +18,8 @@ import (
 
 func storedCheckpoint(t *testing.T, r *store.Repository, ex conversation.Execution, through int64, fact, status string) (agent.Step, agent.ContextCheckpoint) {
 	t.Helper()
-	summary, err := compaction.Validate(`{"goals":[],"constraints":[],"decisions":[],"facts":["` + fact + `"],"open_questions":[]}`)
-	if err != nil {
-		t.Fatal(err)
-	}
 	id := newID(t)
-	value := agent.ContextCheckpoint{Version: 1, ID: id, ConversationID: ex.Conversation.ID, SourceRunID: ex.Run.ID, Through: through, Sources: []agent.BatchSource{{StepID: ex.Step.ID, Through: through, Fingerprint: strings.Repeat("0", 64)}}, Summary: summary, Stats: json.RawMessage(`{}`)}
+	value := agent.ContextCheckpoint{Version: agent.ContextCheckpointVersion, ID: id, ConversationID: ex.Conversation.ID, SourceRunID: ex.Run.ID, Through: through, Sources: []agent.BatchSource{{StepID: ex.Step.ID, Through: through, Fingerprint: strings.Repeat("0", 64)}}, Summary: fact, Stats: json.RawMessage(`{}`)}
 	output, err := json.Marshal(map[string]any{"checkpoint": value})
 	if err != nil {
 		t.Fatal(err)
@@ -102,11 +97,7 @@ func TestCheckpointActivationRejectsChangedSourceAndPreservesPrevious(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	value := agent.ContextCheckpoint{Version: 1, ID: parent.ID, ConversationID: ex.Conversation.ID, SourceRunID: ex.Run.ID, Through: batch.Through, Sources: []agent.BatchSource{batch.BatchSource}, Summary: `{"goals":[],"constraints":[],"decisions":[],"facts":["操作已发生"],"open_questions":[]}`, Stats: json.RawMessage(`{}`)}
-	value.Summary, err = compaction.Validate(value.Summary)
-	if err != nil {
-		t.Fatal(err)
-	}
+	value := agent.ContextCheckpoint{Version: agent.ContextCheckpointVersion, ID: parent.ID, ConversationID: ex.Conversation.ID, SourceRunID: ex.Run.ID, Through: batch.Through, Sources: []agent.BatchSource{batch.BatchSource}, Summary: "操作已发生", Stats: json.RawMessage(`{}`)}
 	changed := contextOutput(t, model.Message{Role: model.RoleTool, ToolCallID: "call-b", Content: `{"changed":true}`}, nil)
 	if err := db.DB.Model(&schema.Step{}).Where("id=?", second.ID).Update("output", string(changed)).Error; err != nil {
 		t.Fatal(err)

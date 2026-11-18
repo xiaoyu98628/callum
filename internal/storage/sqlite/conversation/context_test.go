@@ -89,7 +89,7 @@ func buildingContext(t *testing.T, repository *store.Repository, runs *agentstor
 	if err != nil {
 		t.Fatal(err)
 	}
-	value.Summary = `{"goals":["目标"],"constraints":["约束"],"decisions":[],"facts":["事实"],"open_questions":[]}`
+	value.Summary = "目标和约束\n- 已确认的事实"
 	value.Stats = json.RawMessage(`{"before_messages":6,"after_messages":1,"before_bytes":1000,"after_bytes":200}`)
 	return ex, value
 }
@@ -189,7 +189,7 @@ func TestResendClearsCoveredSummaryAndItsModelResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	version.Summary = `{"goals":["旧问题"],"constraints":[],"decisions":[],"facts":[],"open_questions":[]}`
+	version.Summary = "旧问题的文本摘要"
 	version.Stats = json.RawMessage(`{"before_bytes":1000,"after_bytes":200}`)
 	now := time.Now().UnixMilli()
 	child, err := runs.CreateStep(t.Context(), agent.Step{ID: id(t), ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, ParentStepID: &ex.Step.ID, Type: "model_call", Name: "生成历史摘要", Status: agent.Completed, Input: json.RawMessage(`{"purpose":"context_summary"}`), Output: json.RawMessage(`{"text":"旧问题的摘要副本"}`), Usage: json.RawMessage(`{"total_tokens":7}`), CreatedAt: now, UpdatedAt: now, FinishedAt: &now})

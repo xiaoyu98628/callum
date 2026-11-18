@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"reflect"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -44,8 +45,11 @@ func Decode(raw json.RawMessage, dst any) (map[string]bool, error) {
 		}
 		seen[key] = true
 		field := fieldType(target.Elem(), key)
-		if field == nil || !value(decoder, field, 1) {
+		if field == nil {
 			return nil, tool.ErrInvalid
+		}
+		if !value(decoder, field, 1) {
+			return nil, fieldError(key, field)
 		}
 	}
 	last, err := decoder.Token()
@@ -58,7 +62,32 @@ func Decode(raw json.RawMessage, dst any) (map[string]bool, error) {
 	}
 	decoder = json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(dst) != nil {
+	if err := decoder.Decode(dst); err != nil {
+		if typed, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
+			field := target.Elem()
+			for key := range strings.SplitSeq(typed.Field, ".") {
+				for field != nil && field.Kind() == reflect.Pointer {
+					field = field.Elem()
+				}
+				if field == nil {
+					break
+				}
+				if field.Kind() == reflect.Slice || field.Kind() == reflect.Array {
+					// Go 1.27 的错误路径包含数组下标，只按已声明的元素类型继续定位。
+					index, err := strconv.Atoi(key)
+					if err != nil || index < 0 {
+						field = nil
+						break
+					}
+					field = field.Elem()
+					continue
+				}
+				field = fieldType(field, key)
+			}
+			if field != nil {
+				return nil, fieldError(typed.Field, field)
+			}
+		}
 		return nil, tool.ErrInvalid
 	}
 	return seen, nil
@@ -131,4 +160,31 @@ func fieldType(target reflect.Type, key string) reflect.Type {
 		}
 	}
 	return nil
+}
+
+func fieldError(key string, target reflect.Type) error {
+	for target.Kind() == reflect.Pointer {
+		target = target.Elem()
+	}
+	expected := "符合工具定义的值"
+	switch target.Kind() {
+	case reflect.String:
+		expected = "字符串"
+	case reflect.Bool:
+		expected = "布尔值"
+	case reflect.Int, reflect.Int64:
+		expected = "整数"
+	case reflect.Struct:
+		expected = "JSON 对象"
+	case reflect.Slice, reflect.Array:
+		expected = "数组"
+		if target.Elem().Kind() == reflect.String {
+			expected = "字符串数组"
+		}
+	}
+	message := "必须是" + expected + "，且不能为 null；请按工具定义重新提供"
+	if target.Kind() == reflect.Slice || target.Kind() == reflect.Array {
+		message += "，不要把数组编码成字符串"
+	}
+	return &tool.ArgumentError{Field: key, Message: message}
 }

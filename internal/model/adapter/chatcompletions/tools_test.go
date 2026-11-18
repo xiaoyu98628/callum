@@ -14,7 +14,7 @@ import (
 
 func TestToolDefinitionsAndMessages(t *testing.T) {
 	req := model.Request{Model: "m", Tools: []model.ToolDefinition{{Name: "read_file", Description: "读取", Parameters: json.RawMessage(`{"type":"object"}`)}}, Messages: []model.Message{{Role: model.RoleUser, Content: "读取"}, {Role: model.RoleAssistant, ToolCalls: []model.ToolCall{{ID: "c", Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)}}}, {Role: model.RoleTool, ToolCallID: "c", Content: `{"text":"ok"}`}}}
-	params, err := buildRequest(t.Context(), req)
+	params, err := (&Client{}).buildRequest(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestToolDefinitionsHaveNoLocalCountLimit(t *testing.T) {
 	for i := range 64 {
 		req.Tools = append(req.Tools, model.ToolDefinition{Name: fmt.Sprintf("tool_%d", i), Parameters: json.RawMessage(`{"type":"object"}`)})
 	}
-	params, err := buildRequest(t.Context(), req)
+	params, err := (&Client{}).buildRequest(t.Context(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestToolDefinitionsHaveNoLocalCountLimit(t *testing.T) {
 	}
 	// 去掉数量阈值仍须拒绝重复定义及非法名称。
 	req.Tools = append(req.Tools, req.Tools[0])
-	if _, err := buildRequest(t.Context(), req); !errors.Is(err, model.ErrInvalidResponse) {
+	if _, err := (&Client{}).buildRequest(t.Context(), req); !errors.Is(err, model.ErrInvalidResponse) {
 		t.Fatalf("接受重复工具: %v", err)
 	}
 }
@@ -173,6 +173,31 @@ func TestToolCallByteAndStructureBoundariesRemain(t *testing.T) {
 	t.Fatal("流式调用总字节边界失效")
 }
 
+func TestOversizedToolArgumentsHaveRecoverableDetails(t *testing.T) {
+	arguments := `{"patch":"` + strings.Repeat("中", 5458) + `"}` // UTF-8 共 16,386 字节。
+	call := map[string]any{"index": 0, "id": "large", "type": "function", "function": map[string]string{"name": "apply_patch", "arguments": arguments}}
+	full, err := json.Marshal(map[string]any{"tool_calls": []any{call}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, completeErr := responseCalls(string(full), "tool_calls", true)
+	raw, err := json.Marshal([]any{call})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capture toolCallCapture
+	streamErr := capture.add(raw)
+	for _, failure := range []error{completeErr, streamErr} {
+		detail, ok := errors.AsType[*model.ToolArgumentsError](failure)
+		if !ok || !errors.Is(failure, model.ErrInputLimit) || detail.Tool != "apply_patch" || detail.ActualBytes != len(arguments) || detail.LimitBytes != maxToolArguments || detail.Index != 0 || detail.Fingerprint == "" {
+			t.Fatalf("参数超限详情丢失: %v", failure)
+		}
+	}
+	if completeErr.(*model.ToolArgumentsError).Fingerprint != streamErr.(*model.ToolArgumentsError).Fingerprint {
+		t.Fatal("相同参数的流式与完整响应指纹不同")
+	}
+}
+
 func TestToolStreamAssemblyAndValidation(t *testing.T) {
 	var capture streamCapture
 	chunks := []string{
@@ -203,5 +228,72 @@ func TestToolStreamAssemblyAndValidation(t *testing.T) {
 	}
 	if _, err := responseCalls(string(capture.messageJSON()), "tool_calls", false); !errors.Is(err, model.ErrUnsupportedOutput) {
 		t.Fatal(err)
+	}
+}
+
+func TestInvalidToolJSONPreservesWholeResponseWithoutCalls(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprint(stream), func(t *testing.T) {
+			bad := `{"["string""]</｜｜DSML｜｜: `
+			calls := []map[string]any{
+				{"id": "valid", "type": "function", "function": map[string]string{"name": "read_file", "arguments": `{"path":"a.txt"}`}},
+				{"id": "invalid", "type": "function", "function": map[string]string{"name": "read_file", "arguments": bad}},
+			}
+			message := map[string]any{"role": "assistant", "content": "准备读取", "tool_calls": calls}
+			choice := map[string]any{"index": 0, "finish_reason": "tool_calls"}
+			if stream {
+				for i := range calls {
+					calls[i]["index"] = i
+				}
+				choice["delta"] = message
+			} else {
+				choice["message"] = message
+			}
+			encoded, _ := json.Marshal(map[string]any{"choices": []any{choice}, "usage": map[string]int{"prompt_tokens": 13, "total_tokens": 17}})
+			wire := string(encoded)
+			if stream {
+				wire = sse(wire, "[DONE]")
+			}
+			body := &trackedBody{Reader: strings.NewReader(wire)}
+			client := newTestClient(t, func(req *http.Request) (*http.Response, error) {
+				kind := "application/json"
+				if stream {
+					kind = "text/event-stream"
+				}
+				return testResponse(req, kind, body), nil
+			})
+			req := testRequest()
+			req.Tools = []model.ToolDefinition{{Name: "read_file", Parameters: []byte(`{"type":"object"}`)}}
+			var response model.Response
+			var err error
+			completed := false
+			if stream {
+				err = client.Stream(t.Context(), req, func(event model.Event) error {
+					if event.Result != nil {
+						response = *event.Result
+					}
+					if event.Type == model.EventCompleted {
+						completed = true
+					}
+					return nil
+				})
+			} else {
+				response, err = client.Generate(t.Context(), req)
+			}
+			detail, ok := errors.AsType[*model.ToolArgumentsError](err)
+			if !ok || detail.Index != 1 || detail.Fingerprint == "" || len(response.ToolCalls) != 0 || response.FinishReason != "tool_calls" || !bytes.Contains(response.Output, []byte("DSML")) || response.InputTokens == nil || *response.InputTokens != 13 || body.closes != 1 || completed {
+				t.Fatalf("坏参数未完整保留或被当作成功: response=%+v close=%d err=%v", response, body.closes, err)
+			}
+		})
+	}
+	// 身份错误与资源越界优先，不能借坏参数把损坏协议转换成可重试错误。
+	for _, raw := range []string{
+		`{"tool_calls":[{"id":"same","type":"function","function":{"name":"read_file","arguments":"{"}},{"id":"same","type":"function","function":{"name":"read_file","arguments":"{}"}}]}`,
+		`{"tool_calls":[{"id":"bad","type":"function","function":{"name":"invalid name","arguments":"{"}}]}`,
+	} {
+		_, err := responseCalls(raw, "tool_calls", true)
+		if _, ok := errors.AsType[*model.ToolArgumentsError](err); ok || !errors.Is(err, model.ErrInvalidResponse) {
+			t.Fatalf("错误的工具身份被当作可纠正参数: %v", err)
+		}
 	}
 }

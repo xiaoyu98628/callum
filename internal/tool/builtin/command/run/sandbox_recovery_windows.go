@@ -329,7 +329,7 @@ func RecoverSandbox(ctx context.Context, dataDirectory string) error {
 		if !filepath.IsAbs(journal.Temporary) || !strings.HasPrefix(filepath.Base(journal.Temporary), "callum-command-") || len(filepath.Base(journal.Temporary)) != len("callum-command-")+26 {
 			return tool.ErrDenied
 		}
-		if len(journal.Entries) > maxSandboxEntries || len(journal.Roots) > 3 {
+		if len(journal.Entries) > maxSandboxEntries || len(journal.Roots) > maxSandboxRoots {
 			return tool.ErrLimit
 		}
 		for _, root := range journal.Roots {

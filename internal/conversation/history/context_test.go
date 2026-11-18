@@ -42,6 +42,21 @@ func TestContextRestoresFactsAfterTheirUserMessage(t *testing.T) {
 	}
 }
 
+func TestSkillContextKeepsTaskTitleAndSeparateReference(t *testing.T) {
+	content := []model.Block{{Type: "skill", Name: "Review", Path: "/skills/review/SKILL.md"}, {Type: "text", Text: "核对正文"}}
+	before := append([]model.Block(nil), content...)
+	if got := history.Title(content); got != "核对正文" {
+		t.Fatalf("标题包含技能引用: %q", got)
+	}
+	blocks := history.ModelContent(content)
+	if len(blocks) != 2 || blocks[0].Text != "$Review 核对正文" || !strings.Contains(blocks[1].Text, content[0].Path) {
+		t.Fatalf("模型缺少引用或正文: %+v", blocks)
+	}
+	if !reflect.DeepEqual(content, before) {
+		t.Fatal("组装模型上下文修改了持久化内容")
+	}
+}
+
 func TestRestoredFactsStillRespectContextLimits(t *testing.T) {
 	for _, facts := range [][]model.Message{
 		make([]model.Message, 256),

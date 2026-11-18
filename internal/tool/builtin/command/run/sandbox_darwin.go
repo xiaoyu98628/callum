@@ -67,9 +67,33 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 		p.boundary.CreatesWorkspaceDirectory = p.createsWorkspaceDirectory()
 	}
 	p.profile = seatbeltProfile(projectWrite, p.protectedDirectory != nil)
+	if p.protectedDirectory != nil {
+		// deny 优先于 allow，必须从原有数据读取拒绝规则中排除固定的只读技能子树。
+		var exclusions strings.Builder
+		for i, root := range p.readOnlyDirectories {
+			if (tool.ProtectedData{Directory: p.protectedDirectory.actual}).Contains(root.actual) {
+				exclusions.WriteString(fmt.Sprintf(" (require-not (subpath (param \"RUNTIME_ROOT_%d\")))", i))
+			}
+		}
+		if exclusions.Len() > 0 {
+			// 原生程序解析资源绝对路径需要查询父目录元数据；根目录枚举仍单独拒绝。
+			p.profile = strings.Replace(p.profile, `(deny file-read* (subpath (param "APP_DATA")))`, `(deny file-read* (require-all (subpath (param "APP_DATA")) (require-not (literal (param "APP_DATA")))`+exclusions.String()+`))`+"\n"+`(deny file-read-data (literal (param "APP_DATA")))`, 1)
+		}
+	}
 	ancestorArguments := p.protectDataAncestors(projectWrite)
 	p.launchArguments = []string{p.sandboxExecutable.actual, "-p", p.profile, "-D", "COMMAND_TEMP=" + p.temporaryPath}
 	p.launchArguments = append(p.launchArguments, ancestorArguments...)
+	if p.workDirectory != nil {
+		p.profile += `(allow file-write* (require-all (subpath (param "RUN_WORK")) (require-not (regex #"(^|/)[.](git|codex|agents|aws)(/|$)"))))` + "\n"
+		p.launchArguments = append(p.launchArguments, "-D", "RUN_WORK="+p.workDirectory.actual)
+	}
+	for i, root := range p.readOnlyDirectories {
+		key := fmt.Sprintf("RUNTIME_ROOT_%d", i)
+		p.profile += fmt.Sprintf("(deny file-write* (subpath (param \"%s\")))\n", key)
+		p.launchArguments = append(p.launchArguments, "-D", key+"="+root.actual)
+	}
+	// 策略在所有只读资源规则拼接完成后传给启动器。
+	p.launchArguments[2] = p.profile
 	if p.protectedDirectory != nil {
 		p.launchArguments = append(p.launchArguments, "-D", "APP_DATA="+p.protectedDirectory.actual)
 	}
@@ -79,7 +103,7 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 	p.launchArguments = append(p.launchArguments, "--")
 	p.launchArguments = append(p.launchArguments, p.command...)
 	// 不把真实用户缓存目录自动加入写入范围。常用工具缓存转入此次受控临时目录。
-	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOCACHE", "GOTMPDIR", "npm_config_cache"} {
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOCACHE", "GOTMPDIR", "npm_config_cache", "PIP_CACHE_DIR"} {
 		p.environment = slices.DeleteFunc(p.environment, func(entry string) bool { return strings.HasPrefix(entry, key+"=") })
 		value := p.temporaryPath
 		if key == "GOCACHE" {
@@ -108,18 +132,24 @@ func (p *fixedCommand) createsWorkspaceDirectory() bool {
 
 // 保护项目内通往应用数据的祖先路径，避免获批命令通过重命名祖先绕过路径限制。
 func (p *fixedCommand) protectDataAncestors(projectWrite bool) []string {
-	if !projectWrite || p.protectedDirectory == nil {
+	if !projectWrite {
 		return nil
 	}
 	var arguments []string
-	for parent := filepath.Dir(p.protectedDirectory.actual); ; parent = filepath.Dir(parent) {
-		relative, err := filepath.Rel(p.workspace.actual, parent)
-		if err != nil || relative == "." || !filepath.IsLocal(relative) {
-			break
+	roots := slices.Clone(p.readOnlyDirectories)
+	if p.protectedDirectory != nil {
+		roots = append(roots, p.protectedDirectory)
+	}
+	for _, root := range roots {
+		for parent := filepath.Dir(root.actual); ; parent = filepath.Dir(parent) {
+			relative, err := filepath.Rel(p.workspace.actual, parent)
+			if err != nil || relative == "." || !filepath.IsLocal(relative) {
+				break
+			}
+			key := fmt.Sprintf("APP_DATA_PARENT_%d", len(arguments)/2)
+			p.profile += fmt.Sprintf("(deny file-write-unlink (literal (param \"%s\")))\n", key)
+			arguments = append(arguments, "-D", key+"="+parent)
 		}
-		key := fmt.Sprintf("APP_DATA_PARENT_%d", len(arguments)/2)
-		p.profile += fmt.Sprintf("(deny file-write-unlink (literal (param \"%s\")))\n", key)
-		arguments = append(arguments, "-D", key+"="+parent)
 	}
 	return arguments
 }

@@ -68,6 +68,38 @@ func patchTestRead(t *testing.T, path string) string {
 	return string(value)
 }
 
+func TestPatchRejectsReadOnlyRuntimeCreationAndUpdate(t *testing.T) {
+	root := t.TempDir()
+	runtimeDir := filepath.Join(root, "runtime")
+	if err := os.Mkdir(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	existing := filepath.Join(runtimeDir, "stdlib.py")
+	patchTestWrite(t, existing, "before\n")
+	actual, err := filepath.EvalSymlinks(runtimeDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	instance := New(tool.ProtectedData{ReadOnlyDirectories: []string{actual}})
+	for _, args := range []json.RawMessage{
+		patchTestArgs(t, "*** Add File: runtime/new.py\n+blocked"),
+		patchTestArgs(t, "*** Update File: runtime/stdlib.py\n@@\n-before\n+blocked", patchVersion{"runtime/stdlib.py", textSHA256([]byte("before\n"))}),
+	} {
+		call, err := instance.Prepare(t.Context(), tool.Scope{ID: "test", RootPath: root}, args)
+		if call != nil {
+			if closeErr := call.Close(); closeErr != nil {
+				t.Fatal(closeErr)
+			}
+		}
+		if !errors.Is(err, tool.ErrDenied) {
+			t.Fatalf("允许补丁修改运行时资源: %v", err)
+		}
+	}
+	if patchTestRead(t, existing) != "before\n" {
+		t.Fatal("准备阶段改写了运行时")
+	}
+}
+
 func TestPatchCreatesAndUpdatesWithBoundVersions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "old.txt")

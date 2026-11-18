@@ -56,7 +56,7 @@ func TestAssistedApprovalThroughStdio(t *testing.T) {
 			switch {
 			case script:
 				toolName, sandbox = "run_command", tool.SandboxWorkspaceWrite
-				args = map[string]any{"command": []string{"/bin/sh", "-c", "touch reviewed.txt"}, "sandbox_permissions": "workspace_write", "justification": "在沙箱内执行测试脚本"}
+				args = map[string]any{"command": []string{"/bin/sh", "-c", `printf "approved only\n" > reviewed.txt`}, "sandbox_permissions": "workspace_write", "justification": "在沙箱内执行测试脚本"}
 			case tc.highRisk:
 				toolName = "run_command"
 				args = map[string]any{"command": []string{"/usr/bin/touch", marker}, "sandbox_permissions": "require_escalated", "justification": "受控审批验证"}

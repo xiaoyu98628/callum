@@ -62,6 +62,9 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 		return errors.New("数据库结构版本在初始化期间发生变化，请重新打开")
 	}
 	version = actualVersion
+	if version > 0 && version <= schemaVersion && tx.Migrator().HasConstraint(&schema.ContextVersion{}, "ck_context_summary") {
+		return errors.New("数据库使用旧版上下文摘要结构，请使用独立的新数据目录")
+	}
 	if version > 0 && version <= 3 {
 		if !tx.Migrator().HasColumn(&schema.Provider{}, "credential_format") {
 			if err := tx.Exec("ALTER TABLE model_providers ADD COLUMN credential_format integer NOT NULL DEFAULT 0 CONSTRAINT ck_provider_credential_format CHECK (credential_format IN (0,1))").Error; err != nil {

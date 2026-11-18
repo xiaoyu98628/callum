@@ -41,9 +41,9 @@ func (e *Engine) summaryModel(ctx context.Context, ex conversation.Execution, re
 	if err != nil {
 		return result, err
 	}
-	now := time.Now().UnixMilli()
+	started := time.Now().UnixMilli()
 	step := agent.Step{ID: id.String(), ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, ParentStepID: &parent.ID,
-		Type: "model_call", Name: "生成历史摘要", Status: agent.Running, Input: input, Model: &resolved.Snapshot, CreatedAt: now, StartedAt: &now, UpdatedAt: now}
+		Type: "model_call", Name: "生成历史摘要", Status: agent.Running, Input: input, Model: &resolved.Snapshot, CreatedAt: started, StartedAt: &started, UpdatedAt: started}
 	if err := modelMetadata(&step, messages, nil, resolved, false); err != nil {
 		return result, err
 	}
@@ -67,14 +67,17 @@ func (e *Engine) summaryModel(ctx context.Context, ex conversation.Execution, re
 	if err := callCtx.Err(); err != nil {
 		retErr = errors.Join(retErr, err)
 	}
+	if errors.Is(retErr, context.DeadlineExceeded) {
+		retErr = errors.Join(errSummaryTimeout, retErr)
+	}
 	fillFailure(&result, resolved.Protocol, retErr)
 	step.Status = agent.Completed
 	if retErr != nil {
 		status, kind, message := failure(retErr)
 		step.Status, step.ErrorKind, step.ErrorMessage = status, &kind, &message
 	}
-	now = time.Now().UnixMilli()
-	step.Output, step.Usage, step.UpdatedAt, step.FinishedAt = result.Output, result.Usage, now, &now
+	finished := time.Now().UnixMilli()
+	step.Output, step.Usage, step.UpdatedAt, step.FinishedAt = result.Output, result.Usage, finished, &finished
 	if result.RequestID != "" {
 		step.ProviderRequestID = &result.RequestID
 	}

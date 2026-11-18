@@ -17,7 +17,7 @@ import (
 )
 
 func validCheckpoint(c domain.ContextCheckpoint) bool {
-	if c.Version != 1 || c.ID == "" || c.SourceRunID == "" || c.ConversationID == "" || c.After < 0 || c.Through <= c.After || len(c.Sources) == 0 || len(c.Sources) > 248 || len(c.Stats) > 4096 || !json.Valid(c.Stats) {
+	if c.Version != domain.ContextCheckpointVersion || c.ID == "" || c.SourceRunID == "" || c.ConversationID == "" || c.After < 0 || c.Through <= c.After || len(c.Sources) == 0 || len(c.Sources) > 248 || len(c.Stats) > 4096 || !json.Valid(c.Stats) {
 		return false
 	}
 	canonical, err := compaction.Validate(c.Summary)

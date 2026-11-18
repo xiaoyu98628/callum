@@ -307,5 +307,23 @@ func (e *Executor) ExecuteStream(ctx context.Context, p *Prepared, approvedHash 
 		result.Output = nil
 		err = errors.Join(err, tool.ErrInvalid)
 	}
+	if len(result.Images) > 8 {
+		result.Images = nil
+		err = errors.Join(err, tool.ErrLimit)
+	}
+	if len(result.Images) > 0 {
+		metadata, metadataErr := json.Marshal(result.Images)
+		if metadataErr != nil || len(metadata)+len(result.Output) > tool.MaxResultBytes {
+			result.Images = nil
+			err = errors.Join(err, tool.ErrLimit, metadataErr)
+		}
+	}
+	for _, block := range result.Images {
+		if block.Type != "image" || block.AttachmentRef == "" || block.Path != "" {
+			result.Images = nil
+			err = errors.Join(err, tool.ErrInvalid)
+			break
+		}
+	}
 	return result, err
 }
