@@ -82,6 +82,9 @@ func failure(err error) (status, kind, message string) {
 	case errors.Is(err, model.ErrImageFormat):
 		return status, "image_format", "图片格式不支持"
 	case errors.Is(err, model.ErrInputLimit):
+		if arguments, ok := errors.AsType[*model.ToolArgumentsError](err); ok {
+			return status, "tool_arguments_limit", arguments.Error()
+		}
 		if limit, ok := errors.AsType[*model.InputLimitError](err); ok {
 			return status, "input_limit", limit.Error()
 		}

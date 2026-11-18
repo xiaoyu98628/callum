@@ -194,7 +194,7 @@ func TestMalformedArgumentsCorrectionKeepsAuditAndApproval(t *testing.T) {
 
 func TestRepeatedMalformedArgumentsStopWithoutExecuting(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{"json", "schema"} {
+	for _, mode := range []string{"json", "schema", "limit"} {
 		t.Run(mode, func(t *testing.T) {
 			var count atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +215,9 @@ func TestRepeatedMalformedArgumentsStopWithoutExecuting(t *testing.T) {
 				args := `{"DSML`
 				if mode == "schema" {
 					args = `{"command":"[\"git\",\"status\"]"}`
+				}
+				if mode == "limit" {
+					args = `{"command":"` + strings.Repeat("x", 17000) + `"}`
 				}
 				if n == 2 && mode == "schema" && !strings.Contains(input.Messages[len(input.Messages)-1].Content, "字符串数组") {
 					t.Error("数组类型错误没有字段级反馈")

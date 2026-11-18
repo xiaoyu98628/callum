@@ -88,14 +88,14 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 				return errors.Join(ctx.Err(), callErr)
 			}
 			invalid, repairable := soleArgumentError(callErr)
-			if !repairable || result.FinishReason != "tool_calls" || len(result.Output) == 0 || len(result.ToolCalls) != 0 {
+			if !repairable || (invalid.LimitBytes == 0 && result.FinishReason != "tool_calls") || len(result.Output) == 0 || len(result.ToolCalls) != 0 {
 				return callErr
 			}
 			// 尚未进入工具循环，整批均未执行；保留失败模型步骤及实际 usage，重新生成参数。
 			if correction != nil && correction.fingerprint == invalid.Fingerprint {
 				return &model.ToolCorrectionStalledError{}
 			}
-			correction = &argumentCorrection{SourceStepID: step.ID, CallIndex: invalid.Index, fingerprint: invalid.Fingerprint}
+			correction = &argumentCorrection{SourceStepID: step.ID, CallIndex: invalid.Index, Tool: invalid.Tool, ActualBytes: invalid.ActualBytes, LimitBytes: invalid.LimitBytes, fingerprint: invalid.Fingerprint}
 			meter.Observe(effective, definitions, result.InputTokens)
 			if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {
 				return err

@@ -173,6 +173,31 @@ func TestToolCallByteAndStructureBoundariesRemain(t *testing.T) {
 	t.Fatal("流式调用总字节边界失效")
 }
 
+func TestOversizedToolArgumentsHaveRecoverableDetails(t *testing.T) {
+	arguments := `{"patch":"` + strings.Repeat("中", 5458) + `"}` // UTF-8 共 16,386 字节。
+	call := map[string]any{"index": 0, "id": "large", "type": "function", "function": map[string]string{"name": "apply_patch", "arguments": arguments}}
+	full, err := json.Marshal(map[string]any{"tool_calls": []any{call}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, completeErr := responseCalls(string(full), "tool_calls", true)
+	raw, err := json.Marshal([]any{call})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capture toolCallCapture
+	streamErr := capture.add(raw)
+	for _, failure := range []error{completeErr, streamErr} {
+		detail, ok := errors.AsType[*model.ToolArgumentsError](failure)
+		if !ok || !errors.Is(failure, model.ErrInputLimit) || detail.Tool != "apply_patch" || detail.ActualBytes != len(arguments) || detail.LimitBytes != maxToolArguments || detail.Index != 0 || detail.Fingerprint == "" {
+			t.Fatalf("参数超限详情丢失: %v", failure)
+		}
+	}
+	if completeErr.(*model.ToolArgumentsError).Fingerprint != streamErr.(*model.ToolArgumentsError).Fingerprint {
+		t.Fatal("相同参数的流式与完整响应指纹不同")
+	}
+}
+
 func TestToolStreamAssemblyAndValidation(t *testing.T) {
 	var capture streamCapture
 	chunks := []string{

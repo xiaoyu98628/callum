@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
@@ -18,6 +19,19 @@ func TestCorrectionRejectsJoinedLifecycleFailures(t *testing.T) {
 	}
 	if got, ok := soleArgumentError(errors.Join(model.NewCallError("decode response", 200, "request", bad))); !ok || got != bad {
 		t.Fatal("没有识别单独的工具参数错误")
+	}
+	oversized := &model.ToolArgumentsError{Index: 0, Fingerprint: "large", Tool: "apply_patch", ActualBytes: 16386, LimitBytes: 16384}
+	for _, cause := range []error{context.Canceled, context.DeadlineExceeded, agent.ErrStorage, errors.New("close response failed")} {
+		if _, ok := soleArgumentError(errors.Join(oversized, cause)); ok {
+			t.Fatalf("超限纠正覆盖其他失败: %v", cause)
+		}
+	}
+	if _, ok := soleArgumentError(oversized); !ok {
+		t.Fatal("未识别独立参数超限")
+	}
+	_, kind, message := failure(oversized)
+	if kind != "tool_arguments_limit" || !strings.Contains(message, "apply_patch") || !strings.Contains(message, "16386 > 16384") {
+		t.Fatalf("错误未区分参数边界: %s %s", kind, message)
 	}
 }
 

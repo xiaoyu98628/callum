@@ -565,7 +565,7 @@ result 包含 conversation_id（新对话为空）、model_id、可选 run_id、
 
 Agent 不设固定模型轮次、累计工具次数或单次响应工具调用数量上限，也不再因调用次数产生 iteration_limit。执行持续到模型完成、用户取消、连接/应用退出或不可继续的错误。历史执行中已有的错误记录保留原值。并发、单次模型/工具超时、审批、Token 预算及内容边界继续生效。
 
-工具定义种类数不设本地固定上限，由实际请求大小和远端协议校验；每个工具参数不超过 16 KiB，响应中调用 ID、名称和参数的累计字段字节不超过 8 MiB，原始上游响应不超过 16 MiB。工具调用参数完整后才执行；执行前检查整批调用及最小结果结构容量，实际结果逐次检查累计上下文。触及资源边界停止并保留已发生操作及结果，不自动重试；当前问题和正在执行的工具批次保留原文，较早完成的批次可通过步骤摘要继续复用。
+工具定义种类数不设本地固定上限，由实际请求大小和远端协议校验；每个工具参数不超过 16 KiB，响应中调用 ID、名称和参数的累计字段字节不超过 8 MiB，原始上游响应不超过 16 MiB。工具调用参数完整后才执行；执行前检查整批调用及最小结果结构容量，实际结果逐次检查累计上下文。执行期间触及资源边界停止并保留已发生操作及结果，不自动重试；整批尚未执行的单项参数超限按下文参数纠正规则处理。当前问题和正在执行的工具批次保留原文，较早完成的批次可通过步骤摘要继续复用。
 
 ### 11.1 默认工具调用
 
@@ -761,6 +761,8 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 通知、列表和 `step.get` 均将大型 `output`、`usage`、`definition` 置为 `null`，这不代表数据库中没有数据。通过下面的 `step.data` 获取原始字段。
 
 参数纠正期间执行保持 running。完整模型响应中的工具参数 JSON 损坏时，失败模型步骤保留原响应和 usage，本轮不创建任何工具步骤；下一模型步骤 input.tool_arguments_correction 记录 source_step_id 和从 0 开始的 call_index。该反馈仅用于本次请求且计入容量校验，不是用户输入或授权。纠正后重新校验和审批；重复同一坏参数且无进展时通过 run.failed 的 invalid_response 和具体安全说明结束。类型错误或简单 Shell 包装则产生 failed 工具步骤，error_kind=invalid_arguments，error_message 提供字段纠正说明，operation.outcome=not_applied。详见 [Agent 工具与审批](tools-and-approvals.md#非交互命令执行)。
+
+单项参数超过 16 KiB 时，失败模型步骤的 `error_kind` 为 `tool_arguments_limit`，说明包含工具名、接收字节数和上限。流式响应可在结束标记前因该边界关闭。确认整批工具未执行且无其他失败后进入同一纠正流程，`input.tool_arguments_correction` 额外记录 `tool`、`actual_bytes`、`limit_bytes`。超限片段及缺失的结束标记保留在失败模型结果中，缺失 usage 不补造。
 
 模型步骤 input.token_budget 保存按受理策略解析的规划 input_limit、context_window、max_output_tokens、estimated_input_tokens、estimation_method，估算和模型身份/设置快照分开于实际 usage。关闭自动压缩时普通回答不强制执行该规划预算，且无法解析预算时不附加此字段。
 

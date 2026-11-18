@@ -76,8 +76,8 @@ func responseCalls(raw, reason string, enabled bool) ([]model.ToolCall, error) {
 	// 先校验整批身份与边界；有其他协议错误时不得误判为可纠正的参数错误。
 	for _, c := range message.Calls {
 		callBytes += len(c.ID) + len(c.Function.Name) + len(c.Function.Arguments)
-		if callBytes > maxToolCallBytes || len(c.Function.Arguments) > maxToolArguments {
-			return nil, model.ErrInputLimit
+		if callBytes > maxToolCallBytes {
+			return nil, &model.InputLimitError{Dimension: "工具调用累计字节", Actual: int64(callBytes), Limit: maxToolCallBytes}
 		}
 		if c.ID == "" || len(c.ID) > 256 || seen[c.ID] || c.Type != "function" || !toolNamePattern.MatchString(c.Function.Name) {
 			return nil, model.ErrInvalidResponse
@@ -85,6 +85,9 @@ func responseCalls(raw, reason string, enabled bool) ([]model.ToolCall, error) {
 		seen[c.ID] = true
 	}
 	for index, c := range message.Calls {
+		if len(c.Function.Arguments) > maxToolArguments {
+			return nil, oversizedArguments(index, c.Function.Name, c.Function.Arguments)
+		}
 		var object map[string]json.RawMessage
 		if json.Unmarshal([]byte(c.Function.Arguments), &object) != nil || object == nil {
 			digest := sha256.Sum256([]byte(c.Function.Name + "\x00" + c.Function.Arguments))
@@ -93,6 +96,12 @@ func responseCalls(raw, reason string, enabled bool) ([]model.ToolCall, error) {
 		out = append(out, model.ToolCall{ID: c.ID, Name: c.Function.Name, Arguments: json.RawMessage(c.Function.Arguments)})
 	}
 	return out, nil
+}
+
+// 超限分片的落点由网络分块决定；固定前缀的摘要可识别重复提交的相同大参数。
+func oversizedArguments(index int, name, arguments string) *model.ToolArgumentsError {
+	digest := sha256.Sum256([]byte(name + "\x00" + arguments[:maxToolArguments]))
+	return &model.ToolArgumentsError{Index: index, Tool: name, ActualBytes: len(arguments), LimitBytes: maxToolArguments, Fingerprint: hex.EncodeToString(digest[:])}
 }
 
 type callFragment struct {
@@ -157,8 +166,14 @@ func (c *toolCallCapture) add(raw json.RawMessage) error {
 				c.size += len(*d.Function.Arguments)
 			}
 		}
-		if f.ID.Len() > 256 || f.Name.Len() > 64 || f.Arguments.Len() > maxToolArguments || c.size > maxToolCallBytes {
+		if f.ID.Len() > 256 || f.Name.Len() > 64 || c.size > maxToolCallBytes {
 			return model.ErrInputLimit
+		}
+		if f.Arguments.Len() > maxToolArguments {
+			if f.ID.Len() == 0 || f.Kind != "function" || !toolNamePattern.MatchString(f.Name.String()) {
+				return model.ErrInputLimit
+			}
+			return oversizedArguments(*d.Index, f.Name.String(), f.Arguments.String())
 		}
 	}
 	return nil

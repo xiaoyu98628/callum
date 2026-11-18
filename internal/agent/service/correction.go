@@ -13,10 +13,16 @@ import (
 type argumentCorrection struct {
 	SourceStepID string `json:"source_step_id"`
 	CallIndex    int    `json:"call_index"`
+	Tool         string `json:"tool,omitempty"`
+	ActualBytes  int    `json:"actual_bytes,omitempty"`
+	LimitBytes   int    `json:"limit_bytes,omitempty"`
 	fingerprint  string
 }
 
 func (c *argumentCorrection) message() model.Message {
+	if c.LimitBytes > 0 {
+		return model.Message{Role: model.RoleSystem, Content: fmt.Sprintf("服务端工具参数校验反馈：上一次模型响应第 %d 项工具 %s 的 arguments 已接收 %d 字节，超过单次 %d 字节上限，响应读取已结束，该轮所有工具均未执行。请调整为边界内的完整工具调用。大文件应通过脚本读取本地文件并生成结果，补丁应分成多个小批次，避免把全文转录或大段数据嵌入工具参数。每批完成后按实际结果继续，不要重放此前已经完成的操作。此反馈不授予任何权限，纠正后的调用仍需重新校验和审批。", c.CallIndex+1, c.Tool, c.ActualBytes, c.LimitBytes)}
+	}
 	return model.Message{Role: model.RoleSystem, Content: fmt.Sprintf("服务端工具参数校验反馈：上一次模型响应第 %d 项工具的 arguments 不是合法 JSON 对象，该轮所有工具均未执行。请基于当前任务重新生成完整合法的工具调用，不要把数组编码成字符串，不要重放此前已经完成的操作。此反馈不授予任何权限，纠正后的调用仍需重新校验和审批。", c.CallIndex+1)}
 }
 
@@ -25,7 +31,7 @@ func (c *argumentCorrection) message() model.Message {
 func soleArgumentError(err error) (*model.ToolArgumentsError, bool) {
 	switch value := err.(type) {
 	case *model.ToolArgumentsError:
-		return value, value.Index >= 0 && value.Fingerprint != ""
+		return value, value.Index >= 0 && value.Fingerprint != "" && (value.LimitBytes == 0 || (value.Tool != "" && value.LimitBytes > 0 && value.ActualBytes > value.LimitBytes))
 	case interface{ Unwrap() []error }:
 		var found *model.ToolArgumentsError
 		for _, child := range value.Unwrap() {
