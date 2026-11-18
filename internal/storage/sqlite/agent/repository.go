@@ -150,6 +150,9 @@ func (r *Repository) Finish(ctx context.Context, in domain.Run) error {
 		if result.RowsAffected != 1 {
 			return domain.ErrNotFound
 		}
+		if err := returnUndeliveredSteering(tx.Where("expected_run_id=?", in.ID)); err != nil {
+			return err
+		}
 		steps := tx.Model(&schema.Step{}).Select("id").Where("run_id=?", in.ID)
 		if err := tx.Model(&schema.ContextVersion{}).Where("status=? AND generated_by_step_id IN (?)", "building", steps).Updates(map[string]any{"status": "failed", "updated_at": in.UpdatedAt}).Error; err != nil {
 			return err
@@ -198,6 +201,9 @@ func (r *Repository) Recover(ctx context.Context) error {
 				return err
 			}
 		}
+		if err := returnUndeliveredSteering(tx); err != nil {
+			return err
+		}
 		return tx.Model(&schema.Message{}).Where("status IN ?", active).Updates(map[string]any{"status": domain.Interrupted, "completed_at": nil, "updated_at": now}).Error
 	})
 }
@@ -230,4 +236,9 @@ func settleToolOutcomes(tx *gorm.DB, runID string) error {
 		}
 		after = rows[len(rows)-1].ID
 	}
+}
+
+func returnUndeliveredSteering(tx *gorm.DB) error {
+	return tx.Model(&schema.FollowUp{}).Where("status='steering'").
+		Updates(map[string]any{"status": "queued", "revision": gorm.Expr("revision+1")}).Error
 }

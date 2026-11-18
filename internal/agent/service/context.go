@@ -14,9 +14,10 @@ import (
 
 // executionContext 将当前用户要求和未完成批次独立保留，摘要只替换已验证的历史前缀。
 type executionContext struct {
-	traces  map[string][]model.Message
-	past    []model.Message
-	current []model.Message
+	traces   map[string][]model.Message
+	past     []model.Message
+	current  []model.Message
+	steering []model.Message
 }
 
 func historyBoundary(ex conversation.Execution) (int64, int64) {
@@ -165,6 +166,10 @@ func (c *executionContext) messages() []model.Message {
 }
 
 // fit 同时用于模型调用前和工具结果追加后；remaining 仅构造容量占位，不执行或持久化。
+func (c *executionContext) request(fixed []model.Message, ex conversation.Execution) []model.Message {
+	return append(append(fixed, contextMessages(ex.Context, c.messages())...), c.steering...)
+}
+
 func (c *executionContext) fit(ctx context.Context, e *Engine, ex *conversation.Execution, resolved agent.Resolved, fixed []model.Message, definitions []model.ToolDefinition, meter *tokens.Meter, before int64, remaining []model.ToolCall) error {
 	for {
 		preview := append(fixed, contextMessages(ex.Context, c.messages())...)
@@ -174,6 +179,7 @@ func (c *executionContext) fit(ctx context.Context, e *Engine, ex *conversation.
 				break
 			}
 		}
+		preview = append(preview, c.steering...)
 		limitErr := inputCapacity(ctx, *ex, resolved, preview, definitions, meter)
 		if limitErr == nil {
 			return nil

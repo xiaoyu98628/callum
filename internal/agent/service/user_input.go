@@ -116,7 +116,15 @@ func (e *Engine) askUser(ctx context.Context, ex conversation.Execution, parent 
 		return model.Message{}, err
 	}
 	now := time.Now().UnixMilli()
-	step, err := e.repository.CreateUserInput(ctx, agent.Step{ID: id.String(), ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, ParentStepID: new(parent.ID), ToolCallID: new(call.ID), Type: "user_input", Name: "等待用户回复", Definition: definition, Input: raw, Status: agent.AwaitingUserInput, CreatedAt: now, UpdatedAt: now, StartedAt: &now})
+	var step agent.Step
+	err = e.beforeTool(ctx, ex.Run.ID, func() error {
+		var err error
+		step, err = e.repository.CreateUserInput(ctx, agent.Step{ID: id.String(), ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, ParentStepID: new(parent.ID), ToolCallID: new(call.ID), Type: "user_input", Name: "等待用户回复", Definition: definition, Input: raw, Status: agent.AwaitingUserInput, CreatedAt: now, UpdatedAt: now, StartedAt: &now})
+		return err
+	})
+	if errors.Is(err, conversation.ErrSteered) {
+		return model.Message{}, err
+	}
 	if err != nil {
 		return model.Message{}, operationStorageError(ctx, err)
 	}

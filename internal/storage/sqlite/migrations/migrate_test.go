@@ -86,13 +86,13 @@ func TestMigrationRollback(t *testing.T) {
 	if err := pool.QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_schema WHERE name IN ('model_providers', 'models')").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 4 || tables != 2 {
+	if version != 5 || tables != 2 {
 		t.Fatalf("具体迁移未完整提交: version=%d tables=%d", version, tables)
 	}
 }
 
 func TestUnsupportedVersionsPreserveData(t *testing.T) {
-	for _, rejectedVersion := range []int{5, 6, 7, 99} {
+	for _, rejectedVersion := range []int{6, 7, 99} {
 		t.Run(fmt.Sprintf("version_%d", rejectedVersion), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "data", "callum.db")
 			db, err := sqlite.Open(t.Context(), path)
@@ -108,7 +108,7 @@ func TestUnsupportedVersionsPreserveData(t *testing.T) {
 			if err := db.DB.Raw("PRAGMA user_version").Scan(&initializedVersion).Error; err != nil {
 				t.Fatal(err)
 			}
-			if initializedVersion != 4 {
+			if initializedVersion != 5 {
 				t.Fatalf("新库结构版本错误: %d", initializedVersion)
 			}
 			if err := db.DB.WithContext(t.Context()).Exec(fmt.Sprintf("PRAGMA user_version = %d", rejectedVersion)).Error; err != nil {
@@ -196,5 +196,52 @@ func TestUnsupportedExistingSchemaPreservesData(t *testing.T) {
 				t.Fatalf("拒绝打开后原数据或结构被改写: version=%d name=%q schema=%q models=%d", version, name, schema, modelTables)
 			}
 		})
+	}
+}
+
+func TestFollowUpMigrationPreservesVersionFour(t *testing.T) {
+	path, pool := fixtureDatabase(t)
+	db, err := sqlite.Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{
+		"DROP TABLE conversation_followups",
+		"CREATE TABLE v4_marker (payload TEXT NOT NULL) STRICT",
+		"INSERT INTO v4_marker VALUES ('保留')",
+		"PRAGMA user_version = 4",
+	} {
+		if _, err := pool.ExecContext(t.Context(), query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err = sqlite.Open(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := db.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	var version, entries int
+	var marker string
+	for _, check := range []struct {
+		sql  string
+		dest any
+	}{
+		{"PRAGMA user_version", &version},
+		{"SELECT COUNT(*) FROM conversation_followups", &entries},
+		{"SELECT payload FROM v4_marker", &marker},
+	} {
+		if err := pool.QueryRowContext(t.Context(), check.sql).Scan(check.dest); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if version != 5 || entries != 0 || marker != "保留" {
+		t.Fatalf("后续消息迁移状态异常: %d, %d, %q", version, entries, marker)
 	}
 }

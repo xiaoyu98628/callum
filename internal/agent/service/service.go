@@ -26,6 +26,8 @@ type Engine struct {
 	options       Options
 	inputMu       sync.Mutex
 	inputSignals  map[string]chan struct{}
+	steeringMu    sync.Mutex
+	sealedRuns    map[string]bool
 	usageMu       sync.RWMutex
 	usage         map[string]liveContextUsage
 	usageRevision atomic.Int64
@@ -50,7 +52,7 @@ func New(repository agent.Repository, conversations conversation.Repository, man
 			return nil, agent.ErrInvalid
 		}
 	}
-	return &Engine{repository: repository, conversations: conversations, manager: manager, emit: emit, logger: logger, options: options, inputSignals: make(map[string]chan struct{}), usage: make(map[string]liveContextUsage)}, nil
+	return &Engine{repository: repository, conversations: conversations, manager: manager, emit: emit, logger: logger, options: options, inputSignals: make(map[string]chan struct{}), sealedRuns: make(map[string]bool), usage: make(map[string]liveContextUsage)}, nil
 }
 
 func (e *Engine) event(ex conversation.Execution, name, stepID, messageID string, data any) error {

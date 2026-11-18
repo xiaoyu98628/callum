@@ -40,6 +40,10 @@ func Restore(status string, rows []Entry) ([]model.Message, error) {
 	used := map[int]bool{}
 	for i, row := range rows {
 		message := decoded[i]
+		if message.Role == model.RoleUser {
+			out = append(out, message)
+			continue
+		}
 		if message.Role != model.RoleAssistant || len(message.ToolCalls) == 0 {
 			continue
 		}
@@ -77,6 +81,10 @@ func checkTranscript(messages []model.Message) error {
 	pending := map[string]bool{}
 	for _, message := range messages {
 		switch message.Role {
+		case model.RoleUser:
+			if len(pending) != 0 || len(message.ToolCalls) != 0 || message.ToolCallID != "" {
+				return model.ErrInvalidResponse
+			}
 		case model.RoleAssistant:
 			if len(pending) != 0 {
 				return model.ErrInvalidResponse

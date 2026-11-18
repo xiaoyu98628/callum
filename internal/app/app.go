@@ -136,7 +136,7 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	if err != nil {
 		return nil, err
 	}
-	for _, key := range []string{settings.ExecutionKey, settings.CompactionKey} {
+	for _, key := range []string{settings.ExecutionKey, settings.CompactionKey, settings.GeneralKey} {
 		if _, err := r.settings.Get(initCtx, key); err != nil {
 			return nil, err
 		}
@@ -155,7 +155,7 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	r.attachments, err = attachment.Open(initCtx, canonicalDir, func(ctx context.Context, conversationID, runID string) (bool, error) {
 		run, err := runRepository.Get(ctx, runID)
 		if errors.Is(err, agent.ErrNotFound) {
-			return false, nil
+			return conversationservice.IsFollowUpAttachmentOwner(conversationRepository.FollowUp(ctx, conversationID, runID))
 		}
 		if err != nil {
 			return false, err

@@ -12,7 +12,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 // Run 在同一个事务内初始化空库或校验当前结构。调用方持有连接与实例锁。
 func Run(ctx context.Context, db *gorm.DB) (err error) {
@@ -74,7 +74,7 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 	}
 	tables := slices.Concat(catalogTables(), conversationTables(), approvalTables(), settingsTables())
 	if version == 0 {
-		if err := initialize(tx, tables); err != nil {
+		if err := initialize(tx, append(slices.Clone(tables), &schema.FollowUp{})); err != nil {
 			return err
 		}
 	} else if version == 1 || version == 2 {
@@ -89,11 +89,19 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 		if err := allowAutoReviewer(tx); err != nil {
 			return fmt.Errorf("升级审批人约束: %w", err)
 		}
-	} else if version != 3 && version != schemaVersion {
+	} else if version != 3 && version != 4 && version != schemaVersion {
 		return fmt.Errorf("不支持数据库结构版本 %d，请使用独立开发数据目录", version)
 	}
 	if err := validateSchema(tx, tables); err != nil {
 		return fmt.Errorf("数据库结构与当前版本 %d 不匹配: %w", schemaVersion, err)
+	}
+	if version > 0 && version < schemaVersion && !tx.Migrator().HasTable(&schema.FollowUp{}) {
+		if err := tx.Set("gorm:table_options", "STRICT").Migrator().CreateTable(&schema.FollowUp{}); err != nil {
+			return fmt.Errorf("创建后续消息表: %w", err)
+		}
+	}
+	if err := validateCoreTable(tx, &schema.FollowUp{}); err != nil {
+		return fmt.Errorf("校验后续消息表: %w", err)
 	}
 	if err := validateAutoReviewer(tx); err != nil {
 		return err
@@ -104,6 +112,9 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 	}
 	if required != 0 {
 		return errors.New("工作区主目录仍具有非空约束")
+	}
+	if err := ensureGeneralSettings(tx); err != nil {
+		return fmt.Errorf("初始化常规设置: %w", err)
 	}
 	if version != schemaVersion {
 		if err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)).Error; err != nil {

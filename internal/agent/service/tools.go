@@ -82,7 +82,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 	approvalID, err := e.authorizeTool(ctx, ex, resolved, &step, prepared, decision, denied)
 	if err != nil {
 		operationErr = err
-		if errors.Is(err, tool.ErrDenied) {
+		if errors.Is(err, tool.ErrDenied) || errors.Is(err, conversation.ErrSteered) {
 			return
 		}
 		return message, err
@@ -96,10 +96,15 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 		operationErr = tool.ErrDenied
 		return
 	}
-	claimed, err := e.repository.StartTool(ctx, ex.Run.ID, step.ID, approvalID, prepared.Hash())
+	var claimed agent.Step
+	err = e.beforeTool(ctx, ex.Run.ID, func() error {
+		var err error
+		claimed, err = e.repository.StartTool(ctx, ex.Run.ID, step.ID, approvalID, prepared.Hash())
+		return err
+	})
 	if err != nil {
 		operationErr = err
-		if errors.Is(err, tool.ErrDenied) {
+		if errors.Is(err, tool.ErrDenied) || errors.Is(err, conversation.ErrSteered) {
 			return
 		}
 		return message, operationStorageError(ctx, err)
@@ -199,7 +204,15 @@ func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, r
 			return "", err
 		}
 	}
-	a, err := e.options.Approvals.Request(ctx, ex.Run.ID, step.ID, prepared.Request(), prepared.Hash(), review)
+	var a agent.Approval
+	err := e.beforeTool(ctx, ex.Run.ID, func() error {
+		var err error
+		a, err = e.options.Approvals.Request(ctx, ex.Run.ID, step.ID, prepared.Request(), prepared.Hash(), review)
+		return err
+	})
+	if errors.Is(err, conversation.ErrSteered) {
+		return "", err
+	}
 	if err != nil {
 		return "", operationStorageError(ctx, err)
 	}

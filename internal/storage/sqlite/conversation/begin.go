@@ -57,6 +57,11 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		if err := busy(tx, conv.ID); err != nil {
 			return err
 		}
+		if in.FollowUp != nil {
+			if err := consumeFollowUp(tx, in); err != nil {
+				return err
+			}
+		}
 		var user schema.Message
 		var replaced *string
 		if in.ResendMessageID != "" {
@@ -116,6 +121,9 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		out.Context, out.HistoryMore = current, more
 		runRow := schema.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, SettingsSnapshot: &snapshot, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
 		if err := tx.Omit("Conversation", "Replaces").Create(&runRow).Error; err != nil {
+			return err
+		}
+		if err := bindFollowUpQueue(tx, in); err != nil {
 			return err
 		}
 		user.RunID, user.Content, user.Status, user.UpdatedAt, user.CompletedAt = in.RunID, in.Content, agent.Completed, now, &now

@@ -75,6 +75,7 @@ type Filter struct {
 
 // Begin 是一次发送或编辑重发的原子写入输入，所有 ID 由业务层生成。
 type Begin struct {
+	FollowUp           *FollowUpStart
 	Create             bool
 	ConversationID     string
 	WorkspaceID        *string

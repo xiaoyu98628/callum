@@ -146,7 +146,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 ## 5. 应用设置
 
-当前注册 `execution` 和 `context_compaction` 两个配置组。以下字段属于 `execution`，分别控制审批策略、审批人和沙箱范围；压缩设置见 9.1 节。
+当前注册 `general`、`execution` 和 `context_compaction` 三个配置组。以下字段属于 `execution`，分别控制审批策略、审批人和沙箱范围；压缩设置见 9.1 节。
 
 | 字段 | 支持值 | 默认值 |
 | --- | --- | --- |
@@ -155,6 +155,8 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | `sandbox_mode` | `workspace-write`、`read-only`、`danger-full-access` | `workspace-write` |
 
 `on-request` 按操作类别判断；`always` 逐次询问；`never` 不询问，并拒绝需要审批的操作。`never` 在只读和项目写入模式下不会扩大工具权限。完全访问要求显式设置 `sandbox_mode: "danger-full-access"`，同时使用 `approval_policy: "never"` 和 `approvals_reviewer: "user"`。
+
+常规组 `general` 的完整默认值为 `{"follow_up_mode":"queue"}`。唯一字段 `follow_up_mode` 支持 `queue`（排队）和 `steer`（引导）。常规组用于桌面客户端发送后续消息时选择默认方式，按设置记录的 `revision` 读取和更新。
 
 ### settings.get
 
@@ -176,7 +178,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 {"jsonrpc":"2.0","id":"settings-update","method":"settings.update","params":{"key":"execution","revision":1,"value":{"approval_policy":"always","approvals_reviewer":"user"}}}
 ```
 
-成功返回更新后的完整设置记录，`revision` 加一。再次携带旧版本保存，返回 `1003`；重新读取后再保存。非法审批人与沙箱组合、未知字段、缺少必要字段、重复键或错误类型返回 `-32602`。
+成功返回更新后的完整设置记录，`revision` 加一。再次携带旧版本保存，返回 `1003`；重新读取后再保存。非法常规设置值、非法审批人与沙箱组合、未知字段、缺少必要字段、重复键或错误类型返回 `-32602`。
 
 审批人为 `auto_review` 时策略须为 `on-request` 或 `always`，并保留沙箱。服务端按固定操作判断是否适合 AI 审核，符合范围时创建工具步骤的 `model_call` 子步骤，`input.purpose` 为 `approval_review`，`input.request_hash` 与工具操作一致。模型、结论、理由及实际 usage 可用步骤接口查询。AI 决定直接发布 `approval.updated`，`decided_by` 为 `auto_review`，审批对象的 `review` 包含 `step_id`、`decision`、`reason`。转人工时发出 `approval.requested`，`review.decision` 为 `handoff`。客户端通过 `approval.decide` 提交人工决定，服务端将身份记为 `local_user`。
 
@@ -387,6 +389,17 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 `run.started` 通知同样携带 `removed_message_ids`，供其他窗口清理旧回答。旧执行身份及 usage 等审计信息保留。
 
 编辑较早的用户消息、在执行中重发、把回答消息 ID 当作用户消息 ID，均不会正常受理。`conversation.send` 不接受 `message_id`，重发必须使用 `conversation.resend`。
+
+### 后续消息
+
+| 方法 | 参数与结果 |
+| --- | --- |
+| `conversation.follow_ups` | `conversation_id`。返回按队列顺序排列的 `queued` 和 `steering` 记录。 |
+| `conversation.follow_up_add` | `conversation_id`、`expected_run_id`、`mode`（`queue` 或 `steer`）、`content`。排队可指定 `model_id`，引导使用目标执行的模型。内容块与 `conversation.send` 相同。返回写入记录。 |
+| `conversation.follow_up_change` | `conversation_id`、`id`、`revision`、`action`。支持 `edit`（附 `text`）、`remove`、`up`、`down`、`steer`（附 `expected_run_id`）。编辑保留已保管的附件和技能。返回更新后记录。 |
+| `conversation.follow_up_start` | `conversation_id`、队首 `id`、`revision`。自动续发另传刚成功的 `after_run_id`，由服务校验队列绑定及最新执行。返回常规发送受理结果。 |
+
+队列记录含 `id`、`conversation_id`、`expected_run_id`、`model_id`、`status`、`revision`、`position`、`content` 和 `created_at`。引导仅接受正在运行的普通对话执行。待审批或待回复可由调用方提交排队，交互结束后再引导。过期执行、队列版本冲突或达到后续消息限额返回业务错误 `1003`。收到 `conversation.follow_ups_updated` 通知时按 `conversation_id` 重新查询。终态事件同样提示客户端刷新，失败或中断时未被模型成功使用的引导退回队列。客户端只依据当前连接的成功终态发起自动续发；重连后等待用户继续。
 
 ## 9. 会话管理
 

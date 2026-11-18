@@ -15,6 +15,11 @@ import (
 
 // Execute 只在受理响应已排队后运行；标题任务在终态前取消并等待退出。
 func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved) {
+	defer func() {
+		e.steeringMu.Lock()
+		delete(e.sealedRuns, ex.Run.ID)
+		e.steeringMu.Unlock()
+	}()
 	err := e.initialEvents(ex)
 	if err == nil && e.options.Attachments != nil {
 		_, err = e.options.Attachments.Begin(ctx, ex.Conversation.ID, ex.Run.ID)
