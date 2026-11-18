@@ -21,6 +21,113 @@ import (
 	"github.com/xiaoyu98628/callum/internal/settings"
 )
 
+func TestContextUsageMatchesRequestSettingsAndWorkspace(t *testing.T) {
+	for _, mode := range []string{"unbound", "single_directory", "without_directory"} {
+		t.Run(mode, func(t *testing.T) {
+			type request struct {
+				Messages []model.Message                           `json:"messages"`
+				Tools    []struct{ Function model.ToolDefinition } `json:"tools"`
+			}
+			requests := make(chan request, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var input request
+				if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+					t.Error(err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if len(input.Tools) > 0 {
+					select {
+					case requests <- input:
+					default:
+						t.Error("意外重复调用主模型")
+						w.WriteHeader(http.StatusInternalServerError)
+						return
+					}
+				}
+				writeFileToolResponse(t, w, false, map[string]any{"content": "已核对"}, "stop")
+			}))
+			t.Cleanup(server.Close)
+			cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg.MaxConcurrentRuns = 1
+			p := startApp(t, cfg, io.Discard)
+			defer p.stop(t)
+			mid := setupConversationModel(t, p, server.URL)
+			execution := readSettings(t, p)
+			params := map[string]any{"model_id": mid}
+			root := ""
+			if mode != "unbound" {
+				if mode == "single_directory" {
+					root = t.TempDir()
+				}
+				created := p.call(t, "workspace.create", map[string]any{"name": "上下文目录", "root_path": root})
+				params["workspace_id"] = resultString(t, created, "id")
+				var project struct {
+					RootPath string `json:"root_path"`
+				}
+				if err := json.Unmarshal(created.Result, &project); err != nil {
+					t.Fatal(err)
+				}
+				root = project.RootPath
+			}
+			frame := p.call(t, "conversation.context_usage", params)
+			requireOK(t, frame)
+			var preview conversation.ContextUsage
+			if err := json.Unmarshal(frame.Result, &preview); err != nil || preview.EstimatedTokens == nil {
+				t.Fatalf("预览失败: %s %v", frame.Result, err)
+			}
+			const question = "核对实际请求和只读预览"
+			params["content"], params["stream"] = messageBlocks(question), false
+			resultString(t, p.call(t, "conversation.send", params), "run_id")
+			p.event(t, "run.completed")
+			var captured request
+			select {
+			case captured = <-requests:
+			case <-t.Context().Done():
+				t.Fatal(t.Context().Err())
+			}
+			messages := captured.Messages
+			tools := make([]model.ToolDefinition, 0, len(captured.Tools))
+			for _, definition := range captured.Tools {
+				tools = append(tools, definition.Function)
+			}
+			actual := tokens.Estimate(messages, tools, settings.DefaultCompaction().ImageTokenEstimate)
+			userTokens := tokens.Estimate([]model.Message{{Role: model.RoleUser, Content: question}}, nil, 0) - 16
+			if actual != *preview.EstimatedTokens+userTokens {
+				t.Fatalf("预览与实际上下文不一致: actual=%d preview=%d user=%d", actual, *preview.EstimatedTokens, userTokens)
+			}
+			var projected struct {
+				Source   string `json:"source"`
+				Revision int64  `json:"settings_revision"`
+				settings.Execution
+			}
+			system := messages[0].Content
+			if json.Unmarshal([]byte(system[strings.LastIndex(system, "\n")+1:]), &projected) != nil || projected.Source != "server_execution_settings" || projected.Revision != execution.Revision || projected.Execution != settings.DefaultExecution() {
+				t.Fatalf("主请求未使用受理设置: %+v", projected)
+			}
+			if messages[1].Role != model.RoleUser {
+				t.Fatal("目录元数据不是数据消息")
+			}
+			if root == "" {
+				if !strings.Contains(messages[1].Content, "必须使用绝对路径") {
+					t.Fatal("缺少目录基准时未明确要求绝对路径")
+				}
+			} else {
+				_, raw, found := strings.Cut(messages[1].Content, "\n")
+				var project struct {
+					RootPath string `json:"root_path"`
+				}
+				if !found || json.Unmarshal([]byte(raw), &project) != nil || project.RootPath != root {
+					t.Fatal("单目录项目未发送主目录")
+				}
+			}
+		})
+	}
+}
+
 func readContextUsage(t *testing.T, p *appPeer, mid, cid, draft string) conversation.ContextUsage {
 	t.Helper()
 	f := p.call(t, "conversation.context_usage", map[string]any{"model_id": mid, "conversation_id": cid, "draft": draft})

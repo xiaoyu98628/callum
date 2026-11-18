@@ -30,7 +30,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	for _, fact := range facts {
 		uncertain[fact.RequestHash] = true
 	}
-	fixed, definitions, err := e.requestParts(ctx, ex.Conversation, facts)
+	fixed, definitions, err := e.requestParts(ctx, ex.Conversation, ex.Run.SettingsSnapshot, facts)
 	if err != nil {
 		return err
 	}

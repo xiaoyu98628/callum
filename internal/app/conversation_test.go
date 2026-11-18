@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -87,7 +88,7 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 	releaseFirst := func() { once.Do(func() { close(finishFirst) }) }
 	t.Cleanup(releaseFirst)
 	var mu sync.Mutex
-	historyCount := map[string]int{}
+	histories := map[string][]string{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer fake-dialogue-key" {
 			t.Error("未使用配置快照中的测试凭据")
@@ -115,10 +116,10 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 		}
 		text := input.Messages[len(input.Messages)-1].Content
 		mu.Lock()
-		// 主对话的固定系统提示不属于持久化历史。
+		// 固定上下文可以增加元数据，持久化历史仍须按原文和顺序恢复。
 		for _, message := range input.Messages {
 			if message.Role != "system" {
-				historyCount[text]++
+				histories[text] = append(histories[text], message.Content)
 			}
 		}
 		mu.Unlock()
@@ -209,10 +210,11 @@ func TestConversationLifecycleThroughStdio(t *testing.T) {
 	oldAnswer := resultString(t, second, "message_id")
 	p.event(t, "run.completed")
 	mu.Lock()
-	count := historyCount["第二个问题"]
+	assembled := histories["第二个问题"]
 	mu.Unlock()
-	if count != 3 {
-		t.Fatalf("未组装前两条历史: %d", count)
+	wantHistory := []string{question, "流式正文", "第二个问题"}
+	if len(assembled) < len(wantHistory) || !slices.Equal(assembled[len(assembled)-len(wantHistory):], wantHistory) {
+		t.Fatalf("历史内容或顺序错误: %q", assembled)
 	}
 	resend := p.call(t, "conversation.resend", map[string]any{"conversation_id": convID, "message_id": secondUser, "stream": false, "content": messageBlocks("修改后的问题")})
 	newRun := resultString(t, resend, "run_id")

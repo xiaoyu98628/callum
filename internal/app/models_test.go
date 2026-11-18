@@ -47,7 +47,7 @@ func TestImageInputUsesSelectedModelType(t *testing.T) {
 					w.WriteHeader(400)
 					return
 				}
-				if len(request.Tools) != 9 || len(request.Messages) != 2 || request.Messages[0].Role != "system" || request.Messages[1].Role != "user" {
+				if len(request.Tools) != 9 || len(request.Messages) != 3 || request.Messages[0].Role != "system" || request.Messages[1].Role != "user" || request.Messages[2].Role != "user" {
 					t.Error("图片请求缺少固定提示或用户消息")
 					w.WriteHeader(400)
 					return
@@ -58,7 +58,7 @@ func TestImageInputUsesSelectedModelType(t *testing.T) {
 						URL string `json:"url"`
 					} `json:"image_url"`
 				}
-				if err := json.Unmarshal(request.Messages[1].Content, &parts); err != nil || len(parts) != 2 || !strings.HasPrefix(parts[1].ImageURL.URL, "data:image/png;base64,") {
+				if err := json.Unmarshal(request.Messages[2].Content, &parts); err != nil || len(parts) != 2 || !strings.HasPrefix(parts[1].ImageURL.URL, "data:image/png;base64,") {
 					t.Error("图片转换或默认工具定义丢失")
 				}
 				w.Header().Set("Content-Type", "application/json")

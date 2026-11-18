@@ -451,14 +451,14 @@ func TestManualCompactionWithoutEarlierHistoryIsAnExplicitNoop(t *testing.T) {
 	}
 }
 
-func manyBatchHistory(t *testing.T, p *appPeer, modelID string) string {
+func manyBatchHistory(t *testing.T, p *appPeer, modelID string, repeats int) string {
 	t.Helper()
 	compression := settings.DefaultCompaction()
 	compression.Enabled, compression.RetainTurns = false, 1
 	compactionSetting(t, p, compression)
 	cid := ""
 	for i := range 11 {
-		cid = compactSend(t, p, modelID, cid, fmt.Sprintf("历史问题%d-", i)+strings.Repeat("历史内容", 300))
+		cid = compactSend(t, p, modelID, cid, fmt.Sprintf("历史问题%d-", i)+strings.Repeat("历史内容", repeats))
 	}
 	return compactSend(t, p, modelID, cid, "最近轮次必须保留")
 }
@@ -485,23 +485,16 @@ func TestCompactionContinuesBeyondPreviousBatchLimit(t *testing.T) {
 				}
 			}()
 			mid := setupConversationModel(t, p, server.URL)
-			cid := manyBatchHistory(t, p, mid)
-			compression := settings.DefaultCompaction()
-			compression.Enabled, compression.TokenBudget, compression.RetainTurns = automatic, 5000, 1
-			if automatic {
-				// 答复请求额外携带附件和视觉工具；补入新增定义的真实固定开销，
-				// 摘要仍只能容纳一个完整历史轮次，下面继续核对十一批来源。
-				var added []model.ToolDefinition
-				upstream.mu.Lock()
-				for _, definition := range upstream.definitions {
-					switch definition.Name {
-					case "open_attachment", "view_image", "publish_artifact":
-						added = append(added, definition)
-					}
-				}
-				upstream.mu.Unlock()
-				compression.TokenBudget += tokens.Estimate(nil, added, compression.ImageTokenEstimate) - 16
+			base := readContextUsage(t, p, mid, "", "")
+			if base.EstimatedTokens == nil {
+				t.Fatal("未取得固定上下文预算")
 			}
+			compression := settings.DefaultCompaction()
+			// 为主调用的固定提示、设置和工具定义留出实际开销，另留摘要及最近轮次空间。
+			// 每条历史问题约占一半预算，加上回答和摘要提示后仍只能逐轮压缩。
+			compression.Enabled, compression.TokenBudget, compression.RetainTurns = automatic, max(5000, *base.EstimatedTokens+2048), 1
+			repeats := int(compression.TokenBudget / (2 * tokens.Text("历史内容")))
+			cid := manyBatchHistory(t, p, mid, repeats)
 			compactionSetting(t, p, compression)
 			method := "conversation.compact"
 			params := map[string]any{"conversation_id": cid}
@@ -567,7 +560,7 @@ func TestCompactionCanCancelBeyondPreviousBatchLimit(t *testing.T) {
 	cfg.MaxConcurrentRuns = 1
 	p := startApp(t, cfg, io.Discard)
 	mid := setupConversationModel(t, p, server.URL)
-	cid := manyBatchHistory(t, p, mid)
+	cid := manyBatchHistory(t, p, mid, 300)
 	compression := settings.DefaultCompaction()
 	compression.Enabled, compression.TokenBudget, compression.RetainTurns = false, 5000, 1
 	compactionSetting(t, p, compression)

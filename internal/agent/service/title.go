@@ -45,7 +45,7 @@ func (e *Engine) titleStep(ctx context.Context, ex conversation.Execution, resol
 	if err := e.event(ex, "step.created", step.ID, "", step); err != nil {
 		return err
 	}
-	result, callErr := resolved.Client.Generate(ctx, model.Request{Model: resolved.Snapshot.RemoteModelID, CaptureResult: true, Messages: []model.Message{{Role: model.RoleSystem, Content: "请为用户的问题生成一个简短会话标题，不超过30个Unicode字符，只返回一行标题，不要回答问题、不要附加解释。"}, {Role: model.RoleUser, Content: text}}})
+	result, callErr := resolved.Client.Generate(ctx, model.Request{Model: resolved.Snapshot.RemoteModelID, CaptureResult: true, Messages: []model.Message{{Role: model.RoleSystem, Content: "请为用户的问题生成一个简短会话标题，不超过30个Unicode字符。使用用户的语言概括核心问题或任务，保留必要的工单编号和专有名称；问答可使用主题短语，不强制使用祈使句。只返回一行标题，不加引号、Markdown或末尾标点，不要回答问题、不要附加解释。"}, {Role: model.RoleUser, Content: text}}})
 	if ctx.Err() != nil {
 		callErr = errors.Join(ctx.Err(), callErr)
 	}

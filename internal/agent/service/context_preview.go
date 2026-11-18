@@ -32,7 +32,7 @@ func (e *Engine) PreviewContext(ctx context.Context, in conversation.ContextUsag
 			return value, operationStorageError(ctx, err)
 		}
 	}
-	fixed, definitions, err := e.requestParts(ctx, conv, facts)
+	fixed, definitions, err := e.requestParts(ctx, conv, &state.Settings, facts)
 	if err != nil {
 		return value, err
 	}
