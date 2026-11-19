@@ -320,3 +320,14 @@ func (s *Store) recover(ctx context.Context) (retErr error) {
 		}
 	}
 }
+
+// RemoveFollowUp 回收已移除队列项私有的附件目录。
+func (s *Store) RemoveFollowUp(conversationID, id string) {
+	if !validID(conversationID) || !validID(id) {
+		return
+	}
+	batch := &Batch{s, conversationID, id}
+	if err := batch.Discard(); err != nil {
+		s.logger.Warn("清理后续消息附件失败", "module", "attachments", "follow_up_id", id)
+	}
+}

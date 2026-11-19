@@ -22,12 +22,32 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 	if req.Method == "conversation.compact" {
 		return h.compact(ctx, req, reply)
 	}
-	if req.Method == "conversation.send" || req.Method == "conversation.resend" {
+	if req.Method == "conversation.send" || req.Method == "conversation.resend" || req.Method == "conversation.follow_up_start" || req.Method == "conversation.continue" {
 		return h.send(ctx, req, reply)
 	}
 	var value any
 	var err error
 	switch req.Method {
+	case "conversation.follow_ups":
+		var p struct {
+			ConversationID string `json:"conversation_id"`
+		}
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		value, err = h.service.FollowUps(ctx, p.ConversationID)
+	case "conversation.follow_up_add":
+		var p domain.FollowUpInput
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		value, err = h.service.AddFollowUp(ctx, p)
+	case "conversation.follow_up_change":
+		var p domain.FollowUpChange
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		value, err = h.service.ChangeFollowUp(ctx, p)
 	case "conversation.attachment_read":
 		var p struct {
 			ConversationID string `json:"conversation_id"`
@@ -124,15 +144,8 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 }
 
 func (h *Handler) send(ctx context.Context, req protocol.Request, reply func(any, *protocol.Error) error) error {
-	var p domain.Send
-	if err := protocol.DecodeParams(req.Params, &p); err != nil {
-		return reply(nil, err)
-	}
-	if (req.Method == "conversation.resend" && p.MessageID == "") || (req.Method == "conversation.send" && p.MessageID != "") {
-		return reply(nil, protocol.InvalidParams())
-	}
 	replied := false
-	err := h.service.Send(ctx, p, func(ex domain.Execution) error {
+	accepted := func(ex domain.Execution) error {
 		if h.accepted != nil {
 			if err := h.accepted(ex.Run.ID); err != nil {
 				return err
@@ -140,7 +153,31 @@ func (h *Handler) send(ctx context.Context, req protocol.Request, reply func(any
 		}
 		replied = true
 		return reply(map[string]any{"conversation_id": ex.Conversation.ID, "run_id": ex.Run.ID, "user_message_id": ex.User.ID, "message_id": ex.Assistant.ID, "removed_message_ids": ex.RemovedMessageIDs}, nil)
-	})
+	}
+	var err error
+	switch req.Method {
+	case "conversation.follow_up_start":
+		var p domain.FollowUpStart
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		err = h.service.StartFollowUp(ctx, p, accepted)
+	case "conversation.continue":
+		var p domain.Continue
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		err = h.service.Continue(ctx, p, accepted)
+	default:
+		var p domain.Send
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		if (req.Method == "conversation.resend") != (p.MessageID != "") {
+			return reply(nil, protocol.InvalidParams())
+		}
+		err = h.service.Send(ctx, p, accepted)
+	}
 	if err != nil {
 		if replied {
 			return err

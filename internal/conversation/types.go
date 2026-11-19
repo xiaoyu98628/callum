@@ -21,16 +21,19 @@ type Conversation struct {
 
 // Message 仅保存用户消息及回答，工具、审批、补充参数保存在执行步骤。
 type Message struct {
-	ID             string        `json:"id"`
-	ConversationID string        `json:"conversation_id"`
-	RunID          string        `json:"run_id"`
-	Sequence       int64         `json:"sequence"`
-	Role           string        `json:"role"`
-	Content        []model.Block `json:"content"`
-	Status         string        `json:"status"`
-	CreatedAt      int64         `json:"created_at"`
-	UpdatedAt      int64         `json:"updated_at"`
-	CompletedAt    *int64        `json:"completed_at"`
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	RunID          string `json:"run_id"`
+	Sequence       int64  `json:"sequence"`
+	// SteeringOrder 为同一执行中的引导排序。SteeringAfterStep 锚定调用过程中的展示位置。
+	SteeringOrder     int64         `json:"steering_order,omitempty"`
+	SteeringAfterStep *int64        `json:"steering_after_step,omitempty"`
+	Role              string        `json:"role"`
+	Content           []model.Block `json:"content"`
+	Status            string        `json:"status"`
+	CreatedAt         int64         `json:"created_at"`
+	UpdatedAt         int64         `json:"updated_at"`
+	CompletedAt       *int64        `json:"completed_at"`
 }
 
 // HistoryPage 按当前分支的执行分页，消息与独立压缩共享同一游标，避免跨页错配。
@@ -73,8 +76,9 @@ type Filter struct {
 	Offset      int     `json:"offset"`
 }
 
-// Begin 是一次发送或编辑重发的原子写入输入，所有 ID 由业务层生成。
+// Begin 是一次发送、编辑重发或继续任务的原子写入输入，所有 ID 由业务层生成。
 type Begin struct {
+	FollowUp           *FollowUpStart
 	Create             bool
 	ConversationID     string
 	WorkspaceID        *string
@@ -84,6 +88,7 @@ type Begin struct {
 	StepID             string
 	ResendMessageID    string
 	ResendRunID        string
+	ContinueFromRunID  string
 	Model              model.Snapshot
 	Protocol           string
 	Content            []model.Block
@@ -96,6 +101,7 @@ type Execution struct {
 	HistoryMore       bool
 	Context           *ContextVersion
 	RemovedMessageIDs []string
+	ContinueFromRunID string
 	Created           bool
 	Conversation      Conversation
 	User              Message
@@ -115,4 +121,12 @@ type Send struct {
 	RetainedAttachments []int         `json:"retained_attachments,omitempty"`
 	Content             []model.Block `json:"content"`
 	Stream              *bool         `json:"stream,omitempty"`
+	ContinueFromRunID   string        `json:"-"`
+}
+
+// Continue 标识用户要继续的最新一轮；服务端在受理事务中复核所属会话和执行状态。
+type Continue struct {
+	ConversationID string `json:"conversation_id"`
+	RunID          string `json:"run_id"`
+	ModelID        string `json:"model_id,omitempty"`
 }

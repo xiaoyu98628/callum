@@ -16,6 +16,12 @@ type Repository interface {
 	Attachment(context.Context, string, string) (model.Block, error)
 	Messages(context.Context, string, int64, int) ([]Message, error)
 	History(context.Context, string, string, int) (HistoryPage, error)
+	FollowUps(context.Context, string) ([]FollowUp, error)
+	FollowUp(context.Context, string, string) (FollowUp, error)
+	CreateFollowUp(context.Context, FollowUp) (FollowUp, error)
+	ChangeFollowUp(context.Context, FollowUpChange, []model.Block) (FollowUp, error)
+	PendingSteering(context.Context, string) ([]FollowUp, error)
+	ApplySteering(context.Context, string, string, []string) ([]Message, error)
 	Begin(context.Context, Begin) (Execution, error)
 	ApplyTitle(context.Context, string, string, string, string) (Conversation, bool, error)
 }

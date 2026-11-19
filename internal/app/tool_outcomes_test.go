@@ -424,56 +424,93 @@ func TestUnknownOperationRetryRequiresUserDecision(t *testing.T) {
 }
 
 func TestUnknownOperationRetryAfterRestartRequiresApproval(t *testing.T) {
-	rt, cfg := runtimeFixture(t, 1)
-	instance := &outcomeTestTool{path: filepath.Join(t.TempDir(), "evidence"), outcome: tool.OutcomeUnknown}
-	client := outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
-		if req.Messages[len(req.Messages)-1].Role == model.RoleTool {
-			return model.Response{Text: "等待核实"}, nil
+	for _, continuing := range []bool{false, true} {
+		name := "新消息"
+		if continuing {
+			name = "继续任务"
 		}
-		return model.Response{ToolCalls: []model.ToolCall{{ID: "call-operation", Name: "operation", Arguments: json.RawMessage(`{}`)}}}, nil
-	})
-	id := policyTestID(t)
-	svc, _ := outcomeService(t, rt, instance, client, id, nil)
-	sub, err := rt.Subscribe(events.Filter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sub.Close()
-	ex := sendOutcome(t, svc, id, "", "执行操作", nil)
-	if terminal := awaitOutcome(t, rt, sub, ex.Run.ID, nil); terminal.Type != "run.completed" {
-		t.Fatalf("执行异常: %+v", terminal)
-	}
-	if err := rt.Close(); err != nil {
-		t.Fatal(err)
-	}
-	restarted, err := newTestRuntime(t.Context(), cfg, rt.logger)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if err := restarted.Close(); err != nil {
-			t.Error(err)
-		}
-	})
-	svc, _ = outcomeService(t, restarted, instance, client, id, nil)
-	sub, err = restarted.Subscribe(events.Filter{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer sub.Close()
-	next := sendOutcome(t, svc, id, ex.Conversation.ID, "核实后重试", nil)
-	approvals := 0
-	terminal := awaitOutcome(t, restarted, sub, next.Run.ID, func(a agent.Approval) {
-		approvals++
-		if instance.calls.Load() != 1 {
-			t.Fatal("重启后自动重试了未知操作")
-		}
-		instance.outcome = tool.OutcomeApplied
-		if _, err := restarted.Approvals().Decide(t.Context(), a.ID, agent.ApprovalApproved, nil); err != nil {
-			t.Fatal(err)
-		}
-	})
-	if terminal.Type != "run.completed" || approvals != 1 || instance.calls.Load() != 2 {
-		t.Fatalf("重试审批未贯通: %+v approvals=%d calls=%d", terminal, approvals, instance.calls.Load())
+		t.Run(name, func(t *testing.T) {
+			rt, cfg := runtimeFixture(t, 1)
+			instance := &outcomeTestTool{path: filepath.Join(t.TempDir(), "evidence"), outcome: tool.OutcomeUnknown}
+			client := outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
+				if req.Messages[len(req.Messages)-1].Role == model.RoleTool {
+					return model.Response{Text: "等待核实"}, nil
+				}
+				return model.Response{ToolCalls: []model.ToolCall{{ID: "call-operation", Name: "operation", Arguments: json.RawMessage(`{}`)}}}, nil
+			})
+			id := policyTestID(t)
+			svc, _ := outcomeService(t, rt, instance, client, id, nil)
+			sub, err := rt.Subscribe(events.Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sub.Close()
+			want := "run.completed"
+			if continuing {
+				want = "run.cancelled"
+			}
+			ex := sendOutcome(t, svc, id, "", "执行操作", func(ex conversation.Execution) {
+				if continuing {
+					instance.after = func() { rt.Cancel(ex.Run.ID) }
+				}
+			})
+			if terminal := awaitOutcome(t, rt, sub, ex.Run.ID, nil); terminal.Type != want {
+				t.Fatalf("执行异常: %+v", terminal)
+			}
+			if err := rt.Close(); err != nil {
+				t.Fatal(err)
+			}
+			restarted, err := newTestRuntime(t.Context(), cfg, rt.logger)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := restarted.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			svc, _ = outcomeService(t, restarted, instance, client, id, nil)
+			sub, err = restarted.Subscribe(events.Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sub.Close()
+			instance.after = nil
+			var next conversation.Execution
+			if continuing {
+				request := conversation.Continue{ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, ModelID: id}
+				err := svc.Continue(t.Context(), request, func(accepted conversation.Execution) error {
+					next = accepted
+					return nil
+				})
+				if err != nil || next.ContinueFromRunID != ex.Run.ID || next.Run.ID == ex.Run.ID {
+					t.Fatalf("重启后未受理继续任务: %+v %v", next.Run, err)
+				}
+			} else {
+				next = sendOutcome(t, svc, id, ex.Conversation.ID, "核实后重试", nil)
+			}
+			approvals := 0
+			terminal := awaitOutcome(t, restarted, sub, next.Run.ID, func(a agent.Approval) {
+				approvals++
+				if instance.calls.Load() != 1 {
+					t.Fatal("重启后自动重试了未知操作")
+				}
+				instance.outcome = tool.OutcomeApplied
+				if _, err := restarted.Approvals().Decide(t.Context(), a.ID, agent.ApprovalApproved, nil); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if terminal.Type != "run.completed" || approvals != 1 || instance.calls.Load() != 2 {
+				t.Fatalf("重试审批未贯通: %+v approvals=%d calls=%d", terminal, approvals, instance.calls.Load())
+			}
+			if continuing {
+				stale := conversation.Continue{ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, ModelID: id}
+				err := svc.Continue(t.Context(), stale, func(conversation.Execution) error { t.Fatal("过期执行被重复继续"); return nil })
+				if !errors.Is(err, conversation.ErrCannotContinue) {
+					t.Fatalf("过期继续请求结果错误: %v", err)
+				}
+			}
+
+		})
 	}
 }

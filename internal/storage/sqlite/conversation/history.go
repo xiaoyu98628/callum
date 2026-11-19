@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
@@ -37,12 +38,22 @@ func (r *Repository) History(ctx context.Context, id, before string, limit int) 
 		out.HasMore = len(rows) > limit
 		rows = rows[:min(len(rows), limit)]
 		var bytes int64
+		var messageCount int64
 		for _, row := range rows {
-			var size int64
-			if err := tx.Model(&schema.Message{}).Where("run_id=? AND conversation_id=?", row.ID, id).Select("COALESCE(SUM(length(CAST(content AS BLOB))),0)").Scan(&size).Error; err != nil {
+			var bounds struct{ Size, Count int64 }
+			if err := tx.Model(&schema.Message{}).Where("run_id=? AND conversation_id=?", row.ID, id).
+				Select("COALESCE(SUM(length(CAST(content AS BLOB))),0) AS size, COUNT(*) AS count").Scan(&bounds).Error; err != nil {
 				return err
 			}
-			if bytes+size > 4<<20 {
+			var steering struct{ Size, Count int64 }
+			if err := tx.Model(&schema.FollowUp{}).
+				Where("expected_run_id=? AND conversation_id=? AND status IN ?", row.ID, id, []string{domain.FollowUpSteering, domain.FollowUpApplied}).
+				Select("COALESCE(SUM(length(CAST(content AS BLOB))),0) AS size, COUNT(*) AS count").Scan(&steering).Error; err != nil {
+				return err
+			}
+			size := bounds.Size + steering.Size
+			count := bounds.Count + steering.Count
+			if bytes+size > 4<<20 || messageCount+count > 200 {
 				if len(out.Runs) == 0 {
 					return model.ErrInputLimit
 				}
@@ -50,6 +61,7 @@ func (r *Repository) History(ctx context.Context, id, before string, limit int) 
 				break
 			}
 			bytes += size
+			messageCount += count
 			out.Runs = append(out.Runs, agent.Run{ID: row.ID, ConversationID: row.ConversationID, ReplacesRunID: row.ReplacesRunID, Model: row.Model, Stream: row.Stream, SettingsSnapshot: row.SettingsSnapshot, Status: row.Status, ErrorKind: row.ErrorKind, ErrorMessage: row.ErrorMessage, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, FinishedAt: row.FinishedAt})
 			out.BeforeRunID = row.ID
 		}
@@ -67,6 +79,29 @@ func (r *Repository) History(ctx context.Context, id, before string, limit int) 
 		for _, value := range values {
 			out.Messages = append(out.Messages, message(value))
 		}
+		var steering []steeringRow
+		if err := steeringMessagesQuery(tx).
+			Where("f.conversation_id=? AND f.expected_run_id IN ?", id, ids).Find(&steering).Error; err != nil {
+			return err
+		}
+		for _, row := range steering {
+			out.Messages = append(out.Messages, row.message())
+		}
+		slices.SortFunc(out.Messages, func(a, b domain.Message) int {
+			if order := cmp.Compare(a.Sequence, b.Sequence); order != 0 {
+				return order
+			}
+			if a.SteeringOrder != b.SteeringOrder {
+				if a.SteeringOrder == 0 {
+					return 1
+				}
+				if b.SteeringOrder == 0 {
+					return -1
+				}
+				return cmp.Compare(a.SteeringOrder, b.SteeringOrder)
+			}
+			return cmp.Compare(a.ID, b.ID)
+		})
 		slices.Reverse(out.Runs)
 		return nil
 	})

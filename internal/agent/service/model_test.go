@@ -78,7 +78,7 @@ func TestCancelledIncrementalSaveDoesNotBecomeStorageFailure(t *testing.T) {
 			ex := conversation.Execution{Run: agent.Run{Stream: true}, Assistant: conversation.Message{ID: "assistant"}}
 			resolved := agent.Resolved{Client: preambleStream{}}
 			total := 0
-			_, err = engine.callModel(ctx, ex, resolved, agent.Step{Input: []byte(`{}`)}, nil, nil, func() {}, &total)
+			_, err = engine.callModel(ctx, ctx, ex, resolved, agent.Step{Input: []byte(`{}`)}, nil, nil, func() {}, &total)
 			status, _, _ := failure(err)
 			if writes != 1 || status != test.wantStatus || errors.Is(err, agent.ErrStorage) != test.wantStorage {
 				t.Fatalf("增量保存错误分类不符: writes=%d status=%s err=%v", writes, status, err)
@@ -88,6 +88,42 @@ func TestCancelledIncrementalSaveDoesNotBecomeStorageFailure(t *testing.T) {
 			}
 			if (test.failWrite || test.failCleanup) && !errors.Is(err, writeFailure) {
 				t.Fatal("真实存储错误链丢失")
+			}
+		})
+	}
+}
+
+func TestSteeringDuringStreamingWrite(t *testing.T) {
+	for _, test := range []struct {
+		name, kind string
+		writeErr   error
+	}{
+		{name: "write completes", kind: "steered"},
+		{name: "real storage failure", kind: "internal", writeErr: errors.New("write failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			samplingCtx, steer := context.WithCancelCause(t.Context())
+			defer steer(nil)
+			repo := &interruptedMessageRepository{write: func(writeCtx context.Context) error {
+				steer(conversation.ErrSteered)
+				if writeCtx.Err() != nil || !errors.Is(context.Cause(samplingCtx), conversation.ErrSteered) {
+					t.Fatal("引导取消必须限定在模型请求")
+				}
+				return test.writeErr
+			}}
+			manager, err := executor.New(t.Context(), 1, time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer manager.Close()
+			engine := &Engine{repository: repo, manager: manager, emit: func(agent.Event) error { return nil }, options: Options{CallTimeout: time.Second}}
+			ex := conversation.Execution{Run: agent.Run{Stream: true}, Assistant: conversation.Message{ID: "assistant"}}
+			total := 0
+			_, err = engine.callModel(t.Context(), samplingCtx, ex, agent.Resolved{Client: preambleStream{}}, agent.Step{Input: []byte(`{}`)}, nil, nil, func() {}, &total)
+			_, kind, _ := failure(err)
+			if kind != test.kind || !errors.Is(err, conversation.ErrSteered) ||
+				(test.writeErr != nil && !errors.Is(err, test.writeErr)) {
+				t.Fatalf("引导或真实存储错误分类不符: %s, %v", kind, err)
 			}
 		})
 	}
@@ -144,7 +180,7 @@ func TestReasoningPersistsOnCancellationAndLimit(t *testing.T) {
 			return nil
 		}}
 		total := 0
-		result, err := engine.callModel(t.Context(), conversation.Execution{Run: agent.Run{Stream: true}}, agent.Resolved{Client: reasoningStream{cancel: !reject, reject: reject}}, agent.Step{Input: []byte(`{}`)}, nil, nil, func() {}, &total)
+		result, err := engine.callModel(t.Context(), t.Context(), conversation.Execution{Run: agent.Run{Stream: true}}, agent.Resolved{Client: reasoningStream{cancel: !reject, reject: reject}}, agent.Step{Input: []byte(`{}`)}, nil, nil, func() {}, &total)
 		want := context.Canceled
 		if reject {
 			want = agent.ErrOutputLimit

@@ -57,6 +57,16 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		if err := busy(tx, conv.ID); err != nil {
 			return err
 		}
+		if in.ContinueFromRunID != "" {
+			if err := checkContinueSource(tx, conv.ID, in.ContinueFromRunID); err != nil {
+				return err
+			}
+		}
+		if in.FollowUp != nil {
+			if err := consumeFollowUp(tx, in); err != nil {
+				return err
+			}
+		}
 		var user schema.Message
 		var replaced *string
 		if in.ResendMessageID != "" {
@@ -81,6 +91,11 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			if err := tx.Model(&schema.Message{}).Where("conversation_id = ? AND sequence > ?", conv.ID, user.Sequence).Pluck("id", &out.RemovedMessageIDs).Error; err != nil {
 				return err
 			}
+			var steeringIDs []string
+			if err := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND expected_run_id=? AND status=?", conv.ID, old, domain.FollowUpApplied).Pluck("id", &steeringIDs).Error; err != nil {
+				return err
+			}
+			out.RemovedMessageIDs = append(out.RemovedMessageIDs, steeringIDs...)
 			if err := tx.Where("conversation_id = ? AND sequence > ?", conv.ID, user.Sequence).Delete(&schema.Message{}).Error; err != nil {
 				return err
 			}
@@ -118,6 +133,9 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		if err := tx.Omit("Conversation", "Replaces").Create(&runRow).Error; err != nil {
 			return err
 		}
+		if err := bindFollowUpQueue(tx, in); err != nil {
+			return err
+		}
 		user.RunID, user.Content, user.Status, user.UpdatedAt, user.CompletedAt = in.RunID, in.Content, agent.Completed, now, &now
 		if in.ResendMessageID != "" {
 			if err := tx.Omit("Run").Select("RunID", "Content", "Status", "UpdatedAt", "CompletedAt").Updates(&user).Error; err != nil {
@@ -137,7 +155,11 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		}
 		out.History = append(out.History, message(user))
 		sources = append(sources, map[string]any{"id": user.ID, "fingerprint": history.Fingerprint(user.Content)})
-		input, err := json.Marshal(map[string]any{"protocol": in.Protocol, "messages": sources})
+		fields := map[string]any{"protocol": in.Protocol, "messages": sources}
+		if in.ContinueFromRunID != "" {
+			fields["continued_from_run_id"] = in.ContinueFromRunID
+		}
+		input, err := json.Marshal(fields)
 		if err != nil {
 			return err
 		}
@@ -150,11 +172,32 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			return err
 		}
 		out.Conversation, out.User, out.Assistant = convert(conv), message(user), message(assistant)
+		out.ContinueFromRunID = in.ContinueFromRunID
 		out.Run = agent.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, SettingsSnapshot: &snapshot, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
 		out.Step = agent.Step{ID: step.ID, ConversationID: conv.ID, RunID: in.RunID, Sequence: 1, Type: step.Type, Name: step.Name, Status: step.Status, Input: input, Model: &in.Model, CreatedAt: now, UpdatedAt: now}
 		return nil
 	})
 	return out, err
+}
+
+// checkContinueSource 以当前分支最新用户消息为准，独立压缩不产生新的任务。
+func checkContinueSource(tx *gorm.DB, conversationID, runID string) error {
+	var latest struct{ ID, Status string }
+	err := tx.Table("conversation_messages AS m").
+		Select("r.id, r.status").
+		Joins("JOIN conversation_runs AS r ON r.id=m.run_id AND r.conversation_id=m.conversation_id").
+		Where("m.conversation_id=? AND m.role='user'", conversationID).
+		Order("m.sequence DESC").Take(&latest).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.ErrCannotContinue
+	}
+	if err != nil {
+		return err
+	}
+	if latest.ID != runID || (latest.Status != agent.Cancelled && latest.Status != agent.Interrupted) {
+		return domain.ErrCannotContinue
+	}
+	return nil
 }
 
 func (r *Repository) ApplyTitle(ctx context.Context, id, userID, fingerprint, title string) (out domain.Conversation, applied bool, err error) {

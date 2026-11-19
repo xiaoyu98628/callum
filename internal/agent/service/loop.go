@@ -34,11 +34,15 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	if err != nil {
 		return err
 	}
+	if ex.ContinueFromRunID != "" {
+		fixed[0].Content += "\n\n用户通过「继续任务」恢复上次停止或中断的任务。结合原需求、已收到的引导及工具结果，完成剩余工作。把确认已经生效的操作作为进度使用。结果未知或部分生效时先用只读方式核实，任何进一步操作仍须经过现有权限检查。"
+	}
 	totalText := 0
 	step := ex.Step
 	var meter tokens.Meter
 	var correction *argumentCorrection
 	previousRejection := ""
+	appliedSteering := 0
 	for round := int64(0); ; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -48,11 +52,20 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if correction != nil {
 			requestFixed = append(requestFixed, correction.message())
 		}
+		pending, generation, err := e.snapshotSteering(ctx, ex.Run.ID)
+		if err != nil {
+			return operationStorageError(ctx, err)
+		}
+		current.steering = append(current.steering[:appliedSteering], steeringMessages(pending)...)
 		if err := current.fit(ctx, e, &ex, resolved, requestFixed, definitions, &meter, 0, nil); err != nil {
 			return err
 		}
-		effective := append(requestFixed, contextMessages(ex.Context, current.messages())...)
+		effective := current.request(requestFixed, ex)
 		e.recordContext(ex, resolved, effective, definitions, &meter, true)
+		steeringIDs := make([]string, 0, len(pending))
+		for _, item := range pending {
+			steeringIDs = append(steeringIDs, item.ID)
+		}
 		if round > 0 {
 			id, err := uuid.NewV7()
 			if err != nil {
@@ -60,6 +73,9 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			}
 			now := time.Now().UnixMilli()
 			fields := map[string]any{"purpose": "answer", "protocol": resolved.Protocol, "round": round + 1, "previous_step_id": step.ID}
+			if len(steeringIDs) > 0 {
+				fields["steering_ids"] = steeringIDs
+			}
 			if correction != nil {
 				fields["tool_arguments_correction"] = correction
 			}
@@ -75,11 +91,36 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 				return err
 			}
 		}
+		if round == 0 && len(steeringIDs) > 0 {
+			var fields map[string]any
+			if err := json.Unmarshal(step.Input, &fields); err != nil {
+				return err
+			}
+			fields["steering_ids"] = steeringIDs
+			step.Input, err = json.Marshal(fields)
+			if err != nil {
+				return err
+			}
+		}
 		callback := func() {}
 		if round == 0 {
 			callback = startTitle
 		}
-		result, callErr := e.callModel(ctx, ex, resolved, step, effective, definitions, callback, &totalText)
+		samplingCtx, finishSampling := e.samplingContext(ctx, ex.Run.ID, generation)
+		result, callErr := e.callModel(ctx, samplingCtx, ex, resolved, step, effective, definitions, callback, &totalText)
+		finishSampling()
+		if callErr == nil {
+			if err := e.applySteering(ctx, ex, step.ID, pending); err != nil {
+				return err
+			}
+			appliedSteering = len(current.steering)
+		}
+		if errors.Is(callErr, conversation.ErrSteered) && !errors.Is(callErr, agent.ErrStorage) && ctx.Err() == nil {
+			if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := e.saveAnswer(ctx, ex, result.Content, result.Text); err != nil {
 			return err
 		}
@@ -105,7 +146,15 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		correction = nil
 		meter.Observe(effective, definitions, result.InputTokens)
 		if len(result.ToolCalls) == 0 {
-			return nil
+			sealed, err := e.sealAnswer(ctx, ex.Run.ID)
+			if err != nil || sealed {
+				return err
+			}
+			current.current = append(current.current, model.Message{Role: model.RoleAssistant, Content: result.Text, Reasoning: result.Reasoning})
+			if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {
+				return err
+			}
+			continue
 		}
 		// 工具调用轮的文本保留在模型步骤中；回答占位恢复为空，再流式展示下一轮正文。
 		if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {
@@ -118,7 +167,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			return err
 		}
 		if len(current.past)+len(current.current) != beforeFit {
-			e.recordContext(ex, resolved, append(fixed, contextMessages(ex.Context, current.messages())...), definitions, nil, true)
+			e.recordContext(ex, resolved, current.request(fixed, ex), definitions, nil, true)
 		}
 		roundResults := make([]model.Message, 0, len(result.ToolCalls))
 		for index, call := range result.ToolCalls {
@@ -127,24 +176,29 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			}
 			var value model.Message
 			var err error
-			if call.Name == agent.UserInputTool {
-				value, err = e.askUser(ctx, ex, step, call)
-			} else {
-				value, err = e.callTool(ctx, ex, resolved, step, call, denied, uncertain)
+			if err = e.beforeTool(ctx, ex.Run.ID, func() error { return nil }); err == nil {
+				if call.Name == agent.UserInputTool {
+					value, err = e.askUser(ctx, ex, step, call)
+				} else {
+					value, err = e.callTool(ctx, ex, resolved, step, call, denied, uncertain)
+				}
+			}
+			if errors.Is(err, conversation.ErrSteered) {
+				value, err = e.skipSteeredCall(ctx, ex, step, call)
 			}
 			if err != nil {
 				return err
 			}
 			roundResults = append(roundResults, value)
 			current.current = append(current.current, value)
-			e.recordContext(ex, resolved, append(fixed, contextMessages(ex.Context, current.messages())...), definitions, nil, true)
+			e.recordContext(ex, resolved, current.request(fixed, ex), definitions, nil, true)
 			beforeFit := len(current.past) + len(current.current)
 			if err := current.fit(ctx, e, &ex, resolved, fixed, definitions, nil, step.Sequence, result.ToolCalls[index+1:]); err != nil {
 				return err
 			}
 			// 正常工具追加已统计；只有压缩改写上下文后才再次扫描并发布缩减值。
 			if len(current.past)+len(current.current) != beforeFit {
-				e.recordContext(ex, resolved, append(fixed, contextMessages(ex.Context, current.messages())...), definitions, nil, true)
+				e.recordContext(ex, resolved, current.request(fixed, ex), definitions, nil, true)
 			}
 		}
 		rejected := rejectedArgumentsRound(result.ToolCalls, roundResults)
@@ -176,6 +230,8 @@ func (e *Engine) saveAnswer(ctx context.Context, ex conversation.Execution, bloc
 func toolFailure(err error) json.RawMessage {
 	kind, message := "tool_failed", "工具执行失败"
 	switch {
+	case errors.Is(err, conversation.ErrSteered):
+		kind, message = "steered", conversation.ErrSteered.Error()
 	case errors.Is(err, tool.ErrConflict):
 		kind, message = "file_conflict", tool.ErrConflict.Error()
 	case errors.Is(err, tool.ErrUnknownOutcome):

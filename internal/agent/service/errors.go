@@ -8,6 +8,7 @@ import (
 	"io"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/compaction"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
@@ -53,6 +54,8 @@ func failure(err error) (status, kind, message string) {
 		return status, "compaction_not_reduced", "摘要未能缩小上下文，原有效版本已保留"
 	case errors.Is(err, agent.ErrStorage):
 		return status, "internal", "保存执行数据失败"
+	case errors.Is(err, conversation.ErrSteered):
+		return agent.Cancelled, "steered", "已按引导切换模型请求"
 	case errors.Is(err, context.Canceled):
 		return agent.Cancelled, "cancelled", "执行已取消"
 	case errors.Is(err, errSummaryTimeout):

@@ -3,10 +3,12 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"slices"
 
 	"gorm.io/gorm"
 
 	"github.com/xiaoyu98628/callum/internal/agent/transcript"
+	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
@@ -15,10 +17,12 @@ type transcriptRow struct {
 	ID, RunID, RunStatus     string
 	ParentStepID, ToolCallID *string
 	Message                  string
+	Sequence                 int64
+	Steering                 bool
 	Operation                *string
 }
 
-// Transcript 在当前消息分支恢复成功轨迹及失败执行留下的副作用事实。
+// Transcript 恢复当前分支的成功轨迹、已被显式继续的轨迹及失败执行留下的副作用事实。
 // 查询前检查累计大小，只加载统一上下文，不加载大型原始模型结果。
 func (r *Repository) Transcript(ctx context.Context, id string, after ...int64) (map[string][]model.Message, error) {
 	floor := int64(0)
@@ -66,7 +70,11 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 			Where("t.run_id=r.id AND t.type=?", "tool_call").
 			Where("json_extract(t.input,'$.operation_version')=1 AND json_extract(t.output,'$.operation.version')=1").
 			Where("json_extract(t.output,'$.operation.outcome') IN ?", []string{"applied", "partially_applied", "unknown"})
-		return base().Where("(r.status=? OR EXISTS (?))", "completed", effects)
+		continued := r.db.WithContext(ctx).Table("conversation_messages AS u").Select("1").
+			Joins("JOIN conversation_run_steps AS next ON next.run_id=u.run_id AND next.sequence=1").
+			Where("u.conversation_id=r.conversation_id AND u.role='user' AND u.sequence>m.sequence").
+			Where("json_extract(next.input,'$.continued_from_run_id')=r.id")
+		return base().Where("(r.status=? OR EXISTS (?) OR EXISTS (?))", "completed", effects, continued)
 	}
 	var runIDs []string
 	if err := visible().Distinct("r.id").Limit(maxMessages+1).Pluck("r.id", &runIDs).Error; err != nil {
@@ -99,6 +107,23 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 		bounds.Size += int64(len(raw))
 		bounds.Count++
 	}
+	steering := func() *gorm.DB {
+		q := r.db.WithContext(ctx).Table("conversation_followups AS f").
+			Joins("JOIN conversation_runs r ON r.id=f.expected_run_id").
+			Joins("JOIN conversation_messages m ON m.run_id=r.id AND m.role='user'").
+			Joins("JOIN conversation_run_steps s ON s.id=f.applied_step_id AND s.run_id=r.id").
+			Where("f.conversation_id=? AND m.conversation_id=? AND m.sequence>? AND f.status='applied' AND r.finished_at IS NOT NULL", id, id, floor)
+		if before > 0 {
+			q = q.Where("m.sequence<?", before)
+		}
+		return q
+	}
+	var steeringBounds struct{ Size, Count int64 }
+	if err := steering().Select("COALESCE(SUM(length(CAST(f.content AS BLOB))),0) AS size, COUNT(*) AS count").Scan(&steeringBounds).Error; err != nil {
+		return nil, err
+	}
+	bounds.Size += steeringBounds.Size
+	bounds.Count += steeringBounds.Count
 	if bounds.Size > maxBytes {
 		return nil, &model.InputLimitError{Dimension: "历史轨迹字节", Actual: bounds.Size, Limit: maxBytes}
 	}
@@ -106,10 +131,51 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 		return nil, &model.InputLimitError{Dimension: "历史轨迹消息数量", Actual: bounds.Count, Limit: int64(maxMessages)}
 	}
 	var rows []transcriptRow
-	if err := query().Select("conversation_run_steps.id,conversation_run_steps.run_id,r.status AS run_status,conversation_run_steps.parent_step_id,conversation_run_steps.tool_call_id,json_extract(conversation_run_steps.output,'$.context_message') AS message,json_extract(conversation_run_steps.output,'$.operation') AS operation").
+	if err := query().Select("conversation_run_steps.id,conversation_run_steps.run_id,r.status AS run_status,conversation_run_steps.sequence,conversation_run_steps.parent_step_id,conversation_run_steps.tool_call_id,json_extract(conversation_run_steps.output,'$.context_message') AS message,json_extract(conversation_run_steps.output,'$.operation') AS operation").
 		Order("r.created_at").Order("r.id").Order("conversation_run_steps.sequence").Scan(&rows).Error; err != nil {
 		return nil, err
 	}
+	var steeringRows []struct {
+		ID, RunID, RunStatus, Content string
+		Sequence                      int64
+	}
+	if err := steering().Select("f.id,r.id AS run_id,r.status AS run_status,f.content,s.sequence").
+		Order("f.position, f.id").Scan(&steeringRows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range steeringRows {
+		var content []model.Block
+		if err := json.Unmarshal([]byte(row.Content), &content); err != nil {
+			return nil, err
+		}
+		raw, err := json.Marshal(model.Message{Role: model.RoleUser, Blocks: history.ModelContent(content)})
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, transcriptRow{ID: row.ID, RunID: row.RunID, RunStatus: row.RunStatus, Sequence: row.Sequence, Steering: true, Message: string(raw)})
+	}
+	// 相同序号时，用户引导位于实际使用该消息的模型响应之前。
+	slices.SortStableFunc(rows, func(a, b transcriptRow) int {
+		if a.RunID != b.RunID {
+			if a.RunID < b.RunID {
+				return -1
+			}
+			return 1
+		}
+		if a.Sequence != b.Sequence {
+			if a.Sequence < b.Sequence {
+				return -1
+			}
+			return 1
+		}
+		if a.Steering == b.Steering {
+			return 0
+		}
+		if a.Steering {
+			return -1
+		}
+		return 1
+	})
 	out := map[string][]model.Message{}
 	for runID, checkpoint := range checkpoints {
 		out[runID] = []model.Message{checkpoint.Message()}

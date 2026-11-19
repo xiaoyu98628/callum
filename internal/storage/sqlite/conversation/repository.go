@@ -162,7 +162,7 @@ func (r *Repository) Message(ctx context.Context, conversationID, messageID stri
 	var row schema.Message
 	err := r.db.WithContext(ctx).Where("conversation_id = ? AND id = ?", conversationID, messageID).Take(&row).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return domain.Message{}, domain.ErrNotFound
+		return steeringMessage(r.db.WithContext(ctx), conversationID, messageID)
 	}
 	if err != nil {
 		return domain.Message{}, err
@@ -220,7 +220,13 @@ func (r *Repository) Attachment(ctx context.Context, conversationID, ref string)
 		WHERE m.conversation_id = ? AND m.role IN ('user', 'assistant')
 		AND json_extract(entry.value, '$.attachment_ref') = ?
 		AND json_extract(entry.value, '$.type') = 'file'
-		LIMIT 1`, conversationID, ref).Scan(&values).Error
+		UNION ALL
+		SELECT entry.value FROM conversation_followups f, json_each(f.content) entry
+		WHERE f.conversation_id = ? AND f.status IN ('steering','applied')
+		AND EXISTS (SELECT 1 FROM conversation_messages m WHERE m.run_id = f.expected_run_id AND m.role='user')
+		AND json_extract(entry.value, '$.attachment_ref') = ?
+		AND json_extract(entry.value, '$.type') = 'file'
+		LIMIT 1`, conversationID, ref, conversationID, ref).Scan(&values).Error
 	if err != nil {
 		return model.Block{}, err
 	}

@@ -166,14 +166,38 @@ func validate(in conversation.Send) error {
 // Send 在事务提交后调用 accepted；回调成功后才启动异步调用和发布执行事件。
 // ctx 只用于受理；执行使用独立运行上下文，输入内容在受理前复制。
 func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(conversation.Execution) error) error {
+	return s.send(ctx, in, nil, accepted)
+}
+
+// Continue 在同一会话创建一轮新执行，原执行和已保存的工具轨迹仍可查阅。
+func (s *Service) Continue(ctx context.Context, in conversation.Continue, accepted func(conversation.Execution) error) error {
+	if !validID(in.ConversationID) || !validID(in.RunID) || (in.ModelID != "" && !validID(in.ModelID)) {
+		return conversation.ErrInvalid
+	}
+	source, err := s.engine.GetRun(ctx, in.RunID)
+	if errors.Is(err, agent.ErrNotFound) || (err == nil && source.ConversationID != in.ConversationID) {
+		return conversation.ErrCannotContinue
+	}
+	if err != nil {
+		return err
+	}
+	return s.send(ctx, conversation.Send{
+		ConversationID: in.ConversationID, ContinueFromRunID: in.RunID, ModelID: in.ModelID,
+		Stream: &source.Stream, Content: []model.Block{{Type: "text", Text: "继续任务"}},
+	}, nil, accepted)
+}
+
+func (s *Service) send(ctx context.Context, in conversation.Send, followUp *conversation.FollowUpStart, accepted func(conversation.Execution) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if accepted == nil {
 		return conversation.ErrInvalid
 	}
-	if err := validate(in); err != nil {
-		return err
+	if followUp == nil {
+		if err := validate(in); err != nil {
+			return err
+		}
 	}
 	in.Content = append([]model.Block(nil), in.Content...)
 	if err := s.validateSkills(ctx, in.Content); err != nil {
@@ -257,7 +281,7 @@ func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(
 	if in.Stream != nil {
 		stream = *in.Stream
 	}
-	ex, err := s.repository.Begin(lookup, conversation.Begin{Create: create, ConversationID: in.ConversationID, WorkspaceID: in.WorkspaceID, RunID: ids[0], UserMessageID: ids[1], AssistantMessageID: ids[2], StepID: ids[3], ResendMessageID: in.MessageID, ResendRunID: in.ExpectedRunID, Model: resolved.Snapshot, Protocol: resolved.Protocol, Content: in.Content, Stream: stream})
+	ex, err := s.repository.Begin(lookup, conversation.Begin{FollowUp: followUp, Create: create, ConversationID: in.ConversationID, WorkspaceID: in.WorkspaceID, RunID: ids[0], UserMessageID: ids[1], AssistantMessageID: ids[2], StepID: ids[3], ResendMessageID: in.MessageID, ResendRunID: in.ExpectedRunID, ContinueFromRunID: in.ContinueFromRunID, Model: resolved.Snapshot, Protocol: resolved.Protocol, Content: in.Content, Stream: stream})
 	batch.Finish(lookup, err == nil)
 	if err != nil {
 		return err

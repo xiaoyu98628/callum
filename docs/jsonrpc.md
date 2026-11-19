@@ -85,7 +85,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | 技能 | `skills.list` |
 | 无历史调用 | `model.invoke` |
 | 工作区 | `workspace.create`、`workspace.update`、`workspace.get`、`workspace.list`、`workspace.delete`、`workspace.restore` |
-| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.history`、`conversation.attachment_preview`、`conversation.delete`、`conversation.restore` |
+| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.continue`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.history`、`conversation.attachment_preview`、`conversation.delete`、`conversation.restore` |
 | 上下文压缩 | `conversation.context_usage`、`conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
 | 执行 | `run.get`、`run.list`、`run.cancel` |
 | 步骤 | `step.get`、`step.list`、`step.data` |
@@ -146,7 +146,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 ## 5. 应用设置
 
-当前注册 `execution` 和 `context_compaction` 两个配置组。以下字段属于 `execution`，分别控制审批策略、审批人和沙箱范围；压缩设置见 9.1 节。
+当前注册 `general`、`execution` 和 `context_compaction` 三个配置组。以下字段属于 `execution`，分别控制审批策略、审批人和沙箱范围；压缩设置见 9.1 节。
 
 | 字段 | 支持值 | 默认值 |
 | --- | --- | --- |
@@ -155,6 +155,8 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | `sandbox_mode` | `workspace-write`、`read-only`、`danger-full-access` | `workspace-write` |
 
 `on-request` 按操作类别判断；`always` 逐次询问；`never` 不询问，并拒绝需要审批的操作。`never` 在只读和项目写入模式下不会扩大工具权限。完全访问要求显式设置 `sandbox_mode: "danger-full-access"`，同时使用 `approval_policy: "never"` 和 `approvals_reviewer: "user"`。
+
+常规组 `general` 的完整默认值为 `{"follow_up_mode":"queue"}`。唯一字段 `follow_up_mode` 支持 `queue`（排队）和 `steer`（引导）。常规组用于桌面客户端发送后续消息时选择默认方式，按设置记录的 `revision` 读取和更新。
 
 ### settings.get
 
@@ -176,7 +178,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 {"jsonrpc":"2.0","id":"settings-update","method":"settings.update","params":{"key":"execution","revision":1,"value":{"approval_policy":"always","approvals_reviewer":"user"}}}
 ```
 
-成功返回更新后的完整设置记录，`revision` 加一。再次携带旧版本保存，返回 `1003`；重新读取后再保存。非法审批人与沙箱组合、未知字段、缺少必要字段、重复键或错误类型返回 `-32602`。
+成功返回更新后的完整设置记录，`revision` 加一。再次携带旧版本保存，返回 `1003`；重新读取后再保存。非法常规设置值、非法审批人与沙箱组合、未知字段、缺少必要字段、重复键或错误类型返回 `-32602`。
 
 审批人为 `auto_review` 时策略须为 `on-request` 或 `always`，并保留沙箱。服务端按固定操作判断是否适合 AI 审核，符合范围时创建工具步骤的 `model_call` 子步骤，`input.purpose` 为 `approval_review`，`input.request_hash` 与工具操作一致。模型、结论、理由及实际 usage 可用步骤接口查询。AI 决定直接发布 `approval.updated`，`decided_by` 为 `auto_review`，审批对象的 `review` 包含 `step_id`、`decision`、`reason`。转人工时发出 `approval.requested`，`review.decision` 为 `handoff`。客户端通过 `approval.decide` 提交人工决定，服务端将身份记为 `local_user`。
 
@@ -387,6 +389,23 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 `run.started` 通知同样携带 `removed_message_ids`，供其他窗口清理旧回答。旧执行身份及 usage 等审计信息保留。
 
 编辑较早的用户消息、在执行中重发、把回答消息 ID 当作用户消息 ID，均不会正常受理。`conversation.send` 不接受 `message_id`，重发必须使用 `conversation.resend`。
+
+### conversation.continue：继续已停止或中断的任务
+
+参数为 `conversation_id`、`run_id` 和可选的 `model_id`。`run_id` 必须属于当前会话最新一条普通用户消息，且状态为 `cancelled` 或 `interrupted`。有活动执行时返回 `1006`，执行已被替换或来源已过期时返回 `1003`。手动压缩单独记录，仍可继续此前停止的对话任务。
+
+受理结果与 `conversation.send` 相同，返回原会话 ID、新执行 ID 和新消息 ID。新执行在历史中记录「继续任务」，以原需求、已生效的引导和保存的工具轨迹作为上下文，并使用当前设置快照。原执行保留，结果待核实的操作继续受审批约束。受理成功后，原执行绑定的待发队列随新执行一起继续，仍须等待成功终态才可自动发出。
+
+### 后续消息
+
+| 方法 | 参数与结果 |
+| --- | --- |
+| `conversation.follow_ups` | `conversation_id`。返回按队列顺序排列的 `queued` 记录和已取出的 `draft` 记录。 |
+| `conversation.follow_up_add` | `conversation_id`、`expected_run_id`、`mode`（`queue` 或 `steer`）、`content`。排队可指定 `model_id`，引导使用目标执行的模型。内容块与 `conversation.send` 相同。返回写入记录。 |
+| `conversation.follow_up_change` | `conversation_id`、`id`、`revision`、`action`。支持 `edit`（附 `text`）、`remove`、`up`、`down`、`steer`（附 `expected_run_id`）。另支持 `withdraw` 取出为草稿、`restore_draft` 放回原消息、`queue_draft` 和 `steer_draft` 手动提交编辑后的正文。后两者附 `text` 与 `expected_run_id`，排队可带 `model_id`。返回更新后记录。 |
+| `conversation.follow_up_start` | `conversation_id`、队首 `id`、`revision`。自动续发另传刚成功的 `after_run_id`，由服务校验队列绑定及最新执行。显式发送已取出的草稿时传 `text`，可附 `model_id`，返回常规发送受理结果。 |
+
+队列记录含 `id`、`conversation_id`、`expected_run_id`、`model_id`、`status`、`revision`、`position`、`content` 和 `created_at`。自动续发仅接受 `queued` 记录。取出与续发均在事务中校验状态和 revision，已取出的 `draft` 只能显式提交或放回。引导仅接受正在运行的普通对话执行，受理后将消息移入该执行，发出 `message.created` 和 `conversation.follow_ups_updated`，并主动取消当前模型请求。下一次请求使用原任务和引导，带上引导的请求成功后发出 `message.updated`。历史和实时事件沿用消息结构。引导附带 `steering_order` 和 `steering_after_step`，后者在引导受理事务中确定，指定在该执行的哪个已开始步骤序号之后展示，0 表示步骤列表开头。实时通知、应用引导后的更新和历史查询使用同一位置，旧记录沿用已有步骤推算位置。同一位置按 `steering_order` 排序。因引导切换的旧模型步骤保留 `cancelled` 状态和 `steered` 错误类别，当前执行继续。失败或中断时未被模型成功使用的引导退回队列，通过 `conversation.steering_requeued` 携带 `removed_message_ids` 撤回会话回执。待审批或待回复期间可提交排队。过期执行、队列版本冲突或达到后续消息限额返回业务错误 `1003`。客户端只依据当前连接的成功终态发起自动续发，重连后等待用户继续。
 
 ## 9. 会话管理
 
@@ -810,7 +829,7 @@ usage 原样保留供应商字段，缺失为 NULL；不把零值或估算值当
 `outcome` 为 `none`（无副作用）、`not_applied`（确认未生效）、`applied`（已生效）、`partially_applied`（部分生效）或 `unknown`（无法确认）；不能仅用步骤或运行的失败／取消状态判断是否生效。
 恢复未完成的新步骤时附加 `recovered:true`，已保存的明确事实及实际输出保留，未启动的调用为 `not_applied`，已启动但缺少结果的只读调用为 `none`，其他调用为 `unknown`。旧记录不补造这些字段，数据库结构版本不变。
 
-后续对话会恢复当前分支中失败、取消或中断执行留下的已生效、部分生效或未知操作，保持工具调用及结果配对，不恢复失败回答正文。同轮未执行的调用补齐为未执行；编辑重发前的旧分支仍只作审计。
+后续对话会恢复当前分支中失败、取消或中断执行留下的已生效、部分生效或未知操作。通过 `conversation.continue` 显式继续时，也会恢复已保存的只读工具结果。工具调用与结果保持配对，失败回答正文留在历史中。同轮未执行的调用补齐为未执行；编辑重发前的旧分支仍只作审计。
 同一固定操作留下未知、部分生效或已生效但报错的结果后，再次调用会要求用户确认，`authorization.reason` 为 `previous_result_requires_confirmation`；`never` 直接拒绝。批准仍需通过执行前校验，明确成功才解除待核实状态；不会自动重试未知操作。
 本节字段通过现有 `step.data` 读取，通知结构和 JSON-RPC 方法不变。工具原始输出仍限 64 KiB，外层事实及上下文封装不计入该工具输出上限。
 

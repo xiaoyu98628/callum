@@ -21,14 +21,15 @@ func New(repository settings.Repository) (*Service, error) {
 }
 
 func (s *Service) Get(ctx context.Context, key string) (settings.Record, error) {
-	if key != settings.ExecutionKey && key != settings.CompactionKey {
+	if key != settings.ExecutionKey && key != settings.CompactionKey && key != settings.GeneralKey {
 		return settings.Record{}, settings.ErrInvalid
 	}
 	value, err := s.repository.Get(ctx, key)
 	if err != nil {
 		return value, err
 	}
-	if key == settings.ExecutionKey {
+	switch key {
+	case settings.ExecutionKey:
 		snapshot, err := settings.ExecutionSnapshot(value)
 		if err != nil {
 			return settings.Record{}, err
@@ -38,8 +39,14 @@ func (s *Service) Get(ctx context.Context, key string) (settings.Record, error) 
 		if err != nil {
 			return settings.Record{}, errors.Join(settings.ErrStorage, err)
 		}
-	} else if _, err := settings.DecodeCompactionSnapshot(value); err != nil {
-		return settings.Record{}, err
+	case settings.CompactionKey:
+		if _, err := settings.DecodeCompactionSnapshot(value); err != nil {
+			return settings.Record{}, err
+		}
+	case settings.GeneralKey:
+		if _, err := settings.DecodeGeneralRecord(value); err != nil {
+			return settings.Record{}, err
+		}
 	}
 	return value, nil
 }
@@ -47,12 +54,13 @@ func (s *Service) Get(ctx context.Context, key string) (settings.Record, error) 
 // Update 完整替换一个已注册配置组；调用方提交其读取到的 revision，冲突后重新读取。
 // 值在写入前完成校验，返回成功表示事务已经提交，后续受理执行即可读取新值。
 func (s *Service) Update(ctx context.Context, key string, revision int64, raw json.RawMessage) (settings.Record, error) {
-	if (key != settings.ExecutionKey && key != settings.CompactionKey) || revision < 1 || revision == math.MaxInt64 {
+	if (key != settings.ExecutionKey && key != settings.CompactionKey && key != settings.GeneralKey) || revision < 1 || revision == math.MaxInt64 {
 		return settings.Record{}, settings.ErrInvalid
 	}
 	var value any
 	var err error
-	if key == settings.ExecutionKey {
+	switch key {
+	case settings.ExecutionKey:
 		var execution settings.Execution
 		execution, err = settings.DecodeExecution(raw)
 		if err == nil {
@@ -75,8 +83,10 @@ func (s *Service) Update(ctx context.Context, key string, revision int64, raw js
 			err = settings.ErrInvalid
 		}
 		value = execution
-	} else {
+	case settings.CompactionKey:
 		value, err = settings.DecodeCompaction(raw)
+	case settings.GeneralKey:
+		value, err = settings.DecodeGeneral(raw)
 	}
 	if err != nil {
 		return settings.Record{}, err

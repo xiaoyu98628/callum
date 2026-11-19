@@ -107,8 +107,18 @@ func (r *Repository) CreateStep(ctx context.Context, in domain.Step) (out domain
 }
 
 func (r *Repository) SaveStep(ctx context.Context, in domain.Step) error {
-	row := record(in)
-	result := r.db.WithContext(ctx).Model(&schema.Step{}).Where("id = ? AND run_id = ? AND status IN ?", in.ID, in.RunID, []string{"pending", "running", "awaiting_approval", "awaiting_user_input"}).Select("Input", "Definition", "Status", "Output", "Usage", "ProviderRequestID", "ErrorKind", "ErrorMessage", "StartedAt", "UpdatedAt", "FinishedAt").Updates(&row)
+	query := r.db.WithContext(ctx).Model(&schema.Step{}).
+		Where("id = ? AND run_id = ? AND status IN ?", in.ID, in.RunID, []string{"pending", "running", "awaiting_approval", "awaiting_user_input"})
+	result := query.Updates(map[string]any{
+		// 首个步骤的引导位置由受理事务写入。使用数据库中的值，避免后续流式保存用旧快照覆盖。
+		"input": gorm.Expr(`CASE WHEN sequence=1 AND json_type(input, '$.steering_receipts')='object'
+			THEN json_set(?, '$.steering_receipts', json_extract(input, '$.steering_receipts'))
+			ELSE ? END`, string(in.Input), string(in.Input)),
+		"definition": nullableStepJSON(in.Definition), "status": in.Status,
+		"output": nullableStepJSON(in.Output), "usage": nullableStepJSON(in.Usage),
+		"provider_request_id": in.ProviderRequestID, "error_kind": in.ErrorKind, "error_message": in.ErrorMessage,
+		"started_at": in.StartedAt, "updated_at": in.UpdatedAt, "finished_at": in.FinishedAt,
+	})
 	if result.Error != nil {
 		return result.Error
 	}
@@ -116,6 +126,13 @@ func (r *Repository) SaveStep(ctx context.Context, in domain.Step) error {
 		return domain.ErrNotFound
 	}
 	return nil
+}
+
+func nullableStepJSON(value json.RawMessage) any {
+	if len(value) == 0 || string(value) == "null" {
+		return nil
+	}
+	return string(value)
 }
 
 func (r *Repository) SaveMessage(ctx context.Context, id string, blocks []model.Block, status string) error {
@@ -149,6 +166,9 @@ func (r *Repository) Finish(ctx context.Context, in domain.Run) error {
 		}
 		if result.RowsAffected != 1 {
 			return domain.ErrNotFound
+		}
+		if err := returnUndeliveredSteering(tx.Where("expected_run_id=?", in.ID)); err != nil {
+			return err
 		}
 		steps := tx.Model(&schema.Step{}).Select("id").Where("run_id=?", in.ID)
 		if err := tx.Model(&schema.ContextVersion{}).Where("status=? AND generated_by_step_id IN (?)", "building", steps).Updates(map[string]any{"status": "failed", "updated_at": in.UpdatedAt}).Error; err != nil {
@@ -198,6 +218,9 @@ func (r *Repository) Recover(ctx context.Context) error {
 				return err
 			}
 		}
+		if err := returnUndeliveredSteering(tx); err != nil {
+			return err
+		}
 		return tx.Model(&schema.Message{}).Where("status IN ?", active).Updates(map[string]any{"status": domain.Interrupted, "completed_at": nil, "updated_at": now}).Error
 	})
 }
@@ -230,4 +253,9 @@ func settleToolOutcomes(tx *gorm.DB, runID string) error {
 		}
 		after = rows[len(rows)-1].ID
 	}
+}
+
+func returnUndeliveredSteering(tx *gorm.DB) error {
+	return tx.Model(&schema.FollowUp{}).Where("status='steering'").
+		Updates(map[string]any{"status": "queued", "revision": gorm.Expr("revision+1")}).Error
 }
