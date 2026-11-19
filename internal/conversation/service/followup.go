@@ -95,9 +95,13 @@ func (s *Service) AddFollowUp(ctx context.Context, in conversation.FollowUpInput
 }
 
 func (s *Service) ChangeFollowUp(ctx context.Context, in conversation.FollowUpChange) (out conversation.FollowUp, err error) {
+	steer := in.Action == "steer" || in.Action == "steer_draft"
+	queue := in.Action == "queue_draft"
+	edit := in.Action == "edit" || in.Action == "steer_draft" || queue
 	if !validID(in.ConversationID) || !validID(in.ID) || in.Revision < 1 ||
-		(in.Action == "steer") != (in.ExpectedRunID != "") || (in.ExpectedRunID != "" && !validID(in.ExpectedRunID)) ||
-		(in.Action == "edit") != (in.Text != nil) {
+		((steer || queue) && in.ExpectedRunID == "") ||
+		(in.ExpectedRunID != "" && (!(steer || queue || in.Action == "restore_draft") || !validID(in.ExpectedRunID))) ||
+		edit != (in.Text != nil) || (in.ModelID != "" && (!queue || !validID(in.ModelID))) {
 		return out, conversation.ErrInvalid
 	}
 	item, err := s.repository.FollowUp(ctx, in.ConversationID, in.ID)
@@ -105,26 +109,24 @@ func (s *Service) ChangeFollowUp(ctx context.Context, in conversation.FollowUpCh
 		return out, err
 	}
 	var content []model.Block
-	if in.Action == "edit" {
-		for _, block := range item.Content {
-			if block.Type != "text" {
-				content = append(content, block)
-			}
-		}
-		if t := strings.TrimSpace(*in.Text); t != "" {
-			content = append([]model.Block{{Type: "text", Text: t}}, content...)
-		}
-		// 已保管的附件仅由同一条队列记录保留，客户端不能提交引用。
-		if err := validate(conversation.Send{ConversationID: in.ConversationID, MessageID: item.ID, Content: content}); err != nil {
+	if edit {
+		content, err = editedFollowUpContent(item, *in.Text)
+		if err != nil {
 			return out, err
 		}
 	}
-	if in.Action == "steer" {
-		run, err := s.engine.GetRun(ctx, in.ExpectedRunID)
-		if err != nil || run.ConversationID != in.ConversationID {
-			return out, conversation.ErrFollowUpChanged
+	if steer || queue {
+		modelID := item.ModelID
+		if steer {
+			run, err := s.engine.GetRun(ctx, in.ExpectedRunID)
+			if err != nil || run.ConversationID != in.ConversationID {
+				return out, conversation.ErrFollowUpChanged
+			}
+			modelID = run.Model.ID
+		} else if in.ModelID != "" {
+			modelID = in.ModelID
 		}
-		resolved, err := s.resolve(ctx, run.Model.ID)
+		resolved, err := s.resolve(ctx, modelID)
 		if err != nil {
 			return out, err
 		}
@@ -138,7 +140,7 @@ func (s *Service) ChangeFollowUp(ctx context.Context, in conversation.FollowUpCh
 		out, err = s.repository.ChangeFollowUp(ctx, in, content)
 		return out, err
 	}
-	if in.Action == "steer" {
+	if steer {
 		err = s.engine.AcceptSteering(in.ExpectedRunID, write)
 	} else {
 		_, err = write()
@@ -155,18 +157,48 @@ func (s *Service) ChangeFollowUp(ctx context.Context, in conversation.FollowUpCh
 	return out, nil
 }
 
+// 编辑保留服务端已经保管的附件与技能，客户端只能提交正文。
+func editedFollowUpContent(item conversation.FollowUp, text string) ([]model.Block, error) {
+	content := make([]model.Block, 0, len(item.Content)+1)
+	if text = strings.TrimSpace(text); text != "" {
+		content = append(content, model.Block{Type: "text", Text: text})
+	}
+	for _, block := range item.Content {
+		if block.Type != "text" {
+			content = append(content, block)
+		}
+	}
+	return content, validate(conversation.Send{ConversationID: item.ConversationID, MessageID: item.ID, Content: content})
+}
+
 func (s *Service) StartFollowUp(ctx context.Context, in conversation.FollowUpStart, accepted func(conversation.Execution) error) error {
-	if !validID(in.ConversationID) || !validID(in.ID) || in.Revision < 1 || (in.AfterRunID != "" && !validID(in.AfterRunID)) {
+	if !validID(in.ConversationID) || !validID(in.ID) || in.Revision < 1 ||
+		(in.AfterRunID != "" && (!validID(in.AfterRunID) || in.Text != nil)) ||
+		(in.ModelID != "" && (in.Text == nil || !validID(in.ModelID))) {
 		return conversation.ErrInvalid
 	}
 	item, err := s.repository.FollowUp(ctx, in.ConversationID, in.ID)
 	if err != nil {
 		return err
 	}
-	if item.Status != conversation.FollowUpQueued || item.Revision != in.Revision {
+	status := conversation.FollowUpQueued
+	if in.Text != nil {
+		status = conversation.FollowUpDraft
+	}
+	if item.Status != status || item.Revision != in.Revision {
 		return conversation.ErrFollowUpChanged
 	}
-	return s.send(ctx, conversation.Send{ConversationID: in.ConversationID, ModelID: item.ModelID, Content: item.Content}, &in, func(ex conversation.Execution) error {
+	content, modelID := item.Content, item.ModelID
+	if in.Text != nil {
+		content, err = editedFollowUpContent(item, *in.Text)
+		if err != nil {
+			return err
+		}
+		if in.ModelID != "" {
+			modelID = in.ModelID
+		}
+	}
+	return s.send(ctx, conversation.Send{ConversationID: in.ConversationID, ModelID: modelID, Content: content}, &in, func(ex conversation.Execution) error {
 		s.engine.FollowUpsUpdated(ex.Conversation.ID, ex.Run.ID)
 		return accepted(ex)
 	})

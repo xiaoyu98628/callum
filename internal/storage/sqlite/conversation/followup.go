@@ -107,7 +107,7 @@ func followUpRows(q *gorm.DB) ([]domain.FollowUp, error) {
 
 func (r *Repository) FollowUps(ctx context.Context, id string) ([]domain.FollowUp, error) {
 	return followUpRows(r.db.WithContext(ctx).Model(&schema.FollowUp{}).
-		Where("conversation_id=? AND status=?", id, domain.FollowUpQueued).Order("position, id"))
+		Where("conversation_id=? AND status IN ('queued','draft')", id).Order("position, id"))
 }
 
 func (r *Repository) FollowUp(ctx context.Context, id, itemID string) (domain.FollowUp, error) {
@@ -153,7 +153,7 @@ func checkFollowUpContent(tx *gorm.DB, row schema.FollowUp, writing bool) error 
 		return nil
 	}
 	if writing {
-		if err := check(base.Session(&gorm.Session{}).Where("status IN ('queued','steering')"), 3<<20); err != nil {
+		if err := check(base.Session(&gorm.Session{}).Where("status IN ('queued','draft','steering')"), 3<<20); err != nil {
 			return err
 		}
 	}
@@ -200,23 +200,55 @@ func (r *Repository) CreateFollowUp(ctx context.Context, in domain.FollowUp) (do
 func (r *Repository) ChangeFollowUp(ctx context.Context, in domain.FollowUpChange, content []model.Block) (out domain.FollowUp, err error) {
 	err = r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var row schema.FollowUp
-		if err := tx.Where("conversation_id=? AND id=? AND revision=? AND status=?", in.ConversationID, in.ID, in.Revision, domain.FollowUpQueued).Take(&row).Error; err != nil {
+		if err := tx.Where("conversation_id=? AND id=?", in.ConversationID, in.ID).Take(&row).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return domain.ErrFollowUpChanged
 			}
 			return err
 		}
+		if in.Action == "withdraw" && row.Status == domain.FollowUpSent {
+			return domain.ErrFollowUpSent
+		}
+		want := domain.FollowUpQueued
+		if in.Action == "queue_draft" || in.Action == "steer_draft" || in.Action == "restore_draft" {
+			want = domain.FollowUpDraft
+		}
+		if row.Status != want || row.Revision != in.Revision {
+			return domain.ErrFollowUpChanged
+		}
 		switch in.Action {
-		case "steer":
-			if err := checkFollowUpRun(tx, row.ConversationID, in.ExpectedRunID, true); err != nil {
+		case "withdraw":
+			var count int64
+			if err := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND status=?", row.ConversationID, domain.FollowUpDraft).Count(&count).Error; err != nil {
 				return err
 			}
+			if count != 0 {
+				return domain.ErrFollowUpDraft
+			}
+			row.Status = domain.FollowUpDraft
+		case "steer", "steer_draft", "queue_draft", "restore_draft":
+			steer := in.Action == "steer" || in.Action == "steer_draft"
+			if in.ExpectedRunID != "" {
+				if err := checkFollowUpRun(tx, row.ConversationID, in.ExpectedRunID, steer); err != nil {
+					return err
+				}
+				row.ExpectedRunID = in.ExpectedRunID
+			}
 			var tail int64
-			if err := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND (status IN ('queued','steering') OR (expected_run_id=? AND status='applied'))", row.ConversationID, in.ExpectedRunID).
+			if err := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND (status IN ('queued','steering') OR (expected_run_id=? AND status='applied'))", row.ConversationID, row.ExpectedRunID).
 				Select("COALESCE(MAX(position),0)").Scan(&tail).Error; err != nil {
 				return err
 			}
-			row.Status, row.ExpectedRunID, row.Position = domain.FollowUpSteering, in.ExpectedRunID, tail+1
+			row.Status, row.Position = domain.FollowUpQueued, tail+1
+			if steer {
+				row.Status = domain.FollowUpSteering
+			}
+			if in.Text != nil {
+				row.Content = content
+			}
+			if in.ModelID != "" {
+				row.ModelID = in.ModelID
+			}
 		case "remove":
 			row.Status = domain.FollowUpRemoved
 			row.Content = []model.Block{}
@@ -244,17 +276,17 @@ func (r *Repository) ChangeFollowUp(ctx context.Context, in domain.FollowUpChang
 		default:
 			return domain.ErrInvalid
 		}
-		if in.Action == "edit" || in.Action == "steer" {
-			if err := checkFollowUpContent(tx, row, in.Action == "edit"); err != nil {
+		if in.Text != nil || row.Status == domain.FollowUpSteering {
+			if err := checkFollowUpContent(tx, row, in.Text != nil); err != nil {
 				return err
 			}
 		}
 		row.Revision++
 		out = followUpView(row)
-		if err := tx.Model(&row).Omit("Conversation", "Run").Select("Status", "Content", "Revision", "Position", "ExpectedRunID").Updates(&row).Error; err != nil {
+		if err := tx.Model(&row).Omit("Conversation", "Run").Select("Status", "Content", "Revision", "Position", "ExpectedRunID", "ModelID").Updates(&row).Error; err != nil {
 			return err
 		}
-		if in.Action == "steer" {
+		if row.Status == domain.FollowUpSteering {
 			message, err := acceptSteeringMessage(tx, row)
 			if err != nil {
 				return err
@@ -305,8 +337,13 @@ func (r *Repository) ApplySteering(ctx context.Context, runID, stepID string, id
 func consumeFollowUp(tx *gorm.DB, in domain.Begin) error {
 	request := in.FollowUp
 	var head schema.FollowUp
-	err := tx.Where("conversation_id=? AND status=?", in.ConversationID, domain.FollowUpQueued).
-		Order("position, id").Take(&head).Error
+	q := tx.Where("conversation_id=?", in.ConversationID)
+	if request.Text != nil {
+		q = q.Where("id=? AND status=?", request.ID, domain.FollowUpDraft)
+	} else {
+		q = q.Where("status=?", domain.FollowUpQueued).Order("position, id")
+	}
+	err := q.Take(&head).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) || (err == nil && (head.ID != request.ID || head.Revision != request.Revision)) {
 		return domain.ErrFollowUpChanged
 	}

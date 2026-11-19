@@ -2,6 +2,7 @@ package conversation_test
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,6 +15,72 @@ import (
 	store "github.com/xiaoyu98628/callum/internal/storage/sqlite/conversation"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
+
+func TestWithdrawFollowUpAndAutoSendUseTheSameClaim(t *testing.T) {
+	for _, withdrawFirst := range []bool{true, false} {
+		name := "send wins"
+		if withdrawFirst {
+			name = "withdraw wins"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			db, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "data", "callum.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				if err := db.Close(); err != nil {
+					t.Error(err)
+				}
+			})
+			repo, _ := store.NewRepository(db.DB)
+			runs, _ := agentstore.NewRepository(db.DB)
+			ex, err := repo.Begin(ctx, input(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			item, err := repo.CreateFollowUp(ctx, conversation.FollowUp{
+				ID: id(t), ConversationID: ex.Conversation.ID, ExpectedRunID: ex.Run.ID,
+				ModelID: ex.Run.Model.ID, Status: conversation.FollowUpQueued,
+				Content: []model.Block{{Type: "text", Text: "原队列正文"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ex.Run.Status, ex.Run.FinishedAt = agent.Completed, new(time.Now().UnixMilli())
+			if err := runs.Finish(ctx, ex.Run); err != nil {
+				t.Fatal(err)
+			}
+			withdraw := conversation.FollowUpChange{ConversationID: item.ConversationID, ID: item.ID, Revision: item.Revision, Action: "withdraw"}
+			next := input(t)
+			next.Create, next.ConversationID, next.Model = false, item.ConversationID, ex.Run.Model
+			next.FollowUp = &conversation.FollowUpStart{ConversationID: item.ConversationID, ID: item.ID, Revision: item.Revision, AfterRunID: ex.Run.ID}
+			next.Content = item.Content
+			if !withdrawFirst {
+				if _, err := repo.Begin(ctx, next); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := repo.ChangeFollowUp(ctx, withdraw, nil); !errors.Is(err, conversation.ErrFollowUpSent) {
+					t.Fatalf("已发消息错误地进入草稿: %v", err)
+				}
+				return
+			}
+			draft, err := repo.ChangeFollowUp(ctx, withdraw, nil)
+			if err != nil || draft.Status != conversation.FollowUpDraft || draft.Content[0].Text != "原队列正文" {
+				t.Fatalf("取出的草稿不完整: %+v, %v", draft, err)
+			}
+			if _, err := repo.Begin(ctx, next); !errors.Is(err, conversation.ErrFollowUpChanged) {
+				t.Fatalf("已取出的消息被自动发送: %v", err)
+			}
+			next.FollowUp.Revision, next.FollowUp.AfterRunID, next.FollowUp.Text = draft.Revision, "", new("手动提交的编辑")
+			next.Content = []model.Block{{Type: "text", Text: *next.FollowUp.Text}}
+			accepted, err := repo.Begin(ctx, next)
+			if err != nil || accepted.User.Content[0].Text != "手动提交的编辑" {
+				t.Fatalf("草稿无法手动发送: %+v, %v", accepted.User, err)
+			}
+		})
+	}
+}
 
 func TestSteeringHistoryKeepsReceiptPositionAcrossNewSteps(t *testing.T) {
 	ctx := t.Context()

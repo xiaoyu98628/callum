@@ -24,7 +24,7 @@ func publicError(err error) *protocol.Error {
 		return &protocol.Error{Code: 1003, Message: "会话或工作区已归档或删除"}
 	case errors.Is(err, domain.ErrAttachmentChanged):
 		return &protocol.Error{Code: 1003, Message: domain.ErrAttachmentChanged.Error()}
-	case errors.Is(err, domain.ErrFollowUpChanged), errors.Is(err, domain.ErrFollowUpLimit):
+	case errors.Is(err, domain.ErrFollowUpChanged), errors.Is(err, domain.ErrFollowUpLimit), errors.Is(err, domain.ErrFollowUpSent), errors.Is(err, domain.ErrFollowUpDraft):
 		return &protocol.Error{Code: 1003, Message: err.Error()}
 	case errors.Is(err, domain.ErrConflict):
 		return &protocol.Error{Code: 1003, Message: "只能编辑最后一条用户消息并重发"}

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -68,6 +69,14 @@ func (s *Service) PreviewAttachment(ctx context.Context, conversationID, message
 			return nil, "", conversation.ErrInvalid
 		}
 		message, err := s.repository.Message(ctx, conversationID, messageID)
+		if errors.Is(err, conversation.ErrNotFound) {
+			draft, lookupErr := s.repository.FollowUp(ctx, conversationID, messageID)
+			if lookupErr == nil && draft.Status == conversation.FollowUpDraft {
+				message, err = conversation.Message{Role: string(model.RoleUser), Content: draft.Content}, nil
+			} else if lookupErr != nil && !errors.Is(lookupErr, conversation.ErrNotFound) {
+				err = lookupErr
+			}
+		}
 		if err != nil {
 			return nil, "", err
 		}

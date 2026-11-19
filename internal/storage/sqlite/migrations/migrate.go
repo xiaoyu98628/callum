@@ -12,7 +12,7 @@ import (
 	"gorm.io/gorm"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 // Run 在同一个事务内初始化空库或校验当前结构。调用方持有连接与实例锁。
 func Run(ctx context.Context, db *gorm.DB) (err error) {
@@ -95,7 +95,7 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 	if err := validateSchema(tx, tables); err != nil {
 		return fmt.Errorf("数据库结构与当前版本 %d 不匹配: %w", schemaVersion, err)
 	}
-	if version > 0 && version < schemaVersion && !tx.Migrator().HasTable(&schema.FollowUp{}) {
+	if version > 0 && version < 5 && !tx.Migrator().HasTable(&schema.FollowUp{}) {
 		if err := tx.Set("gorm:table_options", "STRICT").Migrator().CreateTable(&schema.FollowUp{}); err != nil {
 			return fmt.Errorf("创建后续消息表: %w", err)
 		}
