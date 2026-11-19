@@ -86,6 +86,11 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			if err := tx.Model(&schema.Message{}).Where("conversation_id = ? AND sequence > ?", conv.ID, user.Sequence).Pluck("id", &out.RemovedMessageIDs).Error; err != nil {
 				return err
 			}
+			var steeringIDs []string
+			if err := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND expected_run_id=? AND status=?", conv.ID, old, domain.FollowUpApplied).Pluck("id", &steeringIDs).Error; err != nil {
+				return err
+			}
+			out.RemovedMessageIDs = append(out.RemovedMessageIDs, steeringIDs...)
 			if err := tx.Where("conversation_id = ? AND sequence > ?", conv.ID, user.Sequence).Delete(&schema.Message{}).Error; err != nil {
 				return err
 			}

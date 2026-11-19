@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"slices"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/conversation"
@@ -11,14 +12,86 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/policy"
 )
 
-// AcceptSteering serializes acceptance against final completion and pre-tool boundaries.
-func (e *Engine) AcceptSteering(runID string, write func() error) error {
+type runSteering struct {
+	generation uint64
+	sealed     bool
+	cancel     context.CancelCauseFunc
+}
+
+// AcceptSteering 先提交数据、发布用户消息，再唤醒当前模型调用。
+func (e *Engine) AcceptSteering(runID string, write func() (conversation.FollowUp, error)) error {
 	e.steeringMu.Lock()
 	defer e.steeringMu.Unlock()
-	if e.sealedRuns[runID] {
+	state := e.steering[runID]
+	if state != nil && state.sealed {
 		return conversation.ErrFollowUpChanged
 	}
-	return write()
+	followUp, err := write()
+	if err != nil {
+		return err
+	}
+	e.publishSteering("message.created", followUp.Receipt)
+	e.FollowUpsUpdated(followUp.ConversationID, runID)
+	if state != nil {
+		state.generation++
+		if state.cancel != nil {
+			state.cancel(conversation.ErrSteered)
+		}
+	}
+	return nil
+}
+
+func (e *Engine) publishSteering(kind string, message *conversation.Message) {
+	if message != nil {
+		if err := e.emit(agent.Event{Type: kind, ConversationID: message.ConversationID, RunID: message.RunID, MessageID: message.ID, Data: *message}); err != nil {
+			e.logger.Warn("发布引导消息失败", "module", "conversation", "conversation_id", message.ConversationID)
+		}
+	}
+}
+
+func (e *Engine) beginSteering(runID string) {
+	e.steeringMu.Lock()
+	e.steering[runID] = &runSteering{}
+	e.steeringMu.Unlock()
+}
+
+func (e *Engine) endSteering(runID string) {
+	e.steeringMu.Lock()
+	delete(e.steering, runID)
+	e.steeringMu.Unlock()
+}
+
+// snapshotSteering 让引导快照与受理互斥，避免在创建模型步骤期间漏掉新引导。
+func (e *Engine) snapshotSteering(ctx context.Context, runID string) ([]conversation.FollowUp, uint64, error) {
+	e.steeringMu.Lock()
+	defer e.steeringMu.Unlock()
+	pending, err := e.conversations.PendingSteering(ctx, runID)
+	return pending, e.steering[runID].generation, err
+}
+
+// samplingContext 只取消模型调用，保留当前执行、已启动的工具和用户取消语义。
+func (e *Engine) samplingContext(ctx context.Context, runID string, generation uint64) (context.Context, func()) {
+	request, cancel := context.WithCancelCause(ctx)
+	e.steeringMu.Lock()
+	state := e.steering[runID]
+	if state.generation != generation {
+		cancel(conversation.ErrSteered)
+	}
+	state.cancel = cancel
+	e.steeringMu.Unlock()
+	return request, func() {
+		e.steeringMu.Lock()
+		state.cancel = nil
+		e.steeringMu.Unlock()
+		cancel(nil)
+	}
+}
+
+func (e *Engine) sealSteering(ctx context.Context, runID string) ([]conversation.FollowUp, error) {
+	e.steeringMu.Lock()
+	defer e.steeringMu.Unlock()
+	e.steering[runID].sealed = true
+	return e.conversations.PendingSteering(ctx, runID)
 }
 
 func (e *Engine) GetRun(ctx context.Context, id string) (agent.Run, error) {
@@ -55,14 +128,21 @@ func (e *Engine) sealAnswer(ctx context.Context, runID string) (bool, error) {
 	if len(pending) != 0 {
 		return false, nil
 	}
-	e.sealedRuns[runID] = true
+	e.steering[runID].sealed = true
 	return true, nil
 }
 
 func steeringMessages(items []conversation.FollowUp) []model.Message {
 	out := make([]model.Message, 0, len(items))
 	for _, item := range items {
-		out = append(out, model.Message{Role: model.RoleUser, Blocks: history.ModelContent(item.Content)})
+		blocks := slices.Clone(history.ModelContent(item.Content))
+		marker := "以下是用户在当前任务执行期间发出的引导。以较新的明确要求为准，调整与它冲突的计划、范围和交付内容。继续完成原任务中仍适用的部分；如果用户要求停止或切换任务，按其意图执行。"
+		if len(blocks) > 0 && blocks[0].Type == "text" {
+			blocks[0].Text = marker + "\n\n" + blocks[0].Text
+		} else {
+			blocks = append([]model.Block{{Type: "text", Text: marker}}, blocks...)
+		}
+		out = append(out, model.Message{Role: model.RoleUser, Blocks: blocks})
 	}
 	return out
 }
@@ -89,9 +169,12 @@ func (e *Engine) applySteering(ctx context.Context, ex conversation.Execution, s
 	}
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
-	if err := e.conversations.ApplySteering(cleanup, ex.Run.ID, stepID, ids); err != nil {
+	messages, err := e.conversations.ApplySteering(cleanup, ex.Run.ID, stepID, ids)
+	if err != nil {
 		return operationStorageError(ctx, err)
 	}
-	e.FollowUpsUpdated(ex.Conversation.ID, ex.Run.ID)
+	for i := range messages {
+		e.publishSteering("message.updated", &messages[i])
+	}
 	return nil
 }

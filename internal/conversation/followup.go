@@ -31,6 +31,7 @@ type FollowUp struct {
 	Position       int64         `json:"position"`
 	Revision       int64         `json:"revision"`
 	AppliedStepID  *string       `json:"applied_step_id,omitempty"`
+	Receipt        *Message      `json:"-"`
 	CreatedAt      int64         `json:"created_at"`
 }
 

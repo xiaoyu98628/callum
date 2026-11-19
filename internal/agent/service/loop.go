@@ -39,6 +39,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	var meter tokens.Meter
 	var correction *argumentCorrection
 	previousRejection := ""
+	appliedSteering := 0
 	for round := int64(0); ; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -48,16 +49,20 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if correction != nil {
 			requestFixed = append(requestFixed, correction.message())
 		}
-		pending, err := e.conversations.PendingSteering(ctx, ex.Run.ID)
+		pending, generation, err := e.snapshotSteering(ctx, ex.Run.ID)
 		if err != nil {
 			return operationStorageError(ctx, err)
 		}
-		current.steering = append(current.steering, steeringMessages(pending)...)
+		current.steering = append(current.steering[:appliedSteering], steeringMessages(pending)...)
 		if err := current.fit(ctx, e, &ex, resolved, requestFixed, definitions, &meter, 0, nil); err != nil {
 			return err
 		}
 		effective := current.request(requestFixed, ex)
 		e.recordContext(ex, resolved, effective, definitions, &meter, true)
+		steeringIDs := make([]string, 0, len(pending))
+		for _, item := range pending {
+			steeringIDs = append(steeringIDs, item.ID)
+		}
 		if round > 0 {
 			id, err := uuid.NewV7()
 			if err != nil {
@@ -65,6 +70,9 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			}
 			now := time.Now().UnixMilli()
 			fields := map[string]any{"purpose": "answer", "protocol": resolved.Protocol, "round": round + 1, "previous_step_id": step.ID}
+			if len(steeringIDs) > 0 {
+				fields["steering_ids"] = steeringIDs
+			}
 			if correction != nil {
 				fields["tool_arguments_correction"] = correction
 			}
@@ -80,15 +88,35 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 				return err
 			}
 		}
+		if round == 0 && len(steeringIDs) > 0 {
+			var fields map[string]any
+			if err := json.Unmarshal(step.Input, &fields); err != nil {
+				return err
+			}
+			fields["steering_ids"] = steeringIDs
+			step.Input, err = json.Marshal(fields)
+			if err != nil {
+				return err
+			}
+		}
 		callback := func() {}
 		if round == 0 {
 			callback = startTitle
 		}
-		result, callErr := e.callModel(ctx, ex, resolved, step, effective, definitions, callback, &totalText)
+		samplingCtx, finishSampling := e.samplingContext(ctx, ex.Run.ID, generation)
+		result, callErr := e.callModel(ctx, samplingCtx, ex, resolved, step, effective, definitions, callback, &totalText)
+		finishSampling()
 		if callErr == nil {
 			if err := e.applySteering(ctx, ex, step.ID, pending); err != nil {
 				return err
 			}
+			appliedSteering = len(current.steering)
+		}
+		if errors.Is(callErr, conversation.ErrSteered) && !errors.Is(callErr, agent.ErrStorage) && ctx.Err() == nil {
+			if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := e.saveAnswer(ctx, ex, result.Content, result.Text); err != nil {
 			return err
@@ -105,7 +133,6 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			if correction != nil && correction.fingerprint == invalid.Fingerprint {
 				return &model.ToolCorrectionStalledError{}
 			}
-			current.steering = current.steering[:len(current.steering)-len(pending)]
 			correction = &argumentCorrection{SourceStepID: step.ID, CallIndex: invalid.Index, Tool: invalid.Tool, ActualBytes: invalid.ActualBytes, LimitBytes: invalid.LimitBytes, fingerprint: invalid.Fingerprint}
 			meter.Observe(effective, definitions, result.InputTokens)
 			if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {

@@ -22,6 +22,54 @@ func followUpView(row schema.FollowUp) domain.FollowUp {
 		Revision: row.Revision, AppliedStepID: row.AppliedStepID, CreatedAt: row.CreatedAt}
 }
 
+type steeringRow struct {
+	schema.FollowUp
+	AnchorSequence int64
+	AfterStep      int64
+	AppliedAt      *int64
+}
+
+func (row steeringRow) message() domain.Message {
+	status := agent.Running
+	var updated int64 = row.CreatedAt
+	if row.Status == domain.FollowUpApplied {
+		status = agent.Completed
+		if row.AppliedAt != nil {
+			updated = *row.AppliedAt
+		}
+	}
+	return domain.Message{ID: row.ID, ConversationID: row.ConversationID, RunID: row.ExpectedRunID,
+		Sequence: row.AnchorSequence, SteeringOrder: row.Position, SteeringAfterStep: new(row.AfterStep),
+		Role: "user", Content: row.Content,
+		Status: status, CreatedAt: row.CreatedAt, UpdatedAt: updated, CompletedAt: row.AppliedAt}
+}
+
+func steeringMessagesQuery(tx *gorm.DB) *gorm.DB {
+	// 用首次携带引导的请求定位。旧记录可用实际采用引导的步骤，待处理消息显示在当前过程尾。
+	return tx.Table("conversation_followups AS f").
+		Select(`f.*, m.sequence AS anchor_sequence, s.finished_at AS applied_at,
+			COALESCE(
+				(SELECT MIN(p.sequence) - 1 FROM conversation_run_steps p
+				 WHERE p.run_id=f.expected_run_id AND p.type='model_call'
+				 AND EXISTS (SELECT 1 FROM json_each(p.input, '$.steering_ids') WHERE value=f.id)),
+				s.sequence - 1,
+				(SELECT COALESCE(MAX(p.sequence), 0) FROM conversation_run_steps p WHERE p.run_id=f.expected_run_id)
+			) AS after_step`).
+		Joins("JOIN conversation_messages m ON m.run_id=f.expected_run_id AND m.conversation_id=f.conversation_id AND m.role='assistant'").
+		Joins("LEFT JOIN conversation_run_steps s ON s.id=f.applied_step_id AND s.run_id=f.expected_run_id").
+		Where("f.status IN ?", []string{domain.FollowUpSteering, domain.FollowUpApplied})
+}
+
+func steeringMessage(tx *gorm.DB, conversationID, followUpID string) (domain.Message, error) {
+	var row steeringRow
+	err := steeringMessagesQuery(tx).
+		Where("f.conversation_id=? AND f.id=?", conversationID, followUpID).Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return domain.Message{}, domain.ErrNotFound
+	}
+	return row.message(), err
+}
+
 func followUpRows(q *gorm.DB) ([]domain.FollowUp, error) {
 	var rows []schema.FollowUp
 	if err := q.Limit(domain.FollowUpLimit + 1).Find(&rows).Error; err != nil {
@@ -39,7 +87,7 @@ func followUpRows(q *gorm.DB) ([]domain.FollowUp, error) {
 
 func (r *Repository) FollowUps(ctx context.Context, id string) ([]domain.FollowUp, error) {
 	return followUpRows(r.db.WithContext(ctx).Model(&schema.FollowUp{}).
-		Where("conversation_id=? AND status IN ('queued','steering')", id).Order("position, id"))
+		Where("conversation_id=? AND status=?", id, domain.FollowUpQueued).Order("position, id"))
 }
 
 func (r *Repository) FollowUp(ctx context.Context, id, itemID string) (domain.FollowUp, error) {
@@ -96,6 +144,7 @@ func checkFollowUpContent(tx *gorm.DB, row schema.FollowUp, writing bool) error 
 }
 
 func (r *Repository) CreateFollowUp(ctx context.Context, in domain.FollowUp) (domain.FollowUp, error) {
+	var receipt *domain.Message
 	row := schema.FollowUp{ID: in.ID, ConversationID: in.ConversationID, ExpectedRunID: in.ExpectedRunID,
 		ModelID: in.ModelID, Status: in.Status, Content: in.Content, Revision: 1, CreatedAt: time.Now().UnixMilli()}
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -106,14 +155,26 @@ func (r *Repository) CreateFollowUp(ctx context.Context, in domain.FollowUp) (do
 			return err
 		}
 		var position int64
-		if err := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND status IN ('queued','steering')", row.ConversationID).
+		if err := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND (status IN ('queued','steering') OR (expected_run_id=? AND status='applied'))", row.ConversationID, row.ExpectedRunID).
 			Select("COALESCE(MAX(position), 0)").Scan(&position).Error; err != nil {
 			return err
 		}
 		row.Position = position + 1
-		return tx.Omit("Conversation", "Run").Create(&row).Error
+		if err := tx.Omit("Conversation", "Run").Create(&row).Error; err != nil {
+			return err
+		}
+		if row.Status == domain.FollowUpSteering {
+			message, err := steeringMessage(tx, row.ConversationID, row.ID)
+			if err != nil {
+				return err
+			}
+			receipt = &message
+		}
+		return nil
 	})
-	return followUpView(row), err
+	out := followUpView(row)
+	out.Receipt = receipt
+	return out, err
 }
 
 func (r *Repository) ChangeFollowUp(ctx context.Context, in domain.FollowUpChange, content []model.Block) (out domain.FollowUp, err error) {
@@ -131,7 +192,7 @@ func (r *Repository) ChangeFollowUp(ctx context.Context, in domain.FollowUpChang
 				return err
 			}
 			var tail int64
-			if err := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND status IN ('queued','steering')", row.ConversationID).
+			if err := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND (status IN ('queued','steering') OR (expected_run_id=? AND status='applied'))", row.ConversationID, in.ExpectedRunID).
 				Select("COALESCE(MAX(position),0)").Scan(&tail).Error; err != nil {
 				return err
 			}
@@ -170,7 +231,17 @@ func (r *Repository) ChangeFollowUp(ctx context.Context, in domain.FollowUpChang
 		}
 		row.Revision++
 		out = followUpView(row)
-		return tx.Model(&row).Omit("Conversation", "Run").Select("Status", "Content", "Revision", "Position", "ExpectedRunID").Updates(&row).Error
+		if err := tx.Model(&row).Omit("Conversation", "Run").Select("Status", "Content", "Revision", "Position", "ExpectedRunID").Updates(&row).Error; err != nil {
+			return err
+		}
+		if in.Action == "steer" {
+			message, err := steeringMessage(tx, row.ConversationID, row.ID)
+			if err != nil {
+				return err
+			}
+			out.Receipt = &message
+		}
+		return nil
 	})
 	return
 }
@@ -181,11 +252,12 @@ func (r *Repository) PendingSteering(ctx context.Context, runID string) ([]domai
 		Where("expected_run_id=? AND status=?", runID, domain.FollowUpSteering).Order("position, id"))
 }
 
-func (r *Repository) ApplySteering(ctx context.Context, runID, stepID string, ids []string) error {
+func (r *Repository) ApplySteering(ctx context.Context, runID, stepID string, ids []string) ([]domain.Message, error) {
 	if len(ids) == 0 {
-		return nil
+		return nil, nil
 	}
-	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+	messages := make([]domain.Message, 0, len(ids))
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		result := tx.Model(&schema.FollowUp{}).Where("expected_run_id=? AND status=? AND id IN ?", runID, domain.FollowUpSteering, ids).
 			Updates(map[string]any{"status": domain.FollowUpApplied, "applied_step_id": stepID, "revision": gorm.Expr("revision+1")})
 		if result.Error != nil {
@@ -194,8 +266,20 @@ func (r *Repository) ApplySteering(ctx context.Context, runID, stepID string, id
 		if result.RowsAffected != int64(len(ids)) {
 			return domain.ErrFollowUpChanged
 		}
+		var rows []steeringRow
+		if err := steeringMessagesQuery(tx).
+			Where("f.expected_run_id=? AND f.id IN ?", runID, ids).Order("f.position, f.id").Find(&rows).Error; err != nil {
+			return err
+		}
+		if len(rows) != len(ids) {
+			return domain.ErrFollowUpChanged
+		}
+		for _, row := range rows {
+			messages = append(messages, row.message())
+		}
 		return nil
 	})
+	return messages, err
 }
 
 func consumeFollowUp(tx *gorm.DB, in domain.Begin) error {

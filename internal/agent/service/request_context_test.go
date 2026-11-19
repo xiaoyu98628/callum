@@ -100,6 +100,9 @@ func TestRequestPartsSeparatesWorkspaceDataFromSettings(t *testing.T) {
 			if len(fixed) != 3 || fixed[0].Role != model.RoleSystem || len(definitions) != 1 || definitions[0].Name != agent.UserInputTool {
 				t.Fatalf("固定上下文或工具定义无效: %+v %+v", fixed, definitions)
 			}
+			if !strings.Contains(fixed[0].Content, "Active task continuity") || !strings.Contains(fixed[0].Content, "Follow the latest explicit direction") {
+				t.Fatal("固定上下文缺少未完成任务连续性要求")
+			}
 			if strings.Contains(fixed[0].Content, root) || fixed[1].Role != model.RoleUser || fixed[2].Role != model.RoleUser {
 				t.Fatal("路径或历史事实被提升为系统指令")
 			}

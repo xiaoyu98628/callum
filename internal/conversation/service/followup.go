@@ -78,18 +78,18 @@ func (s *Service) AddFollowUp(ctx context.Context, in conversation.FollowUpInput
 	if in.Mode == "steer" {
 		status = conversation.FollowUpSteering
 	}
-	write := func() error {
+	write := func() (conversation.FollowUp, error) {
 		out, err = s.repository.CreateFollowUp(ctx, conversation.FollowUp{ID: id, ConversationID: in.ConversationID,
 			ExpectedRunID: in.ExpectedRunID, ModelID: in.ModelID, Status: status, Content: content})
-		return err
+		return out, err
 	}
 	if in.Mode == "steer" {
 		err = s.engine.AcceptSteering(in.ExpectedRunID, write)
 	} else {
-		err = write()
-	}
-	if err == nil {
-		s.engine.FollowUpsUpdated(in.ConversationID, in.ExpectedRunID)
+		_, err = write()
+		if err == nil {
+			s.engine.FollowUpsUpdated(in.ConversationID, in.ExpectedRunID)
+		}
 	}
 	return out, err
 }
@@ -134,19 +134,21 @@ func (s *Service) ChangeFollowUp(ctx context.Context, in conversation.FollowUpCh
 			}
 		}
 	}
-	write := func() error {
+	write := func() (conversation.FollowUp, error) {
 		out, err = s.repository.ChangeFollowUp(ctx, in, content)
-		return err
+		return out, err
 	}
 	if in.Action == "steer" {
 		err = s.engine.AcceptSteering(in.ExpectedRunID, write)
 	} else {
-		err = write()
+		_, err = write()
+		if err == nil {
+			s.engine.FollowUpsUpdated(in.ConversationID, in.ExpectedRunID)
+		}
 	}
 	if err != nil {
 		return out, err
 	}
-	s.engine.FollowUpsUpdated(in.ConversationID, in.ExpectedRunID)
 	if in.Action == "remove" {
 		s.attachments.RemoveFollowUp(in.ConversationID, in.ID)
 	}

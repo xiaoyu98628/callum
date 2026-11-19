@@ -21,16 +21,19 @@ type Conversation struct {
 
 // Message 仅保存用户消息及回答，工具、审批、补充参数保存在执行步骤。
 type Message struct {
-	ID             string        `json:"id"`
-	ConversationID string        `json:"conversation_id"`
-	RunID          string        `json:"run_id"`
-	Sequence       int64         `json:"sequence"`
-	Role           string        `json:"role"`
-	Content        []model.Block `json:"content"`
-	Status         string        `json:"status"`
-	CreatedAt      int64         `json:"created_at"`
-	UpdatedAt      int64         `json:"updated_at"`
-	CompletedAt    *int64        `json:"completed_at"`
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	RunID          string `json:"run_id"`
+	Sequence       int64  `json:"sequence"`
+	// SteeringOrder 为同一执行中的引导排序。SteeringAfterStep 锚定调用过程中的展示位置。
+	SteeringOrder     int64         `json:"steering_order,omitempty"`
+	SteeringAfterStep *int64        `json:"steering_after_step,omitempty"`
+	Role              string        `json:"role"`
+	Content           []model.Block `json:"content"`
+	Status            string        `json:"status"`
+	CreatedAt         int64         `json:"created_at"`
+	UpdatedAt         int64         `json:"updated_at"`
+	CompletedAt       *int64        `json:"completed_at"`
 }
 
 // HistoryPage 按当前分支的执行分页，消息与独立压缩共享同一游标，避免跨页错配。

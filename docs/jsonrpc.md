@@ -394,12 +394,12 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 | 方法 | 参数与结果 |
 | --- | --- |
-| `conversation.follow_ups` | `conversation_id`。返回按队列顺序排列的 `queued` 和 `steering` 记录。 |
+| `conversation.follow_ups` | `conversation_id`。返回按队列顺序排列的 `queued` 记录。 |
 | `conversation.follow_up_add` | `conversation_id`、`expected_run_id`、`mode`（`queue` 或 `steer`）、`content`。排队可指定 `model_id`，引导使用目标执行的模型。内容块与 `conversation.send` 相同。返回写入记录。 |
 | `conversation.follow_up_change` | `conversation_id`、`id`、`revision`、`action`。支持 `edit`（附 `text`）、`remove`、`up`、`down`、`steer`（附 `expected_run_id`）。编辑保留已保管的附件和技能。返回更新后记录。 |
 | `conversation.follow_up_start` | `conversation_id`、队首 `id`、`revision`。自动续发另传刚成功的 `after_run_id`，由服务校验队列绑定及最新执行。返回常规发送受理结果。 |
 
-队列记录含 `id`、`conversation_id`、`expected_run_id`、`model_id`、`status`、`revision`、`position`、`content` 和 `created_at`。引导仅接受正在运行的普通对话执行。待审批或待回复可由调用方提交排队，交互结束后再引导。过期执行、队列版本冲突或达到后续消息限额返回业务错误 `1003`。收到 `conversation.follow_ups_updated` 通知时按 `conversation_id` 重新查询。终态事件同样提示客户端刷新，失败或中断时未被模型成功使用的引导退回队列。客户端只依据当前连接的成功终态发起自动续发；重连后等待用户继续。
+队列记录含 `id`、`conversation_id`、`expected_run_id`、`model_id`、`status`、`revision`、`position`、`content` 和 `created_at`。待发查询只返回 `queued` 记录。引导仅接受正在运行的普通对话执行，受理后将消息移入该执行，发出 `message.created` 和 `conversation.follow_ups_updated`，并主动取消当前模型请求。下一次请求使用原任务和引导，带上引导的请求成功后发出 `message.updated`。历史和实时事件沿用消息结构。引导附带 `steering_order` 和 `steering_after_step`，后者指定在该执行的哪个步骤序号之后展示，0 表示该步骤列表开头。同一位置按 `steering_order` 排序。因引导切换的旧模型步骤保留 `cancelled` 状态和 `steered` 错误类别，当前执行继续。失败或中断时未被模型成功使用的引导退回队列，通过 `conversation.steering_requeued` 携带 `removed_message_ids` 撤回会话回执。待审批或待回复期间可提交排队。过期执行、队列版本冲突或达到后续消息限额返回业务错误 `1003`。客户端只依据当前连接的成功终态发起自动续发，重连后等待用户继续。
 
 ## 9. 会话管理
 

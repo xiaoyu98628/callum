@@ -9,15 +9,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/config"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 )
 
 func TestFollowUpQueueAndSteerThroughStdio(t *testing.T) {
-	started, release := make(chan struct{}), make(chan struct{})
+	started, cancelled := make(chan struct{}), make(chan struct{})
+	replacement, finish := make(chan struct{}), make(chan struct{})
 	var guided, restored atomic.Bool
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input struct {
@@ -31,24 +34,38 @@ func TestFollowUpQueueAndSteerThroughStdio(t *testing.T) {
 		}
 		last := input.Messages[len(input.Messages)-1]
 		if len(input.Tools) > 0 {
-			switch last.Content {
-			case "开始任务":
+			if !strings.Contains(input.Messages[0].Content, "Active task continuity") {
+				t.Errorf("模型请求缺少任务连续性提示")
+			}
+			switch {
+			case last.Content == "开始任务":
 				close(started)
+				<-r.Context().Done()
+				close(cancelled)
+				return
+			case strings.Contains(last.Content, "改用新要求"):
+				if !strings.Contains(last.Content, "较新的明确要求") {
+					t.Error("引导缺少新要求优先的指令")
+				}
+				var original bool
+				var steerCount int
+				for _, m := range input.Messages {
+					original = original || (m.Role == "user" && m.Content == "开始任务")
+					if strings.Contains(m.Content, "改用新要求") {
+						steerCount++
+					}
+				}
+				guided.Store(original && steerCount == 1)
+				close(replacement)
 				select {
-				case <-release:
+				case <-finish:
 				case <-r.Context().Done():
 					return
 				}
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","tool_calls":[{"id":"obsolete","type":"function","function":{"name":"request_user_input","arguments":"{\"question\":\"旧问题\",\"options\":[\"A\"]}"}}]},"finish_reason":"tool_calls"}]}`)
+				_, _ = io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"按新要求完成"},"finish_reason":"stop"}]}`)
 				return
-			case "改用新要求":
-				for _, m := range input.Messages {
-					if m.Role == "tool" && strings.Contains(m.Content, "steered") {
-						guided.Store(true)
-					}
-				}
-			case "调整后的队列消息":
+			case strings.Contains(last.Content, "调整后的队列消息"):
 				for _, m := range input.Messages {
 					if m.Role == "user" && m.Content == "改用新要求" {
 						restored.Store(true)
@@ -71,6 +88,8 @@ func TestFollowUpQueueAndSteerThroughStdio(t *testing.T) {
 	response := p.call(t, "conversation.send", map[string]any{"model_id": modelID, "stream": false, "content": messageBlocks("开始任务")})
 	id, runID := resultString(t, response, "conversation_id"), resultString(t, response, "run_id")
 	waitSignal(t, started)
+	p.event(t, "message.created")
+	p.event(t, "message.created")
 	add := func(body string) string {
 		t.Helper()
 		return resultString(t, p.call(t, "conversation.follow_up_add", map[string]any{
@@ -86,8 +105,46 @@ func TestFollowUpQueueAndSteerThroughStdio(t *testing.T) {
 		action["conversation_id"], action["revision"] = id, 1
 		requireOK(t, p.call(t, "conversation.follow_up_change", action))
 	}
-	close(release)
+	waitSignal(t, cancelled)
+	waitSignal(t, replacement)
+	var receipt struct{ Message conversation.Message }
+	event := p.event(t, "message.created")
+	if err := json.Unmarshal(event.Params, &receipt); err != nil || receipt.Message.ID != guide || receipt.Message.RunID != runID || receipt.Message.Status != "running" || receipt.Message.Content[0].Text != "改用新要求" || receipt.Message.SteeringAfterStep == nil {
+		t.Fatalf("引导未生成当前会话中的原文回执: %s, %v", event.Params, err)
+	}
+	var steps []agent.Step
+	stepsFrame := p.call(t, "step.list", map[string]any{"run_id": runID})
+	requireOK(t, stepsFrame)
+	var oldStep, newStep int64
+	if err := json.Unmarshal(stepsFrame.Result, &steps); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range steps {
+		if step.Type != "model_call" {
+			continue
+		}
+		if step.ErrorKind != nil && *step.ErrorKind == "steered" {
+			oldStep = step.Sequence
+		}
+		if strings.Contains(string(step.Input), guide) {
+			newStep = step.Sequence
+		}
+	}
+	if oldStep == 0 || newStep <= oldStep || *receipt.Message.SteeringAfterStep < oldStep || *receipt.Message.SteeringAfterStep >= newStep {
+		t.Fatalf("引导没有位于切换前后的模型步骤之间: receipt=%s steps=%s", event.Params, stepsFrame.Result)
+	}
+	close(finish)
 	p.event(t, "run.completed")
+	history := p.call(t, "conversation.history", map[string]any{"conversation_id": id})
+	requireOK(t, history)
+	var page conversation.HistoryPage
+	if err := json.Unmarshal(history.Result, &page); err != nil || len(page.Runs) != 1 || len(page.Messages) != 3 {
+		t.Fatalf("同一轮历史缺少引导或回答: %s, %v", history.Result, err)
+	}
+	steered, answer := page.Messages[1], page.Messages[2]
+	if steered.ID != guide || steered.Status != "completed" || steered.SteeringOrder < 1 || steered.SteeringAfterStep == nil || *steered.SteeringAfterStep != newStep-1 || answer.Content[0].Text != "按新要求完成" {
+		t.Fatalf("历史顺序、引导状态或调整后的回答不符: %s", history.Result)
+	}
 	if !guided.Load() {
 		t.Fatal("引导未进入同一执行的下一模型请求，或旧工具没有被跳过")
 	}
@@ -119,6 +176,7 @@ func TestFollowUpQueueAndSteerThroughStdio(t *testing.T) {
 
 func TestFollowUpsSurviveServiceRestart(t *testing.T) {
 	started := make(chan struct{})
+	var first sync.Once
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input struct{ Tools []json.RawMessage }
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -126,7 +184,7 @@ func TestFollowUpsSurviveServiceRestart(t *testing.T) {
 			return
 		}
 		if len(input.Tools) != 0 {
-			close(started)
+			first.Do(func() { close(started) })
 			<-r.Context().Done()
 			return
 		}

@@ -16,7 +16,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/model/tokens"
 )
 
-func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, step agent.Step, messages []model.Message, tools []model.ToolDefinition, onAcquired func(), totalText *int) (result model.Response, retErr error) {
+func (e *Engine) callModel(ctx, samplingCtx context.Context, ex conversation.Execution, resolved agent.Resolved, step agent.Step, messages []model.Message, tools []model.ToolDefinition, onAcquired func(), totalText *int) (result model.Response, retErr error) {
 	if ex.Context != nil {
 		var input map[string]any
 		if err := json.Unmarshal(step.Input, &input); err != nil {
@@ -108,8 +108,18 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 			_ = e.event(ex, "step.updated", step.ID, "", step)
 		}
 	}()
-	callCtx, cancel := context.WithTimeout(ctx, e.options.CallTimeout)
+	// 引导只取消对供应商的请求。已收到的增量写入仍受执行取消及同一个调用期限约束。
+	writeCtx, cancelWrites := context.WithTimeout(ctx, e.options.CallTimeout)
+	defer cancelWrites()
+	deadline, _ := writeCtx.Deadline()
+	callCtx, cancel := context.WithDeadline(samplingCtx, deadline)
 	defer cancel()
+	writeError := func(err error) error {
+		if writeErr := writeCtx.Err(); writeErr != nil && errors.Is(err, writeErr) {
+			return err
+		}
+		return errors.Join(agent.ErrStorage, err)
+	}
 	request := model.Request{Model: resolved.Snapshot.RemoteModelID, CaptureResult: true, AllowImageInput: resolved.ImageInput, Messages: messages, Tools: tools}
 	persisted := 0
 	lastPersist := time.Now()
@@ -142,8 +152,8 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 						if err != nil {
 							return err
 						}
-						if err := e.repository.SaveStep(callCtx, step); err != nil {
-							return operationStorageError(callCtx, err)
+						if err := e.repository.SaveStep(writeCtx, step); err != nil {
+							return writeError(err)
 						}
 						lastPersist = time.Now()
 					}
@@ -159,13 +169,8 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 				text.WriteString(event.Text)
 				usageStream.add(event.Text, false)
 				if persisted == 0 || text.Len()-persisted >= 4096 || time.Since(lastPersist) >= 100*time.Millisecond {
-					if err := e.repository.SaveMessage(callCtx, ex.Assistant.ID, []model.Block{{Type: "text", Text: text.String()}}, agent.Running); err != nil {
-						// 取消可能恰好打断正文写入；只将同一上下文错误视为取消/超时。
-						// 真实写入错误仍保留存储失败标记，不能因同时取消而被掩盖。
-						if ctxErr := callCtx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
-							return err
-						}
-						return errors.Join(agent.ErrStorage, err)
+					if err := e.repository.SaveMessage(writeCtx, ex.Assistant.ID, []model.Block{{Type: "text", Text: text.String()}}, agent.Running); err != nil {
+						return writeError(err)
 					}
 					persisted, lastPersist = text.Len(), time.Now()
 				}
@@ -186,7 +191,9 @@ func (e *Engine) callModel(ctx context.Context, ex conversation.Execution, resol
 		}
 		return err
 	})
-	if callCtx.Err() != nil {
+	if errors.Is(context.Cause(callCtx), conversation.ErrSteered) && ctx.Err() == nil && !errors.Is(retErr, agent.ErrOutputLimit) {
+		retErr = errors.Join(conversation.ErrSteered, retErr)
+	} else if callCtx.Err() != nil {
 		retErr = errors.Join(callCtx.Err(), retErr)
 	}
 	return

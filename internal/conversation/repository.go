@@ -21,7 +21,7 @@ type Repository interface {
 	CreateFollowUp(context.Context, FollowUp) (FollowUp, error)
 	ChangeFollowUp(context.Context, FollowUpChange, []model.Block) (FollowUp, error)
 	PendingSteering(context.Context, string) ([]FollowUp, error)
-	ApplySteering(context.Context, string, string, []string) error
+	ApplySteering(context.Context, string, string, []string) ([]Message, error)
 	Begin(context.Context, Begin) (Execution, error)
 	ApplyTitle(context.Context, string, string, string, string) (Conversation, bool, error)
 }
