@@ -46,6 +46,9 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 	const rotated = "controlled-rotated-access-token"
 	var tokens, toolCalls, registrations atomic.Int32
 	var authChallenge atomic.Value
+	tokenRequested := make(chan struct{}, 1)
+	releaseToken := make(chan struct{})
+
 	sdkServer := sdk.NewServer(&sdk.Implementation{Name: "回显服务", Version: "1"}, nil)
 	sdkServer.AddTool(&sdk.Tool{Name: "echo", Description: "受控工具", InputSchema: json.RawMessage(`{"type":"object","properties":{"value":{"type":"string"}},"required":["value"]}`)}, func(_ context.Context, r *sdk.CallToolRequest) (*sdk.CallToolResult, error) {
 		toolCalls.Add(1)
@@ -96,12 +99,22 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 			writeJSON(t, w, map[string]any{"access_token": rotated, "token_type": "Bearer", "expires_in": 3600})
 			return
 		}
+		if r.Form.Get("code") == "controlled-failed-code" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		expected := authChallenge.Load().(url.Values)
 		hash := sha256.Sum256([]byte(r.Form.Get("code_verifier")))
 		if r.Form.Get("grant_type") != "authorization_code" || r.Form.Get("code") != "controlled-code" ||
 			r.Form.Get("redirect_uri") != expected.Get("redirect_uri") ||
 			base64.RawURLEncoding.EncodeToString(hash[:]) != expected.Get("code_challenge") {
 			t.Error("授权码、回调地址或 PKCE 与发起请求不符")
+		}
+		tokenRequested <- struct{}{}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-releaseToken:
 		}
 		writeJSON(t, w, map[string]any{"access_token": access, "token_type": "Bearer", "refresh_token": refresh, "expires_in": 3600})
 	})
@@ -199,36 +212,58 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 	}
 	authChallenge.Store(q)
 	browser := http.Client{Timeout: 2 * time.Second}
-	submit := func(state string) int {
-		t.Helper()
-		callback.RawQuery = url.Values{"state": {state}, "code": {"controlled-code"}, "iss": {issuer}}.Encode()
-		res, err := browser.Get(callback.String())
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, _ = io.Copy(io.Discard, res.Body)
-		_ = res.Body.Close()
-		return res.StatusCode
+	callback.RawQuery = url.Values{"state": {"wrong-state"}, "code": {"controlled-code"}, "iss": {issuer}}.Encode()
+	invalid, err := browser.Get(callback.String())
+	if err != nil {
+		t.Fatal(err)
 	}
-	if submit("wrong-state") != 400 || tokens.Load() != 0 {
+	checkOAuthPage(t, invalid, http.StatusBadRequest, "failed", "授权回调校验失败", "wrong-state", "controlled-code")
+	if tokens.Load() != 0 {
 		t.Fatal("无效 state 触发了换令牌")
 	}
-	if submit(q.Get("state")) != 200 {
-		t.Fatal("无法接收有效回调")
+
+	callback.RawQuery = url.Values{"state": {q.Get("state")}, "code": {"controlled-code"}, "iss": {issuer}}.Encode()
+	type browserResult struct {
+		response *http.Response
+		err      error
 	}
-	for deadline := time.Now().Add(2 * time.Second); ; {
-		value, err := service.OAuthState(id, false)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if value.Status == "authorized" {
-			break
-		}
-		if value.Status != "pending" || time.Now().After(deadline) {
-			t.Fatalf("授权未完成: %+v", value)
-		}
-		time.Sleep(10 * time.Millisecond)
+	reply := make(chan browserResult, 1)
+	go func() {
+		response, err := browser.Get(callback.String())
+		reply <- browserResult{response, err}
+	}()
+	select {
+	case <-tokenRequested:
+	case <-time.After(2 * time.Second):
+		close(releaseToken)
+		t.Fatal("浏览器回调未开始换取令牌")
 	}
+	pending, err := service.OAuthState(id, false)
+	if err != nil || pending.Status != "pending" {
+		close(releaseToken)
+		t.Fatalf("换令牌期间状态不正确: %+v %v", pending, err)
+	}
+	// 模拟授权端仍在处理时，浏览器不能收到声称登录成功的页面。
+	select {
+	case early := <-reply:
+		close(releaseToken)
+		if early.response != nil {
+			_ = early.response.Body.Close()
+		}
+		t.Fatalf("换令牌完成前浏览器已经收到响应: %v", early.err)
+	default:
+		close(releaseToken)
+	}
+	browserReply := <-reply
+	if browserReply.err != nil {
+		t.Fatal(browserReply.err)
+	}
+	checkOAuthPage(t, browserReply.response, http.StatusOK, "authorized", "授权成功", q.Get("state"), "controlled-code", access)
+	status, err := service.OAuthState(id, false)
+	if err != nil || status.Status != "authorized" {
+		t.Fatalf("浏览器和桌面端授权状态不一致: %+v %v", status, err)
+	}
+
 	stored, err := repo.Credential(ctx, id)
 	if err != nil || stored.Token != access || stored.Refresh != refresh {
 		t.Fatalf("凭据未正确保存: %v", err)
@@ -273,6 +308,39 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 	if err != nil || toolCalls.Load() != 1 || !strings.Contains(string(result.Output), "mcp-http-ok") || tokens.Load() != 2 {
 		t.Fatalf("HTTP 工具或刷新请求未完成: %+v %v", result, err)
 	}
+	if !fixed {
+		for _, step := range []struct {
+			params  url.Values
+			status  string
+			message string
+		}{
+			{url.Values{"error": {"access_denied"}, "error_description": {"remote-secret-error"}}, "cancelled", "已取消授权"},
+			{url.Values{"code": {"controlled-failed-code"}}, "failed", "授权失败"},
+		} {
+			login, err := service.StartOAuth(ctx, ctx, id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			authURL, _ := url.Parse(login.URL)
+			redirect, _ := url.Parse(authURL.Query().Get("redirect_uri"))
+			callbackState := authURL.Query().Get("state")
+			step.params.Set("state", callbackState)
+			step.params.Set("iss", issuer)
+			redirect.RawQuery = step.params.Encode()
+			res, err := browser.Get(redirect.String())
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkOAuthPage(t, res, http.StatusOK, step.status, step.message, callbackState, "remote-secret-error", "controlled-failed-code")
+			status, err := service.OAuthState(id, false)
+			if err != nil || status.Status != step.status {
+				t.Fatalf("浏览器和桌面端授权状态不一致: %+v %v", status, err)
+			}
+		}
+		if tokens.Load() != 3 {
+			t.Fatalf("授权拒绝不应访问换令牌接口，实际令牌请求数: %d", tokens.Load())
+		}
+	}
 	if err := service.Delete(ctx, rev+1, id); err != nil {
 		t.Fatal(err)
 	}
@@ -297,6 +365,32 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 		}
 	}
 
+}
+
+func checkOAuthPage(t *testing.T, response *http.Response, code int, status, heading string, sensitive ...string) {
+	t.Helper()
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(body)
+	if response.StatusCode != code || response.Header.Get("Content-Type") != "text/html; charset=utf-8" ||
+		response.Header.Get("Cache-Control") != "no-store" || response.Header.Get("Referrer-Policy") != "no-referrer" ||
+		!strings.Contains(page, "data-status=\""+status+"\"") || !strings.Contains(page, heading) {
+		t.Fatalf("授权结果页与预期不符: %d %v", response.StatusCode, response.Header)
+	}
+	_, nonceAndPolicy, ok := strings.Cut(response.Header.Get("Content-Security-Policy"), "script-src 'nonce-")
+	nonce, _, ended := strings.Cut(nonceAndPolicy, "'")
+	if !ok || !ended || len(nonce) == 0 || !strings.Contains(page, "<script nonce=\""+nonce+"\">") ||
+		!strings.Contains(page, "history.replaceState") {
+		t.Fatal("缺少清理地址栏参数的受信脚本")
+	}
+	for _, secret := range sensitive {
+		if secret != "" && strings.Contains(page, secret) {
+			t.Fatal("授权结果页包含回调参数或凭据")
+		}
+	}
 }
 
 func writeJSON(t *testing.T, w http.ResponseWriter, v any) {

@@ -36,6 +36,10 @@ type oauthCallback struct {
 	err  error
 }
 
+var errOAuthDeclined = errors.New("用户拒绝了 MCP 授权")
+
+const oauthTokenTimeout = 15 * time.Second
+
 func (s *Service) StartOAuth(ctx, owner context.Context, id string) (OAuthStatus, error) {
 	e, err := s.get(id)
 	if err != nil {
@@ -150,12 +154,13 @@ func listenCallback(ctx context.Context, configured string) (*url.URL, net.Liste
 
 func (s *Service) finishOAuth(ctx context.Context, e *entry, flow *authorization, listener net.Listener, uri *url.URL, meta *oauthex.AuthServerMeta, state, verifier string, credential Credential) {
 	result := make(chan oauthCallback, 1)
+	outcome := make(chan OAuthStatus, 1)
 	accepted := make(chan struct{}, 1)
 	server := &http.Server{
-		ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, MaxHeaderBytes: 8192,
+		ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: oauthTokenTimeout + 5*time.Second, MaxHeaderBytes: 8192,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Cache-Control", "no-store")
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Header().Set("Referrer-Policy", "no-referrer")
 			if r.Method != http.MethodGet || r.Host != uri.Host || r.URL.EscapedPath() != uri.EscapedPath() {
 				http.Error(w, "无效的回调地址", http.StatusNotFound)
 				return
@@ -163,7 +168,7 @@ func (s *Service) finishOAuth(ctx context.Context, e *entry, flow *authorization
 			q, err := url.ParseQuery(r.URL.RawQuery)
 			if err != nil || len(q["state"]) != 1 || subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(state)) != 1 ||
 				len(q["iss"]) > 1 || ((q.Has("iss") || meta.AuthorizationResponseIssParameterSupported) && q.Get("iss") != meta.Issuer) {
-				http.Error(w, "授权回调校验失败", http.StatusBadRequest)
+				writeOAuthCallbackPage(w, http.StatusBadRequest, "", OAuthStatus{Status: "failed", Message: "授权回调校验失败。"})
 				return
 			}
 			callback := oauthCallback{code: q.Get("code")}
@@ -171,60 +176,76 @@ func (s *Service) finishOAuth(ctx context.Context, e *entry, flow *authorization
 			case q.Get("error") == "invalid_redirect_uri" || q.Get("error") == "redirect_uri_mismatch":
 				callback.err = ErrCallback
 			case q.Get("error") == "access_denied":
-				callback.err = errors.New("用户拒绝了 MCP 授权")
+				callback.err = errOAuthDeclined
 			case q.Has("error"), len(q["code"]) != 1, callback.code == "", len(callback.code) > 4096:
 				callback.err = ErrOAuth
 			}
 			select {
 			case accepted <- struct{}{}:
-				_, _ = io.WriteString(w, "已收到授权响应。请返回 Callum 查看结果。")
 				result <- callback
 			default:
-				http.Error(w, "该授权响应已经接收", http.StatusConflict)
+				writeOAuthCallbackPage(w, http.StatusConflict, "", OAuthStatus{Status: "failed", Message: "该授权回调已经接收。"})
+				return
+			}
+			// 浏览器等待最终状态；关闭页面只结束本次 HTTP 响应，换令牌仍由授权任务管理。
+			select {
+			case status := <-outcome:
+				writeOAuthCallbackPage(w, http.StatusOK, e.cfg.Name, status)
+			case <-r.Context().Done():
 			}
 		}),
 	}
-	finished := make(chan error, 1)
-	go func() { finished <- server.Serve(listener) }()
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_ = server.Serve(listener)
+	}()
 	var cb oauthCallback
-	served := false
 	select {
 	case <-ctx.Done():
 		cb.err = ctx.Err()
 	case cb = <-result:
 	case <-finished:
-		served = true
 		cb.err = ErrCallback
 	}
-	if !served {
-		// 收到授权码即关闭监听，Token 请求走独立的 HTTPS 连接。
-		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
-		if server.Shutdown(closeCtx) != nil {
-			_ = server.Close()
-		}
-		cancel()
-		<-finished
-	}
 	if cb.err == nil {
-		tokenCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		tokenCtx, cancel := context.WithTimeout(ctx, oauthTokenTimeout)
 		cb.err = s.completeOAuth(tokenCtx, e, flow, credential, uri.String(), cb.code, verifier)
 		cancel()
 	}
+	outcome <- s.finishOAuthStatus(e, flow, cb.err)
+
+	// 停止接收新请求，并让正在发送的结果页在有界时间内完成。
+	closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	if server.Shutdown(closeCtx) != nil {
+		_ = server.Close()
+	}
+	cancel()
+	<-finished
+}
+
+func (s *Service) finishOAuthStatus(e *entry, flow *authorization, err error) OAuthStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if e.flow != flow {
-		return
+		return OAuthStatus{Status: "cancelled", Message: "该授权已被另一轮授权替代。"}
+	}
+	if flow.view.Status != "pending" {
+		return flow.view
 	}
 	switch {
-	case cb.err == nil:
+	case err == nil:
 		flow.view = OAuthStatus{Status: "authorized"}
-	case errors.Is(cb.err, context.Canceled):
+	case errors.Is(err, errOAuthDeclined):
+		flow.view = OAuthStatus{Status: "cancelled", Message: "你已在服务商页面取消授权。"}
+	case errors.Is(err, context.Canceled):
 		flow.view = OAuthStatus{Status: "cancelled"}
-	case errors.Is(cb.err, context.DeadlineExceeded):
-		flow.view = OAuthStatus{Status: "failed", Message: "等待授权超时，请检查服务商是否接受本机回调"}
+	case errors.Is(err, context.DeadlineExceeded):
+		flow.view = OAuthStatus{Status: "failed", Message: "等待授权超时，请返回 Callum 后重试。"}
 	default:
-		flow.view = OAuthStatus{Status: "failed", Message: cb.err.Error()}
+		flow.view = OAuthStatus{Status: "failed", Message: err.Error()}
 	}
+	return flow.view
 }
 
 func (s *Service) completeOAuth(ctx context.Context, e *entry, flow *authorization, c Credential, redirect, code, verifier string) error {
@@ -249,6 +270,8 @@ func (s *Service) completeOAuth(ctx context.Context, e *entry, flow *authorizati
 		return errors.New("无法安全保存 MCP 授权凭据")
 	}
 	e.credentialVersion.Add(1)
+	// 成功状态和凭据写入在同一锁内发布，避免写入完成后的取消请求覆盖结果。
+	flow.view = OAuthStatus{Status: "authorized"}
 	return nil
 }
 
