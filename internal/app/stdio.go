@@ -12,6 +12,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/credentials/system"
 	"github.com/xiaoyu98628/callum/internal/stdio"
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
+	mcphandler "github.com/xiaoyu98628/callum/internal/stdio/mcp"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
 )
 
@@ -57,7 +58,7 @@ func (r *Runtime) ServeStdio(ctx context.Context, in io.ReadCloser, out io.Write
 	defer subscription.Close()
 	owner := newSessionRuns(connection.Context(), r.manager)
 	defer owner.Close()
-	server, err := stdio.NewWithConversations(r.providers, r.calls, r.workspaces, r.conversations, r.engine, r.approvals, r.settings, r.skills, owner.Register, r.logger)
+	server, err := stdio.NewWithConversations(r.providers, r.calls, r.workspaces, r.conversations, r.engine, r.approvals, r.settings, r.skills, owner.Register, r.logger, mcphandler.New(r.mcp))
 	if err != nil {
 		return err
 	}

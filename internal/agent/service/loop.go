@@ -30,7 +30,12 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	for _, fact := range facts {
 		uncertain[fact.RequestHash] = true
 	}
-	fixed, definitions, err := e.requestParts(ctx, ex.Conversation, ex.Run.SettingsSnapshot, facts)
+	extra := e.extraTools(ctx, true, ex.Run.SettingsSnapshot.MCPRevision)
+	extraByName := make(map[string]tool.Tool, len(extra))
+	for _, t := range extra {
+		extraByName[t.Definition().Name] = t
+	}
+	fixed, definitions, err := e.requestParts(ctx, ex.Conversation, ex.Run.SettingsSnapshot, facts, extra...)
 	if err != nil {
 		return err
 	}
@@ -180,7 +185,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 				if call.Name == agent.UserInputTool {
 					value, err = e.askUser(ctx, ex, step, call)
 				} else {
-					value, err = e.callTool(ctx, ex, resolved, step, call, denied, uncertain)
+					value, err = e.callTool(ctx, ex, resolved, step, call, denied, uncertain, extraByName[call.Name])
 				}
 			}
 			if errors.Is(err, conversation.ErrSteered) {

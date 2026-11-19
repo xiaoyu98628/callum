@@ -1,0 +1,510 @@
+// Package mcp 管理第三方服务、连接、工具目录和本机 OAuth。
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"maps"
+	"net/http"
+	"os"
+	"slices"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/google/uuid"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/xiaoyu98628/callum/internal/settings"
+)
+
+var (
+	ErrNotFound           = errors.New("MCP 服务不存在")
+	ErrAuthorize          = errors.New("请先为 MCP 服务授权或更新访问令牌")
+	ErrConnection         = errors.New("无法连接 MCP 服务，请检查地址、权限或本地命令")
+	ErrChanged            = errors.New("MCP 配置或工具定义已变化，请刷新后重试")
+	ErrCallback           = errors.New("无法使用本机 OAuth 回调，请检查回调地址、端口及服务商的登记要求")
+	ErrClientRegistration = errors.New("服务商需要预注册 OAuth 客户端，请填写客户端 ID")
+	ErrOAuth              = errors.New("MCP 授权失败，请检查服务商的 OAuth 配置")
+)
+
+// Credential 只在内部传递，由仓储在写入前加密。
+type Credential struct {
+	Token    string            `json:"token,omitempty"`
+	Refresh  string            `json:"refresh,omitempty"`
+	Expires  time.Time         `json:"expires,omitzero"`
+	ClientID string            `json:"client_id,omitempty"`
+	TokenURL string            `json:"token_url,omitempty"`
+	Resource string            `json:"resource,omitempty"`
+	Env      map[string]string `json:"env,omitempty"`
+}
+
+func (c Credential) Empty() bool {
+	return c.Token == "" && len(c.Env) == 0
+}
+
+type Repository interface {
+	Load(context.Context) (settings.MCP, int64, error)
+	Save(context.Context, settings.MCP, int64, string, *Credential) error
+	Credential(context.Context, string) (Credential, error)
+	SaveCredential(context.Context, string, Credential) error
+}
+
+type SecretInput struct {
+	Token *string            `json:"token,omitempty"`
+	Env   *map[string]string `json:"env,omitempty"`
+}
+
+type View struct {
+	settings.MCPServer
+	Connected     bool       `json:"connected"`
+	Authorized    bool       `json:"authorized"`
+	ExpiresAt     int64      `json:"expires_at,omitempty"`
+	SecretEnvKeys []string   `json:"secret_env_keys"`
+	Tools         []ToolInfo `json:"tools"`
+}
+type Catalog struct {
+	Revision int64  `json:"revision"`
+	Servers  []View `json:"servers"`
+}
+
+type connection struct {
+	publicTools       atomic.Pointer[[]ToolInfo]
+	credentialVersion uint64
+	session           *sdk.ClientSession
+	tools             map[string]*remoteTool
+	dirty             atomic.Bool
+}
+
+type entry struct {
+	publicConnection  atomic.Pointer[connection]
+	credentialVersion atomic.Uint64
+	cfg               settings.MCPServer
+
+	ctx        context.Context
+	cancel     context.CancelFunc
+	lock       chan struct{}
+	tokenGate  chan struct{}
+	connection *connection    // 仅持有 lock 时访问。
+	flow       *authorization // 由 Service.mu 保护。
+}
+
+func (e *entry) acquire(ctx context.Context) error {
+	select {
+	case e.lock <- struct{}{}:
+		if err := e.ctx.Err(); err != nil {
+			e.release()
+			return ErrChanged
+		}
+		return nil
+	case <-e.ctx.Done():
+		return ErrChanged
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (e *entry) release() { <-e.lock }
+
+// Service 由 Go 运行时持有。连接代际在保存、禁用和删除后立即取消。
+type Service struct {
+	ctx       context.Context
+	cancel    context.CancelFunc
+	repo      Repository
+	http      *http.Client
+	oauthHTTP *http.Client
+	mu        sync.Mutex
+	wg        sync.WaitGroup
+	cfg       settings.MCP
+	revision  int64
+
+	entries map[string]*entry
+	closed  bool
+}
+
+func New(initCtx, ctx context.Context, repo Repository, client, oauthClient *http.Client) (*Service, error) {
+	cfg, revision, err := repo.Load(initCtx)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	s := &Service{ctx: ctx, cancel: cancel, repo: repo, http: client, oauthHTTP: oauthClient, cfg: cfg, revision: revision, entries: make(map[string]*entry)}
+	for _, item := range cfg.Servers {
+		s.add(item)
+	}
+	return s, nil
+}
+
+func (s *Service) add(cfg settings.MCPServer) {
+	ctx, cancel := context.WithCancel(s.ctx)
+	s.entries[cfg.ID] = &entry{cfg: cfg, ctx: ctx, cancel: cancel, lock: make(chan struct{}, 1), tokenGate: make(chan struct{}, 1)}
+}
+
+func (s *Service) get(id string) (*entry, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrConnection
+	}
+	e := s.entries[id]
+	if e == nil {
+		return nil, ErrNotFound
+	}
+	return e, nil
+}
+
+func (s *Service) retire(e *entry) {
+	e.cancel()
+	if e.flow != nil {
+		e.flow.cancel()
+	}
+	s.wg.Go(func() {
+		e.lock <- struct{}{}
+		defer e.release()
+		if e.connection != nil {
+			_ = e.connection.session.Close()
+		}
+	})
+}
+
+func (s *Service) Close() {
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		s.cancel()
+		for _, e := range s.entries {
+			s.retire(e)
+		}
+	}
+	s.mu.Unlock()
+	s.wg.Wait()
+}
+
+func (s *Service) List(ctx context.Context) (Catalog, error) {
+	s.mu.Lock()
+	rev := s.revision
+	entries := make([]*entry, 0, len(s.entries))
+	for _, cfg := range s.cfg.Servers {
+		entries = append(entries, s.entries[cfg.ID])
+	}
+	s.mu.Unlock()
+	out := Catalog{Revision: rev, Servers: make([]View, 0, len(entries))}
+	for _, e := range entries {
+		secret, err := s.repo.Credential(ctx, e.cfg.ID)
+		if err != nil {
+			return Catalog{}, err
+		}
+		view := View{MCPServer: e.cfg, Authorized: secret.Token != "" && (secret.Expires.IsZero() || time.Now().Before(secret.Expires) || secret.Refresh != ""), SecretEnvKeys: []string{}, Tools: []ToolInfo{}}
+		if !secret.Expires.IsZero() {
+			view.ExpiresAt = secret.Expires.UnixMilli()
+		}
+		view.SecretEnvKeys = append(view.SecretEnvKeys, slices.Sorted(maps.Keys(secret.Env))...)
+		if conn := e.publicConnection.Load(); conn != nil && e.ctx.Err() == nil && conn.credentialVersion == e.credentialVersion.Load() {
+			view.Connected = true
+			if tools := conn.publicTools.Load(); tools != nil && !conn.dirty.Load() {
+				view.Tools = *tools
+			}
+		}
+		out.Servers = append(out.Servers, view)
+	}
+	return out, nil
+}
+
+func (s *Service) Save(ctx context.Context, revision int64, cfg settings.MCPServer, secrets SecretInput, confirmed bool) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return "", ErrConnection
+	}
+	if revision != s.revision {
+		return "", settings.ErrConflict
+	}
+	old := s.entries[cfg.ID]
+	if cfg.ID == "" {
+		id, err := uuid.NewV7()
+		if err != nil {
+			return "", err
+		}
+		cfg.ID = id.String()
+	} else if old == nil {
+		return "", ErrNotFound
+	}
+	if cfg.AllowedTools == nil {
+		cfg.AllowedTools = []string{}
+	}
+	if !cfg.Valid() {
+		return "", settings.ErrInvalid
+	}
+	var credential *Credential
+	changed := old != nil && !sameIdentity(old.cfg, cfg)
+	if cfg.Transport == settings.MCPStdio && cfg.Enabled && (old == nil || !old.cfg.Enabled || changed || secrets.Env != nil) && !confirmed {
+		return "", settings.ErrInvalid
+	}
+	if changed {
+		cfg.AllowedTools = []string{}
+	}
+	if changed || secrets.Token != nil || secrets.Env != nil {
+		value := Credential{}
+		if old != nil && !changed {
+			var err error
+			value, err = s.repo.Credential(ctx, cfg.ID)
+			if err != nil {
+				return "", err
+			}
+		}
+		if secrets.Token != nil {
+			if cfg.Auth != settings.MCPToken || len(*secrets.Token) > 8192 || strings.ContainsAny(*secrets.Token, "\x00\r\n \t") {
+				return "", settings.ErrInvalid
+			}
+			value.Token = *secrets.Token
+		}
+		if secrets.Env != nil {
+			if cfg.Transport != settings.MCPStdio || len(*secrets.Env) > 64 {
+				return "", settings.ErrInvalid
+			}
+			for key, val := range *secrets.Env {
+				_, duplicate := cfg.Env[key]
+				if duplicate || !settings.ValidMCPEnv(key, val) {
+					return "", settings.ErrInvalid
+				}
+			}
+			value.Env = *secrets.Env
+		}
+		credential = &value
+	}
+	if old != nil && credential == nil && cfg.Transport == settings.MCPStdio {
+		value, err := s.repo.Credential(ctx, cfg.ID)
+		if err != nil {
+			return "", err
+		}
+		for key := range cfg.Env {
+			if _, ok := value.Env[key]; ok {
+				return "", settings.ErrInvalid
+			}
+		}
+	}
+	next := settings.MCP{Servers: slices.Clone(s.cfg.Servers)}
+	if old == nil {
+		next.Servers = append(next.Servers, cfg)
+	} else {
+		i := slices.IndexFunc(next.Servers, func(v settings.MCPServer) bool { return v.ID == cfg.ID })
+		next.Servers[i] = cfg
+	}
+	if err := s.repo.Save(ctx, next, revision, cfg.ID, credential); err != nil {
+		return "", err
+	}
+	s.cfg, s.revision = next, revision+1
+	if old != nil {
+		s.retire(old)
+	}
+	s.add(cfg)
+	return cfg.ID, nil
+}
+
+func sameIdentity(a, b settings.MCPServer) bool {
+	a.ID, a.Name, a.Enabled, a.AllowedTools = "", "", false, nil
+	b.ID, b.Name, b.Enabled, b.AllowedTools = "", "", false, nil
+	aa, _ := json.Marshal(a)
+	bb, _ := json.Marshal(b)
+	return string(aa) == string(bb)
+}
+
+func (s *Service) Delete(ctx context.Context, revision int64, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrConnection
+	}
+	if revision != s.revision {
+		return settings.ErrConflict
+	}
+	e := s.entries[id]
+	if e == nil {
+		return ErrNotFound
+	}
+	next := settings.MCP{Servers: slices.DeleteFunc(slices.Clone(s.cfg.Servers), func(v settings.MCPServer) bool { return v.ID == id })}
+	if err := s.repo.Save(ctx, next, revision, id, &Credential{}); err != nil {
+		return err
+	}
+	s.cfg, s.revision = next, revision+1
+	delete(s.entries, id)
+	s.retire(e)
+	return nil
+}
+
+func (s *Service) Disconnect(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return ErrConnection
+	}
+	e := s.entries[id]
+	if e == nil {
+		return ErrNotFound
+	}
+	if e.cfg.Transport != settings.MCPHTTP || e.cfg.Auth == settings.MCPNone {
+		return settings.ErrInvalid
+	}
+	if err := s.repo.SaveCredential(ctx, id, Credential{}); err != nil {
+		return err
+	}
+	s.retire(e)
+	s.add(e.cfg)
+	return nil
+}
+
+func (s *Service) Test(ctx context.Context, id string, confirmed bool, revision int64) ([]ToolInfo, error) {
+	s.mu.Lock()
+	e, current := s.entries[id], s.revision
+	s.mu.Unlock()
+	if e == nil {
+		return nil, ErrNotFound
+	}
+	if e.cfg.Transport == settings.MCPStdio {
+		if !confirmed {
+			return nil, settings.ErrInvalid
+		}
+		if revision != current {
+			return nil, settings.ErrConflict
+		}
+	}
+	if err := e.acquire(ctx); err != nil {
+		return nil, err
+	}
+	defer e.release()
+	ctx, cancel := entryContext(ctx, e)
+	defer cancel()
+	c, err := s.connect(ctx, e)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.discover(ctx, e, c); err != nil {
+		closeConnection(e)
+		return nil, err
+	}
+	out := make([]ToolInfo, 0, len(c.tools))
+	for _, t := range c.tools {
+		out = append(out, t.info())
+	}
+	slices.SortFunc(out, func(a, b ToolInfo) int { return strings.Compare(a.Name, b.Name) })
+	if !e.cfg.Enabled {
+		closeConnection(e)
+	}
+	return out, nil
+}
+
+func entryContext(ctx context.Context, e *entry) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(e.ctx, cancel)
+	return ctx, func() { stop(); cancel() }
+}
+
+func closeConnection(e *entry) {
+	e.publicConnection.Store(nil)
+	if e.connection != nil {
+		_ = e.connection.session.Close()
+		e.connection = nil
+	}
+}
+
+func (s *Service) connect(ctx context.Context, e *entry) (*connection, error) {
+	if e.connection != nil {
+		if e.connection.credentialVersion == e.credentialVersion.Load() {
+			return e.connection, nil
+		}
+		closeConnection(e)
+	}
+	c := &connection{credentialVersion: e.credentialVersion.Load()}
+	var transport sdk.Transport
+	switch e.cfg.Transport {
+	case settings.MCPStdio:
+		creds, err := s.repo.Credential(ctx, e.cfg.ID)
+		if err != nil {
+			return nil, err
+		}
+		transport = &processTransport{cfg: e.cfg, secrets: creds.Env}
+	case settings.MCPHTTP:
+		client := *s.http
+		base := client.Transport
+		client.Transport = roundTripper(func(req *http.Request) (*http.Response, error) {
+			if e.credentialVersion.Load() != c.credentialVersion {
+				return nil, ErrChanged
+			}
+			if e.cfg.Auth != settings.MCPNone {
+				token, err := s.accessToken(req.Context(), e)
+				if err != nil {
+					return nil, err
+				}
+				if e.credentialVersion.Load() != c.credentialVersion {
+					return nil, ErrChanged
+				}
+				req = req.Clone(req.Context())
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
+			resp, err := base.RoundTrip(req)
+			if err != nil {
+				return nil, err
+			}
+			if resp.StatusCode == http.StatusUnauthorized {
+				_ = resp.Body.Close()
+				return nil, ErrAuthorize
+			}
+			if !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+				resp.Body = limitBody(resp.Body)
+			}
+			return resp, nil
+		})
+		transport = &sdk.StreamableClientTransport{Endpoint: e.cfg.URL, HTTPClient: &client, MaxEventSize: 1 << 20}
+	}
+	client := sdk.NewClient(&sdk.Implementation{Name: "Callum", Version: "1.0"}, &sdk.ClientOptions{
+		ToolListChangedHandler: func(context.Context, *sdk.ToolListChangedRequest) { c.dirty.Store(true) },
+	})
+	session, err := client.Connect(ctx, transport, &sdk.ClientSessionOptions{ProtocolVersion: "2025-11-25"})
+	if err != nil {
+		if errors.Is(err, ErrAuthorize) {
+			return nil, ErrAuthorize
+		}
+		return nil, ErrConnection
+	}
+	c.session = session
+	e.connection = c
+	e.publicConnection.Store(c)
+	s.mu.Lock()
+	if s.closed || e.ctx.Err() != nil {
+		s.mu.Unlock()
+		closeConnection(e)
+		return nil, ErrChanged
+	}
+	s.wg.Go(func() {
+		_ = session.Wait()
+		c.dirty.Store(true)
+		e.publicConnection.CompareAndSwap(c, nil)
+		select {
+		case e.lock <- struct{}{}:
+			if e.connection == c {
+				e.connection = nil
+			}
+			e.release()
+		case <-e.ctx.Done():
+		}
+	})
+	s.mu.Unlock()
+	return c, nil
+}
+
+// processEnvironment 避免把 Go 服务继承的其他凭据传给第三方进程。
+func processEnvironment(values, secrets map[string]string) []string {
+	env := map[string]string{}
+	for _, key := range []string{"PATH", "HOME", "USERPROFILE", "TMP", "TEMP", "TMPDIR", "SystemRoot", "WINDIR", "APPDATA", "LOCALAPPDATA", "LANG"} {
+		if value, ok := os.LookupEnv(key); ok {
+			env[key] = value
+		}
+	}
+	maps.Copy(env, values)
+	maps.Copy(env, secrets)
+	out := make([]string, 0, len(env))
+	for _, key := range slices.Sorted(maps.Keys(env)) {
+		out = append(out, key+"="+env[key])
+	}
+	return out
+}

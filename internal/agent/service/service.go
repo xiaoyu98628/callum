@@ -12,6 +12,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent/executor"
 	"github.com/xiaoyu98628/callum/internal/attachment"
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/tool"
 	toolexecutor "github.com/xiaoyu98628/callum/internal/tool/executor"
 	"github.com/xiaoyu98628/callum/internal/workspace"
 )
@@ -35,6 +36,7 @@ type Engine struct {
 
 // Options 保存运行时依赖；审批设置来自每次执行受理时持久化的快照。
 type Options struct {
+	ExtraTools  func(context.Context, bool, int64) []tool.Tool
 	Tools       *toolexecutor.Executor
 	Approvals   *approval.Service
 	Workspace   func(context.Context, string) (workspace.Workspace, error)

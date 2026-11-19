@@ -466,7 +466,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 每次回答模型请求前，将摘要、有效消息、图片估算、工具定义、调用与结果及服务端操作事实计入本地 Token 估算；超过 Token 预算或触及消息数量、上下文 JSON 与实际请求字节边界时尝试压缩。保留指定用户轮次和当前问题；较早已完成的模型及全部工具结果可生成步骤摘要，正在执行的批次保持完整，模型请求前保留最近完整批次。压缩后重新检查全部边界；摘要模型的源批次也必须满足预算和实际请求编码边界。历史按完整轮次分页读取，旧超长轨迹在恢复阶段按完整批次推进，不能安全压缩时明确失败，不静默丢弃内容。有效请求仍最多 256 条、上下文 JSON 最多 8 MiB。
 
-估算方法 unicode-v1 按有效文本字符、代码标点和封装开销计算，图片使用可配置单图估算；不是厂商 tokenizer。仅在同一执行的请求前缀和工具定义未变时，可参考上一轮实际 prompt_tokens 并估算增量；不以累计 usage 判断当前上下文，估算不写入 usage。无效预算使异步执行以 token_budget_unconfigured 失败；必须保留的输入或单个源轮次超预算时为 token_budget_exceeded。远端仍负责最终容量校验，失败不自动重发。context_compaction 直接初始化当前 Token 配置，revision 为 1；旧条数/字节设置及相应执行快照不做自动转换，版本 6 数据库不受支持。拒绝时保留已有数据和版本，不删除或重建数据库。
+估算方法 unicode-v1 按有效文本字符、代码标点和封装开销计算，图片使用可配置单图估算；不是厂商 tokenizer。仅在同一执行的请求前缀和工具定义未变时，可参考上一轮实际 prompt_tokens 并估算增量；不以累计 usage 判断当前上下文，估算不写入 usage。无效预算使异步执行以 token_budget_unconfigured 失败；必须保留的输入或单个源轮次超预算时为 token_budget_exceeded。远端仍负责最终容量校验，失败不自动重发。context_compaction 直接初始化当前 Token 配置，revision 为 1；旧条数或字节设置及相应执行快照不做自动转换。拒绝时保留已有数据和版本，不删除或重建数据库。
 
 #### conversation.context_usage
 
@@ -621,7 +621,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 四个文件工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
 纯读取在 `on-request` 与 `never` 下自动执行，包括无工作区和工作区外路径，仍受当前系统用户访问权限及文件工具的校验约束；`always` 逐次询问。无工作区或工作区外普通修改在 `on-request` 下需要审批，`never` 拒绝仍需审批的操作。默认批准只授权该次固定目标；具备目录选项时，用户可明确选择当前会话的目录及子目录授权。
-目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。文件创建与修改使用 `apply_patch`；当前没有独立删除、移动、交互终端、MCP 或插件工具。`run_command` 可显式启动解释器，但不自动套 Shell，cwd 不构成访问隔离。
+目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。文件创建与修改使用 `apply_patch`；当前没有独立删除、移动、交互终端或插件工具。MCP 工具由用户配置启用。`run_command` 可显式启动解释器，但不自动套 Shell，cwd 不构成访问隔离。
 `search_text` 搜索空目录返回空匹配，遇到空子目录继续搜索；空目录不作为工具错误。
 
 ### 11.2 approval.get / approval.list
@@ -1095,3 +1095,19 @@ scope 仅接受 once、conversation_directory；拒绝决定不能授予目录�
 主对话支持 `reasoning.delta` 通知，参数为 `conversation_id`、`run_id`、`step_id` 与字符串 `text`，绑定一个 `model_call` 步骤，不写入回答正文。仅在供应商实际提供推理字段时发送，可能包含显式空字符串；通知不表示步骤成功。结束、取消或失败后通过 `step.data` 的 `output` 字段读取统一的 `reasoning` 字符串。活动期间定期保存已接受的片段；进程异常退出可能丢失最近未落盘片段，恢复不会自动重试。失败和取消的推理可能不完整，客户端应结合步骤状态展示。
 
 Chat Completions 适配器识别 `reasoning_content`，缺失或 null 表示未提供，非字符串报协议错误；不从正文中的 `<think>` 等标签推断。成功结果的 `context_message.reasoning` 保留显式字段供适配器在工具循环回传，推理计入输入预算与累计内容边界；失败的部分推理不生成成功上下文。原始供应商结果与 usage 按原有规则保留。旧步骤没有统一推理投影时保持缺失，不解析原始供应商 JSON 补造内容。无需数据库结构迁移。
+
+## MCP 设置与授权
+
+| 方法 | 参数 | 返回 |
+| --- | --- | --- |
+| `mcp.list` | 空对象 | `revision` 和服务列表。含连接状态、授权状态、到期时间、加密环境变量键名及已发现工具。 |
+| `mcp.save` | `revision`、`server`、可选 `secrets` 和 `confirmed` | `id`。创建时留空 `server.id`。服务配置整体校验，更新以 revision 校验冲突。|
+| `mcp.delete` | `id`、`revision` | `true`。删除服务记录并清除凭据。 |
+| `mcp.test` | `id`，本地 stdio 另需 `revision`、`confirmed` | 工具列表，每项含 `name` 和 `description`。 |
+| `mcp.oauth.start` | `id` | `status = pending` 和仅提供给桌面主进程的授权 `url`。 |
+| `mcp.oauth.status`、`mcp.oauth.cancel` | `id` | `status` 为 `idle`、`pending`、`authorized`、`cancelled` 或 `failed`，可含受控说明。 |
+| `mcp.disconnect` | `id` | `true`。清除本地保存的 HTTP 凭据并关闭连接。|
+
+本地服务配置使用 `transport = stdio` 和 `auth = none`，填写 `command`、`args`、可选 `directory` 和普通 `env`。测试和启用本地程序时，客户端展示命令和工作目录后提交 `confirmed = true`。远程配置使用 `transport = streamable_http`，填写 HTTPS `url`，`auth` 可取 `none`、`token` 或 `oauth`。OAuth 可配置 `client_id` 和完整的 `redirect_uri`。两种方式均可配置 `allowed_tools`。替换手填令牌和加密环境变量分别使用 `secrets.token`、`secrets.env`。凭据字段只用于写入，查询返回状态和元数据。
+
+Go 在 `127.0.0.1` 启动临时 OAuth 回调，使用 PKCE S256，默认端口由系统分配。支持预注册的公共 OAuth 客户端和支持动态注册的授权服务。配置固定回调时，按登记路径和端口绑定。授权码交换和刷新都由 Go 发起。服务商拒绝本机回调时，可在服务商支持的情况下配置手填访问令牌。仅允许公网回调的 OAuth 对接需另行设计。常见 MCP 协议错误码为 3010（配置版本冲突）、3012（需要授权）、3013（本机回调）、3014（授权失败）、3015（配置已变化）、3017（连接失败）和 3018（需要预注册客户端）。

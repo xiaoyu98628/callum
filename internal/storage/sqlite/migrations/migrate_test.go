@@ -86,13 +86,13 @@ func TestMigrationRollback(t *testing.T) {
 	if err := pool.QueryRowContext(t.Context(), "SELECT count(*) FROM sqlite_schema WHERE name IN ('model_providers', 'models')").Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 || tables != 2 {
+	if version != 7 || tables != 2 {
 		t.Fatalf("具体迁移未完整提交: version=%d tables=%d", version, tables)
 	}
 }
 
 func TestUnsupportedVersionsPreserveData(t *testing.T) {
-	for _, rejectedVersion := range []int{5, 7, 99} {
+	for _, rejectedVersion := range []int{5, 8, 99} {
 		t.Run(fmt.Sprintf("version_%d", rejectedVersion), func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "data", "callum.db")
 			db, err := sqlite.Open(t.Context(), path)
@@ -108,7 +108,7 @@ func TestUnsupportedVersionsPreserveData(t *testing.T) {
 			if err := db.DB.Raw("PRAGMA user_version").Scan(&initializedVersion).Error; err != nil {
 				t.Fatal(err)
 			}
-			if initializedVersion != 6 {
+			if initializedVersion != 7 {
 				t.Fatalf("新库结构版本错误: %d", initializedVersion)
 			}
 			if err := db.DB.WithContext(t.Context()).Exec(fmt.Sprintf("PRAGMA user_version = %d", rejectedVersion)).Error; err != nil {
@@ -241,7 +241,7 @@ func TestFollowUpMigrationPreservesVersionFour(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if version != 6 || entries != 0 || marker != "保留" {
+	if version != 7 || entries != 0 || marker != "保留" {
 		t.Fatalf("后续消息迁移状态异常: %d, %d, %q", version, entries, marker)
 	}
 }

@@ -18,7 +18,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/policy"
 )
 
-func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, parent agent.Step, call model.ToolCall, denied, uncertain map[string]bool) (message model.Message, retErr error) {
+func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, parent agent.Step, call model.ToolCall, denied, uncertain map[string]bool, external tool.Tool) (message model.Message, retErr error) {
 	scope, operationErr := e.toolScope(ctx, ex)
 	var prepared *toolexecutor.Prepared
 	if operationErr == nil {
@@ -31,7 +31,11 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 		if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
 			permissions.SandboxMode = snapshot.SandboxMode
 		}
-		prepared, operationErr = e.options.Tools.PrepareWithPermissions(ctx, scope, call.Name, call.Arguments, permissions)
+		if external != nil {
+			prepared, operationErr = e.options.Tools.PrepareExternal(ctx, scope, external, call.Arguments, permissions)
+		} else {
+			prepared, operationErr = e.options.Tools.PrepareWithPermissions(ctx, scope, call.Name, call.Arguments, permissions)
+		}
 	}
 	var step agent.Step
 	result := tool.Result{Outcome: tool.OutcomeNotApplied}

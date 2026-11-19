@@ -3,9 +3,11 @@ package stdio
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/xiaoyu98628/callum/internal/agent/approval"
 	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
@@ -19,6 +21,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/stdio/catalog"
 	conversationhandler "github.com/xiaoyu98628/callum/internal/stdio/conversation"
 	"github.com/xiaoyu98628/callum/internal/stdio/execution"
+	mcphandler "github.com/xiaoyu98628/callum/internal/stdio/mcp"
 	settingshandler "github.com/xiaoyu98628/callum/internal/stdio/settings"
 	skillshandler "github.com/xiaoyu98628/callum/internal/stdio/skills"
 	"github.com/xiaoyu98628/callum/internal/stdio/transport"
@@ -39,10 +42,11 @@ type Server struct {
 	settings     *settingshandler.Handler
 	skills       *skillshandler.Handler
 	inputs       *userinputhandler.Handler
+	mcp          *mcphandler.Handler
 }
 
 // NewWithConversations 装配普通对话接口；所有服务和资源仍由 app 持有。
-func NewWithConversations(providers *providerservice.Service, runs *executor.Manager, workspaces *workspaceservice.Service, conversations *conversationservice.Service, persistent *agentservice.Engine, approvals *approval.Service, settings *settingsservice.Service, skillStore *skills.Store, accepted func(string) error, logger *slog.Logger) (*Server, error) {
+func NewWithConversations(providers *providerservice.Service, runs *executor.Manager, workspaces *workspaceservice.Service, conversations *conversationservice.Service, persistent *agentservice.Engine, approvals *approval.Service, settings *settingsservice.Service, skillStore *skills.Store, accepted func(string) error, logger *slog.Logger, mcpHandler *mcphandler.Handler) (*Server, error) {
 	if workspaces == nil || conversations == nil || persistent == nil || approvals == nil || settings == nil || skillStore == nil || accepted == nil {
 		return nil, errors.New("对话服务不能为空")
 	}
@@ -50,6 +54,7 @@ func NewWithConversations(providers *providerservice.Service, runs *executor.Man
 	if err != nil {
 		return nil, err
 	}
+	s.mcp = mcpHandler
 	s.approvals = approvalhandler.New(approvals)
 	s.settings = settingshandler.New(settings)
 	s.skills = skillshandler.New(skillStore)
@@ -97,6 +102,12 @@ func (s *Server) ServeRequests(c *transport.Connection) error {
 	if c == nil {
 		return errors.New("协议连接不能为空")
 	}
+	owner, cancel := context.WithCancel(c.Context())
+	pending := &networkRequests{ctx: owner, slots: make(chan struct{}, 4)}
+	defer func() {
+		cancel()
+		pending.wg.Wait()
+	}()
 	scanner := bufio.NewScanner(c.Input())
 	scanner.Buffer(make([]byte, 4096), transport.MaxRequestBytes+2)
 	for scanner.Scan() {
@@ -110,7 +121,7 @@ func (s *Server) ServeRequests(c *transport.Connection) error {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
-		stop, err := s.handle(c, line)
+		stop, err := s.handle(c, pending, line)
 		if err != nil {
 			return c.NormalizeError(err)
 		}
@@ -122,4 +133,11 @@ func (s *Server) ServeRequests(c *transport.Connection) error {
 		return c.NormalizeError(fmt.Errorf("读取协议输入失败: %w", err))
 	}
 	return nil
+}
+
+// networkRequests 在同一协议连接内有界运行 MCP 网络操作，退出时取消并等待响应生产者。
+type networkRequests struct {
+	ctx   context.Context
+	slots chan struct{}
+	wg    sync.WaitGroup
 }

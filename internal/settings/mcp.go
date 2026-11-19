@@ -1,0 +1,145 @@
+package settings
+
+import (
+	"encoding/json"
+	"errors"
+	"net/url"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strconv"
+	"strings"
+
+	"github.com/google/uuid"
+)
+
+const MCPKey = "mcp"
+
+const (
+	MCPStdio = "stdio"
+	MCPHTTP  = "streamable_http"
+	MCPNone  = "none"
+	MCPToken = "token"
+	MCPOAuth = "oauth"
+)
+
+var envName = regexp.MustCompile("^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+// MCP 保存服务配置及工具允许清单。凭据由独立仓储保存。
+type MCP struct {
+	Servers []MCPServer `json:"servers"`
+}
+
+// MCPServer 是可以安全返回给设置界面的服务配置。
+type MCPServer struct {
+	ID           string            `json:"id"`
+	Name         string            `json:"name"`
+	Enabled      bool              `json:"enabled"`
+	Transport    string            `json:"transport"`
+	Command      string            `json:"command,omitempty"`
+	Args         []string          `json:"args,omitempty"`
+	Directory    string            `json:"directory,omitempty"`
+	Env          map[string]string `json:"env,omitempty"`
+	URL          string            `json:"url,omitempty"`
+	Auth         string            `json:"auth"`
+	ClientID     string            `json:"client_id,omitempty"`
+	RedirectURI  string            `json:"redirect_uri,omitempty"`
+	AllowedTools []string          `json:"allowed_tools"`
+}
+
+func DefaultMCP() MCP { return MCP{Servers: []MCPServer{}} }
+
+func DecodeMCP(raw json.RawMessage) (MCP, error) {
+	var value MCP
+	if len(raw) > MaxValueBytes || json.Unmarshal(raw, &value) != nil || value.Servers == nil || len(value.Servers) > 16 {
+		return MCP{}, ErrInvalid
+	}
+	seen := make(map[string]bool, len(value.Servers))
+	for _, server := range value.Servers {
+		if !server.Valid() || seen[server.ID] {
+			return MCP{}, ErrInvalid
+		}
+		seen[server.ID] = true
+	}
+	return value, nil
+}
+
+func DecodeMCPRecord(record Record) (MCP, error) {
+	value, err := DecodeMCP(record.Value)
+	if err != nil || record.Key != MCPKey || record.Revision < 1 {
+		return MCP{}, errors.Join(ErrStorage, ErrInvalid)
+	}
+	return value, nil
+}
+
+func (s MCPServer) Valid() bool {
+	id, err := uuid.Parse(s.ID)
+	if err != nil || id.Version() != 7 || id.String() != s.ID || strings.TrimSpace(s.Name) != s.Name || s.Name == "" || len(s.Name) > 240 || len(s.AllowedTools) > 128 {
+		return false
+	}
+	tools := map[string]bool{}
+	for _, name := range s.AllowedTools {
+		if name == "" || len(name) > 256 || strings.ContainsAny(name, "\x00\r\n") || tools[name] {
+			return false
+		}
+		tools[name] = true
+	}
+	switch s.Transport {
+	case MCPStdio:
+		if s.Auth != MCPNone || s.URL != "" || s.ClientID != "" || s.RedirectURI != "" || !filepath.IsAbs(s.Command) || strings.ContainsRune(s.Command, 0) || len(s.Args) > 64 || len(s.Env) > 64 || (s.Directory != "" && (!filepath.IsAbs(s.Directory) || strings.ContainsRune(s.Directory, 0))) {
+			return false
+		}
+		for _, arg := range s.Args {
+			if strings.ContainsRune(arg, 0) {
+				return false
+			}
+		}
+		for key, val := range s.Env {
+			if !ValidMCPEnv(key, val) {
+				return false
+			}
+		}
+		return true
+	case MCPHTTP:
+		if u, err := MCPHTTPS(s.URL); err != nil || u.RawQuery != "" || u.ForceQuery || s.Command != "" || len(s.Args) > 0 || s.Directory != "" || len(s.Env) > 0 {
+			return false
+		}
+		if s.Auth != MCPOAuth {
+			return (s.Auth == MCPNone || s.Auth == MCPToken) && s.ClientID == "" && s.RedirectURI == ""
+		}
+		if len(s.ClientID) > 1024 || strings.TrimSpace(s.ClientID) != s.ClientID || strings.ContainsAny(s.ClientID, "\x00\r\n") {
+			return false
+		}
+		if s.RedirectURI == "" {
+			return true
+		}
+		u, err := url.Parse(s.RedirectURI)
+		if err != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" || u.Path == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+			return false
+		}
+		port, err := strconv.ParseUint(u.Port(), 10, 16)
+		return err == nil && port > 0
+	}
+	return false
+}
+
+func ValidMCPEnv(key, value string) bool {
+	return envName.MatchString(key) && len(value) <= 4096 && !strings.ContainsRune(value, 0)
+}
+
+// MCPHTTPS 限定可配置的 HTTPS 端点，禁止凭据和片段混入地址。
+func MCPHTTPS(raw string) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil || len(raw) > 2048 || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" || u.Opaque != "" {
+		return nil, ErrInvalid
+	}
+	return u, nil
+}
+
+func (v MCP) Server(id string) (MCPServer, bool) {
+	i := slices.IndexFunc(v.Servers, func(server MCPServer) bool { return server.ID == id })
+	if i < 0 {
+		return MCPServer{}, false
+	}
+	return v.Servers[i], true
+}
