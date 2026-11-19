@@ -22,7 +22,7 @@ type transcriptRow struct {
 	Operation                *string
 }
 
-// Transcript 在当前消息分支恢复成功轨迹及失败执行留下的副作用事实。
+// Transcript 恢复当前分支的成功轨迹、已被显式继续的轨迹及失败执行留下的副作用事实。
 // 查询前检查累计大小，只加载统一上下文，不加载大型原始模型结果。
 func (r *Repository) Transcript(ctx context.Context, id string, after ...int64) (map[string][]model.Message, error) {
 	floor := int64(0)
@@ -70,7 +70,11 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 			Where("t.run_id=r.id AND t.type=?", "tool_call").
 			Where("json_extract(t.input,'$.operation_version')=1 AND json_extract(t.output,'$.operation.version')=1").
 			Where("json_extract(t.output,'$.operation.outcome') IN ?", []string{"applied", "partially_applied", "unknown"})
-		return base().Where("(r.status=? OR EXISTS (?))", "completed", effects)
+		continued := r.db.WithContext(ctx).Table("conversation_messages AS u").Select("1").
+			Joins("JOIN conversation_run_steps AS next ON next.run_id=u.run_id AND next.sequence=1").
+			Where("u.conversation_id=r.conversation_id AND u.role='user' AND u.sequence>m.sequence").
+			Where("json_extract(next.input,'$.continued_from_run_id')=r.id")
+		return base().Where("(r.status=? OR EXISTS (?) OR EXISTS (?))", "completed", effects, continued)
 	}
 	var runIDs []string
 	if err := visible().Distinct("r.id").Limit(maxMessages+1).Pluck("r.id", &runIDs).Error; err != nil {

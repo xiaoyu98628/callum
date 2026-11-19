@@ -85,7 +85,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 | 技能 | `skills.list` |
 | 无历史调用 | `model.invoke` |
 | 工作区 | `workspace.create`、`workspace.update`、`workspace.get`、`workspace.list`、`workspace.delete`、`workspace.restore` |
-| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.history`、`conversation.attachment_preview`、`conversation.delete`、`conversation.restore` |
+| 会话及消息 | `conversation.send`、`conversation.resend`、`conversation.continue`、`conversation.get`、`conversation.list`、`conversation.update`、`conversation.history`、`conversation.attachment_preview`、`conversation.delete`、`conversation.restore` |
 | 上下文压缩 | `conversation.context_usage`、`conversation.compact`、`conversation.context_versions`、`conversation.context_version` |
 | 执行 | `run.get`、`run.list`、`run.cancel` |
 | 步骤 | `step.get`、`step.list`、`step.data` |
@@ -389,6 +389,12 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 `run.started` 通知同样携带 `removed_message_ids`，供其他窗口清理旧回答。旧执行身份及 usage 等审计信息保留。
 
 编辑较早的用户消息、在执行中重发、把回答消息 ID 当作用户消息 ID，均不会正常受理。`conversation.send` 不接受 `message_id`，重发必须使用 `conversation.resend`。
+
+### conversation.continue：继续已停止或中断的任务
+
+参数为 `conversation_id`、`run_id` 和可选的 `model_id`。`run_id` 必须属于当前会话最新一条普通用户消息，且状态为 `cancelled` 或 `interrupted`。有活动执行时返回 `1006`，执行已被替换或来源已过期时返回 `1003`。手动压缩单独记录，仍可继续此前停止的对话任务。
+
+受理结果与 `conversation.send` 相同，返回原会话 ID、新执行 ID 和新消息 ID。新执行在历史中记录「继续任务」，以原需求、已生效的引导和保存的工具轨迹作为上下文，并使用当前设置快照。原执行保留，结果待核实的操作继续受审批约束。受理成功后，原执行绑定的待发队列随新执行一起继续，仍须等待成功终态才可自动发出。
 
 ### 后续消息
 
@@ -823,7 +829,7 @@ usage 原样保留供应商字段，缺失为 NULL；不把零值或估算值当
 `outcome` 为 `none`（无副作用）、`not_applied`（确认未生效）、`applied`（已生效）、`partially_applied`（部分生效）或 `unknown`（无法确认）；不能仅用步骤或运行的失败／取消状态判断是否生效。
 恢复未完成的新步骤时附加 `recovered:true`，已保存的明确事实及实际输出保留，未启动的调用为 `not_applied`，已启动但缺少结果的只读调用为 `none`，其他调用为 `unknown`。旧记录不补造这些字段，数据库结构版本不变。
 
-后续对话会恢复当前分支中失败、取消或中断执行留下的已生效、部分生效或未知操作，保持工具调用及结果配对，不恢复失败回答正文。同轮未执行的调用补齐为未执行；编辑重发前的旧分支仍只作审计。
+后续对话会恢复当前分支中失败、取消或中断执行留下的已生效、部分生效或未知操作。通过 `conversation.continue` 显式继续时，也会恢复已保存的只读工具结果。工具调用与结果保持配对，失败回答正文留在历史中。同轮未执行的调用补齐为未执行；编辑重发前的旧分支仍只作审计。
 同一固定操作留下未知、部分生效或已生效但报错的结果后，再次调用会要求用户确认，`authorization.reason` 为 `previous_result_requires_confirmation`；`never` 直接拒绝。批准仍需通过执行前校验，明确成功才解除待核实状态；不会自动重试未知操作。
 本节字段通过现有 `step.data` 读取，通知结构和 JSON-RPC 方法不变。工具原始输出仍限 64 KiB，外层事实及上下文封装不计入该工具输出上限。
 

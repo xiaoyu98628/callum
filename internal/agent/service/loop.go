@@ -34,6 +34,9 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	if err != nil {
 		return err
 	}
+	if ex.ContinueFromRunID != "" {
+		fixed[0].Content += "\n\n用户通过「继续任务」恢复上次停止或中断的任务。结合原需求、已收到的引导及工具结果，完成剩余工作。把确认已经生效的操作作为进度使用。结果未知或部分生效时先用只读方式核实，任何进一步操作仍须经过现有权限检查。"
+	}
 	totalText := 0
 	step := ex.Step
 	var meter tokens.Meter

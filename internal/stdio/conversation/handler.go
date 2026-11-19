@@ -22,7 +22,7 @@ func (h *Handler) Handle(ctx context.Context, req protocol.Request, reply func(a
 	if req.Method == "conversation.compact" {
 		return h.compact(ctx, req, reply)
 	}
-	if req.Method == "conversation.send" || req.Method == "conversation.resend" || req.Method == "conversation.follow_up_start" {
+	if req.Method == "conversation.send" || req.Method == "conversation.resend" || req.Method == "conversation.follow_up_start" || req.Method == "conversation.continue" {
 		return h.send(ctx, req, reply)
 	}
 	var value any
@@ -155,13 +155,20 @@ func (h *Handler) send(ctx context.Context, req protocol.Request, reply func(any
 		return reply(map[string]any{"conversation_id": ex.Conversation.ID, "run_id": ex.Run.ID, "user_message_id": ex.User.ID, "message_id": ex.Assistant.ID, "removed_message_ids": ex.RemovedMessageIDs}, nil)
 	}
 	var err error
-	if req.Method == "conversation.follow_up_start" {
+	switch req.Method {
+	case "conversation.follow_up_start":
 		var p domain.FollowUpStart
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
 			return reply(nil, rpcErr)
 		}
 		err = h.service.StartFollowUp(ctx, p, accepted)
-	} else {
+	case "conversation.continue":
+		var p domain.Continue
+		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
+			return reply(nil, rpcErr)
+		}
+		err = h.service.Continue(ctx, p, accepted)
+	default:
 		var p domain.Send
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
 			return reply(nil, rpcErr)

@@ -367,9 +367,12 @@ func consumeFollowUp(tx *gorm.DB, in domain.Begin) error {
 
 // bindFollowUpQueue links the remaining queue to the new run after it exists.
 func bindFollowUpQueue(tx *gorm.DB, in domain.Begin) error {
-	if in.FollowUp == nil {
+	if in.FollowUp == nil && in.ContinueFromRunID == "" {
 		return nil
 	}
-	return tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND status=?", in.ConversationID, domain.FollowUpQueued).
-		Updates(map[string]any{"expected_run_id": in.RunID, "revision": gorm.Expr("revision+1")}).Error
+	q := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND status=?", in.ConversationID, domain.FollowUpQueued)
+	if in.ContinueFromRunID != "" {
+		q = q.Where("expected_run_id=?", in.ContinueFromRunID)
+	}
+	return q.Updates(map[string]any{"expected_run_id": in.RunID, "revision": gorm.Expr("revision+1")}).Error
 }

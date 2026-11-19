@@ -76,7 +76,7 @@ type Filter struct {
 	Offset      int     `json:"offset"`
 }
 
-// Begin 是一次发送或编辑重发的原子写入输入，所有 ID 由业务层生成。
+// Begin 是一次发送、编辑重发或继续任务的原子写入输入，所有 ID 由业务层生成。
 type Begin struct {
 	FollowUp           *FollowUpStart
 	Create             bool
@@ -88,6 +88,7 @@ type Begin struct {
 	StepID             string
 	ResendMessageID    string
 	ResendRunID        string
+	ContinueFromRunID  string
 	Model              model.Snapshot
 	Protocol           string
 	Content            []model.Block
@@ -100,6 +101,7 @@ type Execution struct {
 	HistoryMore       bool
 	Context           *ContextVersion
 	RemovedMessageIDs []string
+	ContinueFromRunID string
 	Created           bool
 	Conversation      Conversation
 	User              Message
@@ -119,4 +121,12 @@ type Send struct {
 	RetainedAttachments []int         `json:"retained_attachments,omitempty"`
 	Content             []model.Block `json:"content"`
 	Stream              *bool         `json:"stream,omitempty"`
+	ContinueFromRunID   string        `json:"-"`
+}
+
+// Continue 标识用户要继续的最新一轮；服务端在受理事务中复核所属会话和执行状态。
+type Continue struct {
+	ConversationID string `json:"conversation_id"`
+	RunID          string `json:"run_id"`
+	ModelID        string `json:"model_id,omitempty"`
 }

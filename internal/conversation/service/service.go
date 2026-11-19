@@ -169,6 +169,24 @@ func (s *Service) Send(ctx context.Context, in conversation.Send, accepted func(
 	return s.send(ctx, in, nil, accepted)
 }
 
+// Continue 在同一会话创建一轮新执行，原执行和已保存的工具轨迹仍可查阅。
+func (s *Service) Continue(ctx context.Context, in conversation.Continue, accepted func(conversation.Execution) error) error {
+	if !validID(in.ConversationID) || !validID(in.RunID) || (in.ModelID != "" && !validID(in.ModelID)) {
+		return conversation.ErrInvalid
+	}
+	source, err := s.engine.GetRun(ctx, in.RunID)
+	if errors.Is(err, agent.ErrNotFound) || (err == nil && source.ConversationID != in.ConversationID) {
+		return conversation.ErrCannotContinue
+	}
+	if err != nil {
+		return err
+	}
+	return s.send(ctx, conversation.Send{
+		ConversationID: in.ConversationID, ContinueFromRunID: in.RunID, ModelID: in.ModelID,
+		Stream: &source.Stream, Content: []model.Block{{Type: "text", Text: "继续任务"}},
+	}, nil, accepted)
+}
+
 func (s *Service) send(ctx context.Context, in conversation.Send, followUp *conversation.FollowUpStart, accepted func(conversation.Execution) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -263,7 +281,7 @@ func (s *Service) send(ctx context.Context, in conversation.Send, followUp *conv
 	if in.Stream != nil {
 		stream = *in.Stream
 	}
-	ex, err := s.repository.Begin(lookup, conversation.Begin{FollowUp: followUp, Create: create, ConversationID: in.ConversationID, WorkspaceID: in.WorkspaceID, RunID: ids[0], UserMessageID: ids[1], AssistantMessageID: ids[2], StepID: ids[3], ResendMessageID: in.MessageID, ResendRunID: in.ExpectedRunID, Model: resolved.Snapshot, Protocol: resolved.Protocol, Content: in.Content, Stream: stream})
+	ex, err := s.repository.Begin(lookup, conversation.Begin{FollowUp: followUp, Create: create, ConversationID: in.ConversationID, WorkspaceID: in.WorkspaceID, RunID: ids[0], UserMessageID: ids[1], AssistantMessageID: ids[2], StepID: ids[3], ResendMessageID: in.MessageID, ResendRunID: in.ExpectedRunID, ContinueFromRunID: in.ContinueFromRunID, Model: resolved.Snapshot, Protocol: resolved.Protocol, Content: in.Content, Stream: stream})
 	batch.Finish(lookup, err == nil)
 	if err != nil {
 		return err
