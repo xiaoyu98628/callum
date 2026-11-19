@@ -45,10 +45,11 @@ func (row steeringRow) message() domain.Message {
 }
 
 func steeringMessagesQuery(tx *gorm.DB) *gorm.DB {
-	// 用首次携带引导的请求定位。旧记录可用实际采用引导的步骤，待处理消息显示在当前过程尾。
+	// 受理位置优先。旧记录仍可按首次携带引导的请求或实际采用引导的步骤恢复。
 	return tx.Table("conversation_followups AS f").
 		Select(`f.*, m.sequence AS anchor_sequence, s.finished_at AS applied_at,
 			COALESCE(
+				(SELECT value FROM json_each(root.input, '$.steering_receipts') WHERE key=f.id),
 				(SELECT MIN(p.sequence) - 1 FROM conversation_run_steps p
 				 WHERE p.run_id=f.expected_run_id AND p.type='model_call'
 				 AND EXISTS (SELECT 1 FROM json_each(p.input, '$.steering_ids') WHERE value=f.id)),
@@ -56,8 +57,27 @@ func steeringMessagesQuery(tx *gorm.DB) *gorm.DB {
 				(SELECT COALESCE(MAX(p.sequence), 0) FROM conversation_run_steps p WHERE p.run_id=f.expected_run_id)
 			) AS after_step`).
 		Joins("JOIN conversation_messages m ON m.run_id=f.expected_run_id AND m.conversation_id=f.conversation_id AND m.role='assistant'").
+		Joins("LEFT JOIN conversation_run_steps root ON root.run_id=f.expected_run_id AND root.sequence=1").
 		Joins("LEFT JOIN conversation_run_steps s ON s.id=f.applied_step_id AND s.run_id=f.expected_run_id").
 		Where("f.status IN ?", []string{domain.FollowUpSteering, domain.FollowUpApplied})
+}
+
+// acceptSteeringMessage 在受理事务中把当时的过程位置写入首个步骤。
+// 待启动的步骤可能直接采用引导，应排在气泡之后。
+func acceptSteeringMessage(tx *gorm.DB, row schema.FollowUp) (domain.Message, error) {
+	result := tx.Model(&schema.Step{}).
+		Where("run_id=? AND conversation_id=? AND sequence=1", row.ExpectedRunID, row.ConversationID).
+		UpdateColumn("input", gorm.Expr(`json_set(input, '$.steering_receipts',
+			json_patch(COALESCE(json_extract(input, '$.steering_receipts'), '{}'), json_object(?,
+				(SELECT COALESCE(MAX(p.sequence), 0) FROM conversation_run_steps p WHERE p.run_id=? AND p.status<>'pending')
+			)))`, row.ID, row.ExpectedRunID))
+	if result.Error != nil {
+		return domain.Message{}, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return domain.Message{}, domain.ErrFollowUpChanged
+	}
+	return steeringMessage(tx, row.ConversationID, row.ID)
 }
 
 func steeringMessage(tx *gorm.DB, conversationID, followUpID string) (domain.Message, error) {
@@ -164,7 +184,7 @@ func (r *Repository) CreateFollowUp(ctx context.Context, in domain.FollowUp) (do
 			return err
 		}
 		if row.Status == domain.FollowUpSteering {
-			message, err := steeringMessage(tx, row.ConversationID, row.ID)
+			message, err := acceptSteeringMessage(tx, row)
 			if err != nil {
 				return err
 			}
@@ -235,7 +255,7 @@ func (r *Repository) ChangeFollowUp(ctx context.Context, in domain.FollowUpChang
 			return err
 		}
 		if in.Action == "steer" {
-			message, err := steeringMessage(tx, row.ConversationID, row.ID)
+			message, err := acceptSteeringMessage(tx, row)
 			if err != nil {
 				return err
 			}

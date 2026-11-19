@@ -126,7 +126,7 @@ func TestFollowUpQueueAndSteerThroughStdio(t *testing.T) {
 		if step.ErrorKind != nil && *step.ErrorKind == "steered" {
 			oldStep = step.Sequence
 		}
-		if strings.Contains(string(step.Input), guide) {
+		if strings.Contains(string(step.Input), `"steering_ids":["`+guide+`"]`) {
 			newStep = step.Sequence
 		}
 	}
@@ -142,7 +142,7 @@ func TestFollowUpQueueAndSteerThroughStdio(t *testing.T) {
 		t.Fatalf("同一轮历史缺少引导或回答: %s, %v", history.Result, err)
 	}
 	steered, answer := page.Messages[1], page.Messages[2]
-	if steered.ID != guide || steered.Status != "completed" || steered.SteeringOrder < 1 || steered.SteeringAfterStep == nil || *steered.SteeringAfterStep != newStep-1 || answer.Content[0].Text != "按新要求完成" {
+	if steered.ID != guide || steered.Status != "completed" || steered.SteeringOrder < 1 || steered.SteeringAfterStep == nil || *steered.SteeringAfterStep != *receipt.Message.SteeringAfterStep || answer.Content[0].Text != "按新要求完成" {
 		t.Fatalf("历史顺序、引导状态或调整后的回答不符: %s", history.Result)
 	}
 	if !guided.Load() {
