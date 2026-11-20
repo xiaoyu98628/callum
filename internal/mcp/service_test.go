@@ -44,7 +44,18 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 	const access = "controlled-access-token"
 	const refresh = "controlled-refresh-token"
 	const rotated = "controlled-rotated-access-token"
+	const unexpected = "controlled-scope-mismatch-token"
+	const advertisedScope = "read write"
+	var configuredScope string
+	if !fixed {
+		configuredScope = "read"
+	}
+	wantScope := configuredScope
+	if wantScope == "" {
+		wantScope = advertisedScope
+	}
 	var tokens, toolCalls, registrations atomic.Int32
+	var badRefreshScope atomic.Bool
 	var authChallenge atomic.Value
 	tokenRequested := make(chan struct{}, 1)
 	releaseToken := make(chan struct{})
@@ -59,7 +70,7 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 	var issuer string
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+access && r.Header.Get("Authorization") != "Bearer "+rotated {
-			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+issuer+`/.well-known/oauth-protected-resource/mcp", scope="test"`)
+			w.Header().Set("WWW-Authenticate", `Bearer resource_metadata="`+issuer+`/.well-known/oauth-protected-resource/mcp", scope="`+advertisedScope+`"`)
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
@@ -78,8 +89,9 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 		var in struct {
 			RedirectURIs []string `json:"redirect_uris"`
 			Auth         string   `json:"token_endpoint_auth_method"`
+			Scope        string   `json:"scope"`
 		}
-		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&in) != nil || len(in.RedirectURIs) != 1 || in.Auth != "none" {
+		if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&in) != nil || len(in.RedirectURIs) != 1 || in.Auth != "none" || in.Scope != configuredScope {
 			t.Error("OAuth 动态注册参数错误")
 			w.WriteHeader(400)
 			return
@@ -96,11 +108,22 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 			return
 		}
 		if r.Form.Get("grant_type") == "refresh_token" && r.Form.Get("refresh_token") == refresh {
+			if r.Form.Get("scope") != configuredScope || r.Form.Has("scope") != (configuredScope != "") {
+				t.Error("刷新请求的 scope 与配置不符")
+			}
+			if badRefreshScope.Load() {
+				writeJSON(t, w, map[string]any{"access_token": unexpected, "token_type": "Bearer", "scope": advertisedScope})
+				return
+			}
 			writeJSON(t, w, map[string]any{"access_token": rotated, "token_type": "Bearer", "expires_in": 3600})
 			return
 		}
-		if r.Form.Get("code") == "controlled-failed-code" {
+		switch r.Form.Get("code") {
+		case "controlled-failed-code":
 			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		case "controlled-broad-scope-code":
+			writeJSON(t, w, map[string]any{"access_token": unexpected, "token_type": "Bearer", "scope": advertisedScope})
 			return
 		}
 		expected := authChallenge.Load().(url.Values)
@@ -116,7 +139,11 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 			return
 		case <-releaseToken:
 		}
-		writeJSON(t, w, map[string]any{"access_token": access, "token_type": "Bearer", "refresh_token": refresh, "expires_in": 3600})
+		response := map[string]any{"access_token": access, "token_type": "Bearer", "refresh_token": refresh, "expires_in": 3600}
+		if configuredScope != "" {
+			response["scope"] = configuredScope
+		}
+		writeJSON(t, w, response)
 	})
 	server := httptest.NewUnstartedServer(mux)
 	server.StartTLS()
@@ -148,6 +175,8 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 		Enabled: true, AllowedTools: []string{"echo"}}
 	if fixed {
 		cfg.ClientID = "test-client"
+	} else {
+		cfg.Scope = configuredScope
 	}
 	if fixed {
 		listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -207,8 +236,8 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 	q := authorization.Query()
 	callback, _ := url.Parse(q.Get("redirect_uri"))
 	if callback.Hostname() != "127.0.0.1" || callback.Port() == "" || callback.Port() == "0" ||
-		(fixed && callback.String() != cfg.RedirectURI) || q.Get("code_challenge_method") != "S256" {
-		t.Fatalf("授权地址配置错误: %s", state.URL)
+		(fixed && callback.String() != cfg.RedirectURI) || q.Get("code_challenge_method") != "S256" || q.Get("scope") != wantScope {
+		t.Fatal("授权地址的回调、PKCE 或 scope 参数错误")
 	}
 	authChallenge.Store(q)
 	browser := http.Client{Timeout: 2 * time.Second}
@@ -280,7 +309,7 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 		t.Fatal(err)
 	}
 	public, _ := json.Marshal(catalog)
-	if strings.Contains(string(public), access) || !catalog.Servers[0].Authorized {
+	if strings.Contains(string(public), access) || !catalog.Servers[0].Authorized || catalog.Servers[0].Scope != configuredScope {
 		t.Fatal("公开目录泄漏凭据或授权状态有误")
 	}
 	stored.Expires = time.Now().Add(-time.Second)
@@ -316,6 +345,8 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 		}{
 			{url.Values{"error": {"access_denied"}, "error_description": {"remote-secret-error"}}, "cancelled", "已取消授权"},
 			{url.Values{"code": {"controlled-failed-code"}}, "failed", "授权失败"},
+			{url.Values{"error": {"invalid_scope"}}, "failed", mcp.ErrOAuthScope.Error()},
+			{url.Values{"code": {"controlled-broad-scope-code"}}, "failed", mcp.ErrOAuthScopeMismatch.Error()},
 		} {
 			login, err := service.StartOAuth(ctx, ctx, id)
 			if err != nil {
@@ -331,14 +362,52 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			checkOAuthPage(t, res, http.StatusOK, step.status, step.message, callbackState, "remote-secret-error", "controlled-failed-code")
+			checkOAuthPage(t, res, http.StatusOK, step.status, step.message, callbackState, "remote-secret-error", step.params.Get("code"), unexpected)
 			status, err := service.OAuthState(id, false)
 			if err != nil || status.Status != step.status {
 				t.Fatalf("浏览器和桌面端授权状态不一致: %+v %v", status, err)
 			}
 		}
-		if tokens.Load() != 3 {
+		if tokens.Load() != 4 {
 			t.Fatalf("授权拒绝不应访问换令牌接口，实际令牌请求数: %d", tokens.Load())
+		}
+		refreshed, err := repo.Credential(ctx, id)
+		if err != nil || refreshed.Token != rotated {
+			t.Fatal("拒绝范围不符的授权后，已保存的凭据应继续有效")
+		}
+		cfg.ID, cfg.Scope = id, " read   read "
+		if _, err := service.Save(ctx, rev+1, cfg, mcp.SecretInput{}, false); err != nil {
+			t.Fatal(err)
+		}
+		rev++
+		if catalog, err := service.List(ctx); err != nil || !catalog.Servers[0].Authorized || catalog.Servers[0].Scope != "read" || len(catalog.Servers[0].AllowedTools) != 1 {
+			t.Fatalf("规范化后的权限相同，应保留凭据和工具选择: %v", err)
+		}
+		if _, err := service.Test(ctx, id, false, rev+1); err != nil {
+			t.Fatal(err)
+		}
+		expired := refreshed
+		expired.Expires = time.Now().Add(-time.Second)
+		if err := repo.SaveCredential(ctx, id, expired); err != nil {
+			t.Fatal(err)
+		}
+		badRefreshScope.Store(true)
+		if _, err := service.Test(ctx, id, false, rev+1); err != mcp.ErrOAuthScopeMismatch {
+			t.Fatalf("刷新后权限范围不一致应返回明确错误: %v", err)
+		}
+		if saved, err := repo.Credential(ctx, id); err != nil || !saved.Empty() {
+			t.Fatalf("刷新失败应清除失效凭据: %v", err)
+		}
+		if err := repo.SaveCredential(ctx, id, refreshed); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Scope = "read profile"
+		if _, err := service.Save(ctx, rev+1, cfg, mcp.SecretInput{}, false); err != nil {
+			t.Fatal(err)
+		}
+		rev++
+		if catalog, err := service.List(ctx); err != nil || catalog.Servers[0].Authorized || catalog.Servers[0].Scope != "profile read" || len(catalog.Servers[0].AllowedTools) != 0 {
+			t.Fatalf("权限范围变更后应清除原凭据和工具选择: %v", err)
 		}
 	}
 	if err := service.Delete(ctx, rev+1, id); err != nil {

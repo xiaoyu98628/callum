@@ -1108,6 +1108,8 @@ Chat Completions 适配器识别 `reasoning_content`，缺失或 null 表示未�
 | `mcp.oauth.status`、`mcp.oauth.cancel` | `id` | `status` 为 `idle`、`pending`、`authorized`、`cancelled` 或 `failed`，可含受控说明。 |
 | `mcp.disconnect` | `id` | `true`。清除本地保存的 HTTP 凭据并关闭连接。|
 
-本地服务配置使用 `transport = stdio` 和 `auth = none`，填写 `command`、`args`、可选 `directory` 和普通 `env`。测试和启用本地程序时，客户端展示命令和工作目录后提交 `confirmed = true`。远程配置使用 `transport = streamable_http`，填写 HTTPS `url`，`auth` 可取 `none`、`token` 或 `oauth`。OAuth 可配置 `client_id` 和完整的 `redirect_uri`。两种方式均可配置 `allowed_tools`。替换手填令牌和加密环境变量分别使用 `secrets.token`、`secrets.env`。凭据字段只用于写入，查询返回状态和元数据。
+本地服务配置使用 `transport = stdio` 和 `auth = none`，填写 `command`、`args`、可选 `directory` 和普通 `env`。测试和启用本地程序时，客户端展示命令和工作目录后提交 `confirmed = true`。远程配置使用 `transport = streamable_http`，填写 HTTPS `url`，`auth` 可取 `none`、`token` 或 `oauth`。OAuth 可配置 `client_id`、完整的 `redirect_uri` 和 `scope`。两种方式均可配置 `allowed_tools`。替换手填令牌和加密环境变量分别使用 `secrets.token`、`secrets.env`。凭据字段只用于写入，查询返回状态和元数据。
 
 Go 在 `127.0.0.1` 启动临时 OAuth 回调，使用 PKCE S256，默认端口由系统分配。支持预注册的公共 OAuth 客户端和支持动态注册的授权服务。配置固定回调时，按登记路径和端口绑定。授权码交换和刷新都由 Go 发起。浏览器回调页等待换取令牌和保存凭据的最终结果，展示授权成功、取消或失败。页面加载时清理地址栏的回调参数，随后临时监听关闭。服务商拒绝本机回调时，可在服务商支持的情况下配置手填访问令牌。仅允许公网回调的 OAuth 对接需另行设计。常见 MCP 协议错误码为 3010（配置版本冲突）、3012（需要授权）、3013（本机回调）、3014（授权失败）、3015（配置已变化）、3017（连接失败）和 3018（需要预注册客户端）。
+
+`scope` 只适用于远程 OAuth 服务，是以空格分隔的权限名称字符串。显式配置时，动态注册、浏览器授权和令牌刷新均使用该范围。省略时从认证 challenge 或资源元数据发现初始授权范围，刷新沿用原授权。服务商拒绝请求范围时返回 3019。服务商在令牌响应中明确返回的范围与配置不一致时拒绝该令牌并返回 3020。回调已开始时，对应原因通过授权失败状态及浏览器结果页展示。[OAuth 2.0 允许在授予范围与请求一致时省略响应的 `scope`](https://www.rfc-editor.org/rfc/rfc6749.html#section-5.1)。

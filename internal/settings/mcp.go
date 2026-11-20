@@ -45,6 +45,9 @@ type MCPServer struct {
 	ClientID     string            `json:"client_id,omitempty"`
 	RedirectURI  string            `json:"redirect_uri,omitempty"`
 	AllowedTools []string          `json:"allowed_tools"`
+
+	// Scope 是远程 OAuth 服务显式请求的权限范围，空值表示自动发现。
+	Scope string `json:"scope,omitempty"`
 }
 
 func DefaultMCP() MCP { return MCP{Servers: []MCPServer{}} }
@@ -76,6 +79,14 @@ func (s MCPServer) Valid() bool {
 	id, err := uuid.Parse(s.ID)
 	if err != nil || id.Version() != 7 || id.String() != s.ID || strings.TrimSpace(s.Name) != s.Name || s.Name == "" || len(s.Name) > 240 || len(s.AllowedTools) > 128 {
 		return false
+	}
+	if s.Scope != "" {
+		if s.Transport != MCPHTTP || s.Auth != MCPOAuth {
+			return false
+		}
+		if _, err := NormalizeMCPOAuthScope(s.Scope); err != nil {
+			return false
+		}
 	}
 	tools := map[string]bool{}
 	for _, name := range s.AllowedTools {
@@ -121,6 +132,24 @@ func (s MCPServer) Valid() bool {
 		return err == nil && port > 0
 	}
 	return false
+}
+
+// NormalizeMCPOAuthScope 校验权限名，并规范化空格、顺序和重复项。
+func NormalizeMCPOAuthScope(raw string) (string, error) {
+	if len(raw) > 1024 {
+		return "", ErrInvalid
+	}
+	for _, ch := range raw {
+		if ch < ' ' || ch > '~' || ch == '"' || ch == '\\' {
+			return "", ErrInvalid
+		}
+	}
+	values := strings.Fields(raw)
+	if len(values) == 0 {
+		return "", ErrInvalid
+	}
+	slices.Sort(values)
+	return strings.Join(slices.Compact(values), " "), nil
 }
 
 func ValidMCPEnv(key, value string) bool {

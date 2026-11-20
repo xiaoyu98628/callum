@@ -54,6 +54,9 @@ func (s *Service) StartOAuth(ctx, owner context.Context, id string) (OAuthStatus
 	if err != nil {
 		return OAuthStatus{}, err
 	}
+	if e.cfg.Scope != "" {
+		scope = e.cfg.Scope
+	}
 	uri, listener, err := listenCallback(ctx, e.cfg.RedirectURI)
 	if err != nil {
 		return OAuthStatus{}, ErrCallback
@@ -79,10 +82,16 @@ func (s *Service) StartOAuth(ctx, owner context.Context, id string) (OAuthStatus
 		reg, err := oauthex.RegisterClient(ctx, meta.RegistrationEndpoint, &oauthex.ClientRegistrationMetadata{
 			ClientName: "Callum", ApplicationType: "native", RedirectURIs: []string{uri.String()},
 			TokenEndpointAuthMethod: "none", GrantTypes: grantTypes, ResponseTypes: []string{"code"},
+			Scope: e.cfg.Scope,
 		}, s.oauthHTTP)
 		if err != nil {
-			if e, ok := errors.AsType[*oauthex.ClientRegistrationError](err); ok && e.ErrorCode == "invalid_redirect_uri" {
-				return OAuthStatus{}, ErrCallback
+			if registration, ok := errors.AsType[*oauthex.ClientRegistrationError](err); ok {
+				switch registration.ErrorCode {
+				case "invalid_redirect_uri":
+					return OAuthStatus{}, ErrCallback
+				case "invalid_scope":
+					return OAuthStatus{}, ErrOAuthScope
+				}
 			}
 			return OAuthStatus{}, ErrOAuth
 		}
@@ -177,6 +186,8 @@ func (s *Service) finishOAuth(ctx context.Context, e *entry, flow *authorization
 				callback.err = ErrCallback
 			case q.Get("error") == "access_denied":
 				callback.err = errOAuthDeclined
+			case q.Get("error") == "invalid_scope":
+				callback.err = ErrOAuthScope
 			case q.Has("error"), len(q["code"]) != 1, callback.code == "", len(callback.code) > 4096:
 				callback.err = ErrOAuth
 			}
@@ -251,7 +262,7 @@ func (s *Service) finishOAuthStatus(e *entry, flow *authorization, err error) OA
 func (s *Service) completeOAuth(ctx context.Context, e *entry, flow *authorization, c Credential, redirect, code, verifier string) error {
 	next, err := s.tokenRequest(ctx, c, url.Values{
 		"grant_type": {"authorization_code"}, "code": {code}, "redirect_uri": {redirect}, "code_verifier": {verifier},
-	})
+	}, e.cfg.Scope)
 	if err != nil {
 		return err
 	}
@@ -360,7 +371,7 @@ func wellKnown(origin *url.URL, prefix string, includePath bool) string {
 	return u.String()
 }
 
-func (s *Service) tokenRequest(ctx context.Context, c Credential, form url.Values) (Credential, error) {
+func (s *Service) tokenRequest(ctx context.Context, c Credential, form url.Values, scope string) (Credential, error) {
 	form.Set("client_id", c.ClientID)
 	form.Set("resource", c.Resource)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.TokenURL, strings.NewReader(form.Encode()))
@@ -378,11 +389,12 @@ func (s *Service) tokenRequest(ctx context.Context, c Credential, form url.Value
 	}
 	defer resp.Body.Close()
 	var result struct {
-		Access  string `json:"access_token"`
-		Type    string `json:"token_type"`
-		Refresh string `json:"refresh_token"`
-		Expires int64  `json:"expires_in"`
-		Error   string `json:"error"`
+		Access  string          `json:"access_token"`
+		Type    string          `json:"token_type"`
+		Refresh string          `json:"refresh_token"`
+		Expires int64           `json:"expires_in"`
+		Error   string          `json:"error"`
+		Scope   json.RawMessage `json:"scope"`
 	}
 	dec := json.NewDecoder(limitBody(resp.Body))
 	if dec.Decode(&result) != nil || dec.Decode(new(any)) != io.EOF {
@@ -393,11 +405,23 @@ func (s *Service) tokenRequest(ctx context.Context, c Credential, form url.Value
 		return Credential{}, ErrAuthorize
 	case "invalid_redirect_uri", "redirect_uri_mismatch":
 		return Credential{}, ErrCallback
+	case "invalid_scope":
+		return Credential{}, ErrOAuthScope
 	}
 	if resp.StatusCode != http.StatusOK || result.Error != "" || !strings.EqualFold(result.Type, "Bearer") ||
 		len(result.Access) > 8192 || len(result.Refresh) > 8192 || result.Expires < 0 || result.Expires > 1<<31-1 ||
 		result.Access == "" || strings.ContainsAny(result.Access, "\x00\r\n \t") {
 		return Credential{}, ErrOAuth
+	}
+	// RFC 6749 允许服务商在授予的范围与请求一致时省略 scope。
+	if scope != "" && result.Scope != nil {
+		var granted string
+		if json.Unmarshal(result.Scope, &granted) != nil {
+			return Credential{}, ErrOAuthScopeMismatch
+		}
+		if normalized, err := settings.NormalizeMCPOAuthScope(granted); err != nil || normalized != scope {
+			return Credential{}, ErrOAuthScopeMismatch
+		}
 	}
 	c.Token = result.Access
 	c.Expires = time.Time{}
@@ -437,8 +461,12 @@ func (s *Service) accessToken(ctx context.Context, e *entry) (string, error) {
 	}
 	tokenCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	next, err := s.tokenRequest(tokenCtx, c, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {c.Refresh}})
-	if err != nil && !errors.Is(err, ErrAuthorize) {
+	form := url.Values{"grant_type": {"refresh_token"}, "refresh_token": {c.Refresh}}
+	if e.cfg.Scope != "" {
+		form.Set("scope", e.cfg.Scope)
+	}
+	next, err := s.tokenRequest(tokenCtx, c, form, e.cfg.Scope)
+	if err != nil && !errors.Is(err, ErrAuthorize) && !errors.Is(err, ErrOAuthScope) && !errors.Is(err, ErrOAuthScopeMismatch) {
 		return "", err
 	}
 	s.mu.Lock()
@@ -455,6 +483,10 @@ func (s *Service) accessToken(ctx context.Context, e *entry) (string, error) {
 	}
 	if writeErr := s.repo.SaveCredential(ctx, e.cfg.ID, next); writeErr != nil {
 		return "", writeErr
+	}
+	if err != nil {
+		// 凭据失效后，旧连接和已发现的工具随之失效。
+		e.credentialVersion.Add(1)
 	}
 	return next.Token, err
 }

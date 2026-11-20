@@ -27,6 +27,8 @@ var (
 	ErrCallback           = errors.New("无法使用本机 OAuth 回调，请检查回调地址、端口及服务商的登记要求")
 	ErrClientRegistration = errors.New("服务商需要预注册 OAuth 客户端，请填写客户端 ID")
 	ErrOAuth              = errors.New("MCP 授权失败，请检查服务商的 OAuth 配置")
+	ErrOAuthScope         = errors.New("服务商拒绝了 MCP OAuth 权限范围，请检查 scope 配置")
+	ErrOAuthScopeMismatch = errors.New("服务商授予的 MCP OAuth 权限范围与 scope 配置不一致")
 )
 
 // Credential 只在内部传递，由仓储在写入前加密。
@@ -235,6 +237,9 @@ func (s *Service) Save(ctx context.Context, revision int64, cfg settings.MCPServ
 	if !cfg.Valid() {
 		return "", settings.ErrInvalid
 	}
+	if cfg.Scope != "" {
+		cfg.Scope, _ = settings.NormalizeMCPOAuthScope(cfg.Scope) // Valid 已校验权限范围。
+	}
 	var credential *Credential
 	changed := old != nil && !sameIdentity(old.cfg, cfg)
 	if cfg.Transport == settings.MCPStdio && cfg.Enabled && (old == nil || !old.cfg.Enabled || changed || secrets.Env != nil) && !confirmed {
@@ -374,6 +379,13 @@ func (s *Service) Test(ctx context.Context, id string, confirmed bool, revision 
 	defer e.release()
 	ctx, cancel := entryContext(ctx, e)
 	defer cancel()
+	if e.connection != nil && e.cfg.Scope != "" {
+		// 复用会话时提前刷新，以便把 scope 错误直接返回给设置页。
+		if _, err := s.accessToken(ctx, e); err != nil {
+			closeConnection(e)
+			return nil, err
+		}
+	}
 	c, err := s.connect(ctx, e)
 	if err != nil {
 		return nil, err
@@ -463,6 +475,12 @@ func (s *Service) connect(ctx context.Context, e *entry) (*connection, error) {
 	if err != nil {
 		if errors.Is(err, ErrAuthorize) {
 			return nil, ErrAuthorize
+		}
+		if errors.Is(err, ErrOAuthScope) {
+			return nil, ErrOAuthScope
+		}
+		if errors.Is(err, ErrOAuthScopeMismatch) {
+			return nil, ErrOAuthScopeMismatch
 		}
 		return nil, ErrConnection
 	}

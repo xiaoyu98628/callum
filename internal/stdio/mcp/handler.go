@@ -90,6 +90,7 @@ func publicError(err error) *protocol.Error {
 		{service.ErrAuthorize, 3012}, {service.ErrCallback, 3013}, {service.ErrOAuth, 3014},
 		{service.ErrChanged, 3015}, {credentials.ErrUnavailable, 3016}, {service.ErrConnection, 3017},
 		{service.ErrClientRegistration, 3018},
+		{service.ErrOAuthScope, 3019}, {service.ErrOAuthScopeMismatch, 3020},
 	} {
 		if errors.Is(err, item.kind) {
 			return &protocol.Error{Code: item.code, Message: item.kind.Error()}
