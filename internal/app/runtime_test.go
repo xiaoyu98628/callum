@@ -30,6 +30,35 @@ func newTestRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger)
 	return newRuntime(ctx, cfg, logger, credentialstest.Keyring{})
 }
 
+func TestSessionCloseDoesNotCancelAnotherConnectionsResume(t *testing.T) {
+	runtime, _ := runtimeFixture(t, 1)
+	first := newSessionRuns(t.Context(), runtime.manager)
+	lease, err := runtime.manager.ReserveAgentContext(t.Context(), "run", "conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Abort()
+	if err := first.Register("run"); err != nil {
+		t.Fatal(err)
+	}
+	lease.Abort()
+	second := newSessionRuns(t.Context(), runtime.manager)
+	resumed, err := runtime.manager.ReserveAgentContext(t.Context(), "run", "conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumed.Abort()
+	if err := second.Register("run"); err != nil {
+		t.Fatal(err)
+	}
+	resumed.Start(func(ctx context.Context) { <-ctx.Done() })
+	defer second.Close()
+	first.Close()
+	if resumed.Context().Err() != nil {
+		t.Fatal("旧连接取消了另一连接继续的执行")
+	}
+}
+
 func runtimeFixture(t *testing.T, limit int) (*Runtime, config.Config) {
 	t.Helper()
 	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))

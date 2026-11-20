@@ -7,6 +7,7 @@ import (
 
 	"gorm.io/gorm"
 
+	domain "github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/agent/transcript"
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
@@ -29,7 +30,7 @@ func (r *Repository) Transcript(ctx context.Context, id string, after ...int64) 
 	if len(after) > 0 {
 		floor = after[0]
 	}
-	return r.readTranscript(ctx, id, floor, 8<<20, 256, 0)
+	return r.readTranscript(ctx, id, floor, 8<<20, 256, 0, "")
 }
 
 // ContextTranscript 为压缩准备读取有界的未覆盖轨迹，最终模型请求仍遵守原上限。
@@ -38,15 +39,29 @@ func (r *Repository) ContextTranscript(ctx context.Context, id string, floor int
 	if len(before) > 0 {
 		ceiling = before[0]
 	}
-	return r.readTranscript(ctx, id, floor, 16<<20, 512, ceiling)
+	return r.readTranscript(ctx, id, floor, 16<<20, 512, ceiling, "")
 }
 
-func (r *Repository) readTranscript(ctx context.Context, id string, floor int64, maxBytes int64, maxMessages int, before int64) (map[string][]model.Message, error) {
+// ResumeTranscript 读取当前执行已保存的轨迹，包含已生效的引导和已有的压缩检查点。
+func (r *Repository) ResumeTranscript(ctx context.Context, conversationID, runID string) ([]model.Message, error) {
+	traces, err := r.readTranscript(ctx, conversationID, 0, 16<<20, 512, 0, runID)
+	return traces[runID], err
+}
+
+func resumeSteps(db *gorm.DB) *gorm.DB {
+	return db.Model(&schema.Step{}).Where("type='model_call' AND json_type(input,'$.resume')='object'")
+}
+
+func (r *Repository) readTranscript(ctx context.Context, id string, floor int64, maxBytes int64, maxMessages int, before int64, resumeRunID string) (map[string][]model.Message, error) {
 	base := func() *gorm.DB {
 		q := r.db.WithContext(ctx).Model(&schema.Step{}).
-			Joins("JOIN conversation_runs r ON r.id=conversation_run_steps.run_id AND r.status IN ('completed','failed','cancelled','interrupted')").
+			Joins("JOIN conversation_runs r ON r.id=conversation_run_steps.run_id").
 			Joins("JOIN conversation_messages m ON m.run_id=r.id AND m.role='user'").
 			Where("conversation_run_steps.conversation_id=? AND m.conversation_id=? AND m.sequence>?", id, id, floor)
+		if resumeRunID != "" {
+			return q.Where("r.id=? AND r.status='running'", resumeRunID)
+		}
+		q = q.Where("r.status IN ('completed','failed','cancelled','interrupted')")
 		if before > 0 {
 			q = q.Where("m.sequence<?", before)
 		}
@@ -66,6 +81,9 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 		return nil, model.ErrInvalidResponse
 	}
 	visible := func() *gorm.DB {
+		if resumeRunID != "" {
+			return base()
+		}
 		effects := r.db.WithContext(ctx).Model(&schema.Step{}).Table("conversation_run_steps AS t").Select("1").
 			Where("t.run_id=r.id AND t.type=?", "tool_call").
 			Where("json_extract(t.input,'$.operation_version')=1 AND json_extract(t.output,'$.operation.version')=1").
@@ -74,7 +92,8 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 			Joins("JOIN conversation_run_steps AS next ON next.run_id=u.run_id AND next.sequence=1").
 			Where("u.conversation_id=r.conversation_id AND u.role='user' AND u.sequence>m.sequence").
 			Where("json_extract(next.input,'$.continued_from_run_id')=r.id")
-		return base().Where("(r.status=? OR EXISTS (?) OR EXISTS (?))", "completed", effects, continued)
+		resumed := resumeSteps(r.db.WithContext(ctx)).Select("1").Where("run_id=r.id")
+		return base().Where("(r.status=? OR EXISTS (?) OR EXISTS (?) OR EXISTS (?))", "completed", effects, continued, resumed)
 	}
 	var runIDs []string
 	if err := visible().Distinct("r.id").Limit(maxMessages+1).Pluck("r.id", &runIDs).Error; err != nil {
@@ -82,6 +101,20 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 	}
 	if len(runIDs) > maxMessages {
 		return nil, &model.InputLimitError{Dimension: "历史执行数量", Actual: int64(len(runIDs)), Limit: int64(maxMessages)}
+	}
+	var boundaries []struct {
+		RunID    string
+		Sequence int64
+	}
+	if len(runIDs) > 0 {
+		if err := resumeSteps(r.db.WithContext(ctx)).Where("run_id IN ?", runIDs).
+			Select("run_id,MAX(sequence) AS sequence").Group("run_id").Scan(&boundaries).Error; err != nil {
+			return nil, err
+		}
+	}
+	resumedAt := make(map[string]int64, len(boundaries))
+	for _, row := range boundaries {
+		resumedAt[row.RunID] = row.Sequence
 	}
 	checkpoints, err := r.readCheckpoints(ctx, id, runIDs, maxBytes)
 	if err != nil {
@@ -112,7 +145,11 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 			Joins("JOIN conversation_runs r ON r.id=f.expected_run_id").
 			Joins("JOIN conversation_messages m ON m.run_id=r.id AND m.role='user'").
 			Joins("JOIN conversation_run_steps s ON s.id=f.applied_step_id AND s.run_id=r.id").
-			Where("f.conversation_id=? AND m.conversation_id=? AND m.sequence>? AND f.status='applied' AND r.finished_at IS NOT NULL", id, id, floor)
+			Where("f.conversation_id=? AND m.conversation_id=? AND m.sequence>? AND f.status='applied'", id, id, floor)
+		if resumeRunID != "" {
+			return q.Where("r.id=? AND r.status='running'", resumeRunID)
+		}
+		q = q.Where("r.finished_at IS NOT NULL")
 		if before > 0 {
 			q = q.Where("m.sequence<?", before)
 		}
@@ -186,15 +223,25 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 		for end < len(rows) && rows[end].RunID == rows[start].RunID {
 			end++
 		}
-		messages, err := restoreTranscript(rows[start:end])
+		runID := rows[start].RunID
+		// 之前停止的模型批次可能只有部分工具结果。即使最终成功，也按中断规则恢复这些批次。
+		split := start
+		for split < end && rows[split].Sequence < resumedAt[runID] {
+			split++
+		}
+		stopped, err := restoreTranscript(domain.Cancelled, rows[start:split])
 		if err != nil {
 			return nil, err
 		}
-		count += len(messages)
+		messages, err := restoreTranscript(rows[start].RunStatus, rows[split:end])
+		if err != nil {
+			return nil, err
+		}
+		count += len(stopped) + len(messages)
 		if count > maxMessages {
 			return nil, &model.InputLimitError{Dimension: "历史轨迹消息数量", Actual: int64(count), Limit: int64(maxMessages)}
 		}
-		out[rows[start].RunID] = append(out[rows[start].RunID], messages...)
+		out[runID] = append(append(out[runID], stopped...), messages...)
 		start = end
 	}
 	encoded, err := json.Marshal(out)
@@ -208,17 +255,13 @@ func (r *Repository) readTranscript(ctx context.Context, id string, floor int64,
 }
 
 // restoreTranscript 仅将查询投影转换为业务输入，恢复规则由 transcript 统一实现。
-func restoreTranscript(rows []transcriptRow) ([]model.Message, error) {
+func restoreTranscript(status string, rows []transcriptRow) ([]model.Message, error) {
 	entries := make([]transcript.Entry, len(rows))
 	for i, row := range rows {
 		entries[i] = transcript.Entry{StepID: row.ID, ParentStepID: row.ParentStepID, ToolCallID: row.ToolCallID, Message: json.RawMessage(row.Message)}
 		if row.Operation != nil {
 			entries[i].Operation = json.RawMessage(*row.Operation)
 		}
-	}
-	status := ""
-	if len(rows) > 0 {
-		status = rows[0].RunStatus
 	}
 	return transcript.Restore(status, entries)
 }

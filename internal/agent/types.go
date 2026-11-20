@@ -29,6 +29,7 @@ type Run struct {
 	ErrorKind        *string            `json:"error_kind"`
 	ErrorMessage     *string            `json:"error_message"`
 	CreatedAt        int64              `json:"created_at"`
+	ResumedAt        *int64             `json:"resumed_at,omitempty"`
 	UpdatedAt        int64              `json:"updated_at"`
 	FinishedAt       *int64             `json:"finished_at"`
 }

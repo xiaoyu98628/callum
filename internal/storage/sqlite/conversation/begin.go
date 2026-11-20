@@ -9,9 +9,12 @@ import (
 	"gorm.io/gorm"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/attachment"
 	domain "github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/settings"
+	agentstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/agent"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
 
@@ -57,10 +60,9 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		if err := busy(tx, conv.ID); err != nil {
 			return err
 		}
-		if in.ContinueFromRunID != "" {
-			if err := checkContinueSource(tx, conv.ID, in.ContinueFromRunID); err != nil {
-				return err
-			}
+		if in.Resume {
+			out, err = resumeRun(tx, in, conv, snapshot, now)
+			return err
 		}
 		if in.FollowUp != nil {
 			if err := consumeFollowUp(tx, in); err != nil {
@@ -156,9 +158,6 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 		out.History = append(out.History, message(user))
 		sources = append(sources, map[string]any{"id": user.ID, "fingerprint": history.Fingerprint(user.Content)})
 		fields := map[string]any{"protocol": in.Protocol, "messages": sources}
-		if in.ContinueFromRunID != "" {
-			fields["continued_from_run_id"] = in.ContinueFromRunID
-		}
 		input, err := json.Marshal(fields)
 		if err != nil {
 			return err
@@ -172,7 +171,6 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 			return err
 		}
 		out.Conversation, out.User, out.Assistant = convert(conv), message(user), message(assistant)
-		out.ContinueFromRunID = in.ContinueFromRunID
 		out.Run = agent.Run{ID: in.RunID, ConversationID: conv.ID, ReplacesRunID: replaced, Model: in.Model, Stream: in.Stream, SettingsSnapshot: &snapshot, Status: agent.Running, CreatedAt: now, UpdatedAt: now}
 		out.Step = agent.Step{ID: step.ID, ConversationID: conv.ID, RunID: in.RunID, Sequence: 1, Type: step.Type, Name: step.Name, Status: step.Status, Input: input, Model: &in.Model, CreatedAt: now, UpdatedAt: now}
 		return nil
@@ -180,24 +178,79 @@ func (r *Repository) Begin(ctx context.Context, in domain.Begin) (out domain.Exe
 	return out, err
 }
 
-// checkContinueSource 以当前分支最新用户消息为准，独立压缩不产生新的任务。
-func checkContinueSource(tx *gorm.DB, conversationID, runID string) error {
-	var latest struct{ ID, Status string }
-	err := tx.Table("conversation_messages AS m").
-		Select("r.id, r.status").
-		Joins("JOIN conversation_runs AS r ON r.id=m.run_id AND r.conversation_id=m.conversation_id").
-		Where("m.conversation_id=? AND m.role='user'", conversationID).
-		Order("m.sequence DESC").Take(&latest).Error
+// resumeRun 保留消息和执行的标识、顺序，新增的模型步骤记录本次恢复的审计边界。
+func resumeRun(tx *gorm.DB, in domain.Begin, conv schema.Conversation, snapshot settings.Snapshot, now int64) (out domain.Execution, err error) {
+	var user schema.Message
+	err = tx.Where("conversation_id=? AND role='user'", conv.ID).Order("sequence DESC").Take(&user).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return domain.ErrCannotContinue
+		return out, domain.ErrCannotContinue
 	}
 	if err != nil {
-		return err
+		return out, err
 	}
-	if latest.ID != runID || (latest.Status != agent.Cancelled && latest.Status != agent.Interrupted) {
-		return domain.ErrCannotContinue
+	if user.RunID != in.RunID {
+		return out, domain.ErrCannotContinue
 	}
-	return nil
+	var run schema.Run
+	if err := tx.Where("id=? AND conversation_id=?", in.RunID, conv.ID).Take(&run).Error; err != nil {
+		return out, err
+	}
+	if run.Status != agent.Cancelled && run.Status != agent.Interrupted {
+		return out, domain.ErrCannotContinue
+	}
+	var assistant schema.Message
+	if err := tx.Where("conversation_id=? AND run_id=? AND role='assistant'", conv.ID, run.ID).Take(&assistant).Error; err != nil {
+		return out, err
+	}
+	if assistant.Status != run.Status {
+		return out, domain.ErrCannotContinue
+	}
+	past, current, more, err := loadContextHistory(tx, conv.ID, user.Sequence)
+	if err != nil {
+		return out, err
+	}
+	var sequence int64
+	if err := tx.Model(&schema.Step{}).Where("run_id=?", run.ID).Select("COALESCE(MAX(sequence),0)").Scan(&sequence).Error; err != nil {
+		return out, err
+	}
+	// 状态、权限和模型快照随本次受理更新，上一次执行的数据留在新步骤的来源记录中。
+	input, err := json.Marshal(map[string]any{
+		"purpose": "answer", "protocol": in.Protocol,
+		"resume": map[string]any{"status": run.Status, "finished_at": run.FinishedAt, "model": run.Model,
+			"settings_snapshot": run.SettingsSnapshot, "error_kind": run.ErrorKind, "error_message": run.ErrorMessage},
+	})
+	if err != nil {
+		return out, err
+	}
+	step := schema.Step{ID: in.StepID, ConversationID: conv.ID, RunID: run.ID, Sequence: sequence + 1, Type: "model_call", Name: "继续生成回答", Status: agent.Pending, Input: input, Model: &in.Model, CreatedAt: now, UpdatedAt: now}
+	if err := tx.Omit("Run", "Parent").Create(&step).Error; err != nil {
+		return out, err
+	}
+	run.Model, run.SettingsSnapshot, run.Status, run.UpdatedAt = in.Model, &snapshot, agent.Running, now
+	run.ErrorKind, run.ErrorMessage, run.FinishedAt = nil, nil, nil
+	if err := tx.Select("Model", "SettingsSnapshot", "Status", "UpdatedAt", "ErrorKind", "ErrorMessage", "FinishedAt").Updates(&run).Error; err != nil {
+		return out, err
+	}
+	// 保留中断时的正文，直到新模型返回内容；已发布的交付物仍与原消息关联。
+	artifacts := []model.Block{}
+	for _, block := range assistant.Content {
+		if attachment.ValidPublishedBlock(block, conv.ID, run.ID) {
+			artifacts = append(artifacts, block)
+		}
+	}
+	assistant.Status, assistant.UpdatedAt, assistant.CompletedAt = agent.Running, now, nil
+	if err := tx.Select("Status", "UpdatedAt", "CompletedAt").Updates(&assistant).Error; err != nil {
+		return out, err
+	}
+	conv.Model, conv.UpdatedAt = in.Model, now
+	if err := tx.Select("Model", "UpdatedAt").Updates(&conv).Error; err != nil {
+		return out, err
+	}
+	return domain.Execution{Resumed: true, PublishedArtifacts: artifacts, Conversation: convert(conv), User: message(user), Assistant: message(assistant),
+		Context: current, HistoryMore: more, History: append(past, message(user)),
+		Run:  agentstore.Run(agentstore.RunRow{Run: run, ResumedAt: &now}),
+		Step: agent.Step{ID: step.ID, ConversationID: conv.ID, RunID: run.ID, Sequence: step.Sequence, Type: step.Type, Name: step.Name, Status: step.Status, Input: input, Model: &in.Model, CreatedAt: now, UpdatedAt: now},
+	}, nil
 }
 
 func (r *Repository) ApplyTitle(ctx context.Context, id, userID, fingerprint, title string) (out domain.Conversation, applied bool, err error) {

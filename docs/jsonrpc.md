@@ -392,9 +392,9 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 ### conversation.continue：继续已停止或中断的任务
 
-参数为 `conversation_id`、`run_id` 和可选的 `model_id`。`run_id` 必须属于当前会话最新一条普通用户消息，且状态为 `cancelled` 或 `interrupted`。有活动执行时返回 `1006`，执行已被替换或来源已过期时返回 `1003`。手动压缩单独记录，仍可继续此前停止的对话任务。
+参数为 `conversation_id`、`run_id` 和可选的 `model_id`、`resume_in_place`。客户端可传 `resume_in_place: true` 来避免对旧版服务触发新增消息的继续操作，旧版会拒绝此参数。`run_id` 必须属于当前会话最新一条普通用户消息，且状态为 `cancelled` 或 `interrupted`。有活动执行时返回 `1006`，执行已被替换或来源已过期时返回 `1003`。手动压缩单独记录，仍可继续此前停止的对话任务。
 
-受理结果与 `conversation.send` 相同，返回原会话 ID、新执行 ID 和新消息 ID。新执行在历史中记录「继续任务」，以原需求、已生效的引导和保存的工具轨迹作为上下文，并使用当前设置快照。原执行保留，结果待核实的操作继续受审批约束。受理成功后，原执行绑定的待发队列随新执行一起继续，仍须等待成功终态才可自动发出。
+受理结果与 `conversation.send` 同形，返回原会话、原执行和原用户及回答消息的 ID。受理后发送 `run.resumed`、原回复的 `message.updated` 及新步骤的 `step.created`。新的模型请求使用原需求、已生效的引导、保存的工具轨迹及本次设置快照。已发布的交付物仍在原回复中。结果待核实的操作继续受审批约束，原执行绑定的待发队列在执行成功后才可自动发出。
 
 ### 后续消息
 
@@ -886,6 +886,7 @@ usage 原样保留供应商字段，缺失为 NULL；不把零值或估算值当
 | `conversation.updated` | `conversation_id`、`conversation`，执行内通常还有 `run_id` | 更新会话属性或标题 |
 | `conversation.context_usage.updated` | `conversation_id`、`run_id`、`context_usage` | 更新当前执行数字快照；refresh_required 时重新查询有效历史 |
 | `run.started` | `conversation_id`、`run_id`、`run` | 记录受理执行及设置快照 |
+| `run.resumed` | `conversation_id`、`run_id`、`run` | 原执行回到运行状态，`run.resumed_at` 为最近一次继续的受理时间 |
 | `run.updated` | `conversation_id`、`run_id`、`run` | 更新运行／等待审批状态 |
 | `message.created` | 会话、执行、消息标识及 `message` | 新增用户或回答消息 |
 | `message.delta` | 消息标识、`block_index`、`delta` | 追加对应文本增量 |

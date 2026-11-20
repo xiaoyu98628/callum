@@ -26,6 +26,8 @@ type Repository interface {
 	// 不包含辅助标题、失败的最终回答或重发旧分支，不推断旧记录的操作结果。
 	Transcript(context.Context, string, ...int64) (map[string][]model.Message, error)
 	ContextTranscript(context.Context, string, int64, ...int64) (map[string][]model.Message, error)
+	ResumeTranscript(context.Context, string, string) ([]model.Message, error)
+	RejectedOperationHashes(context.Context, string) ([]string, error)
 	// OperationFacts 独立于摘要读取待核实操作，不允许模型摘要解除安全约束。
 	OperationFacts(context.Context, string) ([]OperationFact, error)
 }

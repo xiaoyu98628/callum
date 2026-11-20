@@ -9,17 +9,17 @@ import (
 )
 
 // sessionRuns 只登记本连接发起的执行；登记发生在受理响应之前。
-// 已完成标识在下次登记时清理，集合大小不超过调度容量，不为每次执行启动等待任务。
+// 连接持有本次受理的租约。使用同一 ID 继续的另一个连接拥有独立租约。
 type sessionRuns struct {
 	ctx     context.Context
 	manager *executor.Manager
 	mu      sync.Mutex
-	ids     map[string]struct{}
+	leases  map[string]*executor.Lease
 	closed  bool
 }
 
 func newSessionRuns(ctx context.Context, manager *executor.Manager) *sessionRuns {
-	return &sessionRuns{ctx: ctx, manager: manager, ids: make(map[string]struct{})}
+	return &sessionRuns{ctx: ctx, manager: manager, leases: make(map[string]*executor.Lease)}
 }
 
 func (s *sessionRuns) Register(id string) error {
@@ -31,27 +31,31 @@ func (s *sessionRuns) Register(id string) error {
 	if err := s.ctx.Err(); err != nil {
 		return err
 	}
-	for previous := range s.ids {
-		if !s.manager.Active(previous) {
-			delete(s.ids, previous)
+	lease := s.manager.ActiveLease(id)
+	if lease == nil {
+		return agent.ErrNotFound
+	}
+	for previous, owned := range s.leases {
+		if s.manager.ActiveLease(previous) != owned {
+			delete(s.leases, previous)
 		}
 	}
-	s.ids[id] = struct{}{}
+	s.leases[id] = lease
 	return nil
 }
 
 func (s *sessionRuns) Close() {
 	s.mu.Lock()
 	s.closed = true
-	ids := make([]string, 0, len(s.ids))
-	for id := range s.ids {
-		ids = append(ids, id)
+	leases := make([]*executor.Lease, 0, len(s.leases))
+	for _, lease := range s.leases {
+		leases = append(leases, lease)
 	}
 	s.mu.Unlock()
-	for _, id := range ids {
-		s.manager.Cancel(id)
+	for _, lease := range leases {
+		lease.Cancel()
 	}
-	for _, id := range ids {
-		s.manager.Wait(id)
+	for _, lease := range leases {
+		lease.Wait()
 	}
 }

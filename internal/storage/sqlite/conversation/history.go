@@ -11,6 +11,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent"
 	domain "github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/model"
+	agentstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/agent"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 )
 
@@ -31,8 +32,8 @@ func (r *Repository) History(ctx context.Context, id, before string, limit int) 
 		if before != "" {
 			query = query.Where("id<?", before)
 		}
-		var rows []schema.Run
-		if err := query.Order("id DESC").Limit(limit + 1).Find(&rows).Error; err != nil {
+		var rows []agentstore.RunRow
+		if err := agentstore.WithResumeTime(query).Order("id DESC").Limit(limit + 1).Find(&rows).Error; err != nil {
 			return err
 		}
 		out.HasMore = len(rows) > limit
@@ -62,7 +63,7 @@ func (r *Repository) History(ctx context.Context, id, before string, limit int) 
 			}
 			bytes += size
 			messageCount += count
-			out.Runs = append(out.Runs, agent.Run{ID: row.ID, ConversationID: row.ConversationID, ReplacesRunID: row.ReplacesRunID, Model: row.Model, Stream: row.Stream, SettingsSnapshot: row.SettingsSnapshot, Status: row.Status, ErrorKind: row.ErrorKind, ErrorMessage: row.ErrorMessage, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt, FinishedAt: row.FinishedAt})
+			out.Runs = append(out.Runs, agentstore.Run(row))
 			out.BeforeRunID = row.ID
 		}
 		if len(out.Runs) == 0 {

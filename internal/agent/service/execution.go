@@ -19,7 +19,7 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	defer e.endSteering(ex.Run.ID)
 	err := e.initialEvents(ex)
 	if err == nil && e.options.Attachments != nil {
-		_, err = e.options.Attachments.Begin(ctx, ex.Conversation.ID, ex.Run.ID)
+		_, err = e.options.Attachments.Begin(ctx, ex.Conversation.ID, ex.Run.ID, ex.PublishedArtifacts...)
 	}
 	e.beginContextUsage(ex, resolved)
 	defer e.endContextUsage(ex)
@@ -30,7 +30,7 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	titleCtx, titleCancel := context.WithCancel(ctx)
 	if err == nil {
 		err = e.loop(ctx, ex, resolved, func() {
-			if text := history.Text(ex.User.Content); ex.User.Sequence == 1 && ex.Conversation.TitleSource == "default" && strings.TrimSpace(text) != "" {
+			if text := history.Text(ex.User.Content); !ex.Resumed && ex.User.Sequence == 1 && ex.Conversation.TitleSource == "default" && strings.TrimSpace(text) != "" {
 				if release, ok, _ := e.manager.TryAcquireCall(titleCtx); ok {
 					titleWG.Go(func() { defer release(); e.title(titleCtx, ex, resolved, text) })
 				}
@@ -40,12 +40,12 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	titleCancel()
 	titleWG.Wait()
 	if e.options.Attachments != nil {
-		if files, ok := e.options.Attachments.Files(ex.Conversation.ID, ex.Run.ID); ok && len(files.Artifacts) > 0 {
+		if files, ok := e.options.Attachments.Files(ex.Conversation.ID, ex.Run.ID); ok && len(files.Artifacts) > len(ex.PublishedArtifacts) {
 			cleanup, cancel := cleanupContext(ctx)
 			message, readErr := e.latestMessage(cleanup, ex)
 			cancel()
 			if readErr == nil {
-				readErr = e.saveAnswer(ctx, ex, append(message.Content, files.Artifacts...), "")
+				readErr = e.saveAnswer(ctx, ex, append(message.Content, files.Artifacts[len(ex.PublishedArtifacts):]...), "")
 			}
 			err = errors.Join(err, readErr)
 		}
@@ -109,6 +109,15 @@ func (e *Engine) initialEvents(ex conversation.Execution) error {
 		if err := e.event(ex, "conversation.updated", "", "", ex.Conversation); err != nil {
 			return err
 		}
+	}
+	if ex.Resumed {
+		if err := e.event(ex, "run.resumed", "", "", ex.Run); err != nil {
+			return err
+		}
+		if err := e.event(ex, "message.updated", "", ex.Assistant.ID, ex.Assistant); err != nil {
+			return err
+		}
+		return e.event(ex, "step.created", ex.Step.ID, "", ex.Step)
 	}
 	if err := e.event(ex, "run.started", "", "", ex.Run); err != nil {
 		return err

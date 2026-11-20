@@ -122,7 +122,11 @@ func (r *Repository) ContextBatch(ctx context.Context, conversationID, runID str
 	if run.ConversationID != conversationID || after < 0 {
 		return nil, domain.ErrInvalid
 	}
-	if run.Status != domain.Running && run.Status != domain.Completed {
+	var resumedAt int64
+	if err := resumeSteps(r.db.WithContext(ctx)).Where("run_id=?", runID).Select("COALESCE(MAX(sequence),0)").Scan(&resumedAt).Error; err != nil {
+		return nil, err
+	}
+	if run.Status != domain.Running && run.Status != domain.Completed && resumedAt == 0 {
 		var effects int64
 		if err := r.db.WithContext(ctx).Model(&schema.Step{}).Where("run_id=? AND type='tool_call' AND json_extract(input,'$.operation_version')=1 AND json_extract(output,'$.operation.outcome') IN ('applied','partially_applied','unknown')", runID).Count(&effects).Error; err != nil {
 			return nil, err
@@ -134,6 +138,7 @@ func (r *Repository) ContextBatch(ctx context.Context, conversationID, runID str
 	var parent checkpointRow
 	err = r.db.WithContext(ctx).Model(&schema.Step{}).Select(checkpointColumns).
 		Where("run_id=? AND sequence>? AND type='model_call' AND status='completed' AND COALESCE(json_extract(input,'$.purpose'),'') IN ('','answer') AND json_type(output,'$.context_message')='object'", runID, after).
+		Where("sequence>=? OR json_array_length(output,'$.context_message.tool_calls')>0", resumedAt).
 		Order("sequence").Take(&parent).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return nil, nil
@@ -141,12 +146,14 @@ func (r *Repository) ContextBatch(ctx context.Context, conversationID, runID str
 	if err != nil {
 		return nil, err
 	}
+	stopped := parent.Sequence < resumedAt
+	live := run.Status == domain.Running && !stopped
 	q := r.db.WithContext(ctx).Model(&schema.Step{}).Where("run_id=? AND parent_step_id=? AND type IN ('tool_call','user_input')", runID, parent.ID)
 	var pending int64
 	if err := q.Session(&gorm.Session{}).Where("status IN ('pending','running','awaiting_approval','awaiting_user_input')").Count(&pending).Error; err != nil {
 		return nil, err
 	}
-	if pending > 0 && run.Status == domain.Running {
+	if pending > 0 && live {
 		return nil, nil
 	}
 	var bounds struct{ Size, Count int64 }
@@ -171,7 +178,9 @@ func (r *Repository) ContextBatch(ctx context.Context, conversationID, runID str
 	}
 	digest := sha256.Sum256(raw)
 	status := run.Status
-	if status == domain.Running {
+	if stopped {
+		status = domain.Cancelled
+	} else if live {
 		status = domain.Completed
 	}
 	projected := make([]transcriptRow, 0, len(rows))
@@ -185,14 +194,14 @@ func (r *Repository) ContextBatch(ctx context.Context, conversationID, runID str
 			}
 		}
 		if row.Message == "" {
-			if run.Status == domain.Running {
+			if live {
 				return nil, nil
 			}
 			continue
 		}
 		projected = append(projected, transcriptRow{ID: row.ID, RunID: row.RunID, RunStatus: status, ParentStepID: row.ParentStepID, ToolCallID: row.ToolCallID, Message: row.Message, Operation: row.Operation})
 	}
-	if run.Status == domain.Running {
+	if live {
 		var message model.Message
 		if json.Unmarshal([]byte(parent.Message), &message) != nil {
 			return nil, model.ErrInvalidResponse
@@ -209,7 +218,7 @@ func (r *Repository) ContextBatch(ctx context.Context, conversationID, runID str
 			}
 		}
 	}
-	messages, err := restoreTranscript(projected)
+	messages, err := restoreTranscript(status, projected)
 	if err != nil {
 		return nil, err
 	}

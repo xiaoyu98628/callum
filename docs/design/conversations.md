@@ -102,9 +102,9 @@ context_compression 编排下建立 model_call 子步骤保存生成摘要的模
 
 ## 继续任务
 
-继续操作在受理事务中核对最新普通用户消息所属的执行及终态，允许继续 `cancelled` 和 `interrupted` 的任务。受理在同一会话追加新消息及新执行，首个模型步骤的 `input.continued_from_run_id` 保存来源。原执行、已生效的引导和确认保存的工具结果保持可查。继续后的历史组装可恢复原任务的只读工具结果，沿用工具调用配对及上下文边界。
+继续操作在受理事务中核对最新普通用户消息所属的执行及终态，允许继续 `cancelled` 和 `interrupted` 的任务。原执行和回答恢复至运行状态，新模型步骤沿用该执行的递增序号，并在 `input.resume` 保留上次终态及模型和设置快照。新的调用恢复原需求、已生效的引导、工具结果和压缩检查点。上次已完成的步骤及已发布的交付物保留，未完成的回答正文由本次模型生成替换。历史中已有的 `input.continued_from_run_id` 记录仍按旧规则读取。
 
-原任务关联的待发队列在受理事务中改绑到新执行，成功终态到达后按既有顺序续发。已取出的草稿仍需显式提交。应用重启后由用户发起继续，结果待核实的操作沿用既有审批规则。
+原任务关联的待发队列仍在原执行成功后按既有顺序续发。已取出的草稿仍需显式提交。应用重启后由用户发起继续，结果待核实的操作沿用既有审批规则。
 
 ## 编辑重发
 
@@ -119,7 +119,7 @@ context_compression 编排下建立 model_call 子步骤保存生成摘要的模
 事件名位于 method，params 按事件携带 conversation_id、run_id、step_id、message_id、approval_id。
 message.delta 使用 block_index 和带 type 的 delta，标题、工具、摘要输出不混入回答正文。
 
-当前事件：conversation.created、conversation.updated、run.started、run.updated、run.completed、run.failed、run.cancelled、message.created、message.delta、message.updated、step.created、step.updated、tool.output、approval.requested、approval.updated、user_input.requested、user_input.updated。
+当前事件包含 `conversation.created`、`conversation.updated`、`run.started`、`run.resumed`、`run.updated`、`run.completed`、`run.failed`、`run.cancelled`、`message.created`、`message.delta`、`message.updated`、`step.created`、`step.updated`、`tool.output`、`approval.requested`、`approval.updated`、`user_input.requested` 和 `user_input.updated`。
 
 压缩使用 type=context_compression 的步骤事件。步骤父子关系支持折叠、展开，折叠偏好由客户端保存。
 状态落库后通知；内容增量有界传输，终态前保存最终或部分结果。重新打开查询数据库状态，不承诺逐事件重放。

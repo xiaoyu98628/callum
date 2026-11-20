@@ -35,22 +35,22 @@ func notFound(err error) error {
 }
 
 func (r *Repository) Get(ctx context.Context, id string) (domain.Run, error) {
-	var row schema.Run
-	err := r.db.WithContext(ctx).Where("id = ?", id).Take(&row).Error
-	return execution(row), notFound(err)
+	var row RunRow
+	err := WithResumeTime(r.db.WithContext(ctx)).Where("id = ?", id).Take(&row).Error
+	return Run(row), notFound(err)
 }
 
 func (r *Repository) List(ctx context.Context, id string, limit, offset int) ([]domain.Run, error) {
 	if limit < 1 || limit > 200 || offset < 0 {
 		return nil, domain.ErrInvalid
 	}
-	var rows []schema.Run
-	if err := r.db.WithContext(ctx).Where("conversation_id = ?", id).Order("created_at DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+	var rows []RunRow
+	if err := WithResumeTime(r.db.WithContext(ctx)).Where("conversation_id = ?", id).Order("created_at DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]domain.Run, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, execution(row))
+		out = append(out, Run(row))
 	}
 	return out, nil
 }
