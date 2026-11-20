@@ -11,6 +11,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -21,6 +22,13 @@ import (
 )
 
 const maxToolsPerServer = 128
+const maxDiscoveryWorkers = 4
+
+// toolCatalog 发布后只读，可以在其他调用占用连接时读取。
+type toolCatalog struct {
+	byName map[string]*remoteTool
+	public []ToolInfo
+}
 
 type ToolInfo struct {
 	Name        string `json:"name"`
@@ -112,61 +120,77 @@ func (s *Service) ToolsSnapshot(ctx context.Context, connect bool, revision int6
 		}
 	}
 	s.mu.Unlock()
+	if ctx.Err() != nil {
+		return nil
+	}
+	// 先识别可用目录，再用有界并发发现其余服务。等待某个服务不占用缓存读取。
+	pending := make(chan *entry, len(entries))
+	for _, e := range entries {
+		if connect && cachedCatalog(e) == nil {
+			pending <- e
+		}
+	}
+	close(pending)
+	var workers sync.WaitGroup
+	for range min(maxDiscoveryWorkers, len(pending)) {
+		workers.Go(func() {
+			for e := range pending {
+				if ctx.Err() != nil {
+					return
+				}
+				s.ensureToolCatalog(ctx, e)
+			}
+		})
+	}
+	workers.Wait()
+
+	s.mu.Lock()
+	current := !s.closed && s.revision == revision
+	s.mu.Unlock()
+	if !current {
+		return nil
+	}
 	var out []tool.Tool
 	for _, e := range entries {
-		if ctx.Err() != nil {
-			break
-		}
-		if connect {
-			if e.acquire(ctx) != nil {
-				continue
-			}
-		} else {
-			select {
-			case e.lock <- struct{}{}:
-			default:
-				continue
+		if catalog := cachedCatalog(e); catalog != nil {
+			for _, name := range e.cfg.AllowedTools {
+				if t := catalog.byName[name]; t != nil {
+					out = append(out, t)
+				}
 			}
 		}
-		out = append(out, s.toolsForEntry(ctx, e, connect)...)
-		e.release()
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].Definition().Name < out[b].Definition().Name })
 	return out
 }
 
-func (s *Service) toolsForEntry(ctx context.Context, e *entry, connect bool) []tool.Tool {
-	if e.ctx.Err() != nil {
-		return nil
-	}
-	c := e.connection
-	if connect {
-		ctx, cancel := entryContext(ctx, e)
-		defer cancel()
-		var err error
-		if c, err = s.connect(ctx, e); err != nil {
-			return nil
-		}
-		if c.tools == nil || c.dirty.Load() {
-			if s.discover(ctx, e, c) != nil {
-				closeConnection(e)
-				return nil
-			}
+func cachedCatalog(e *entry) *toolCatalog {
+	if c := e.publicConnection.Load(); c != nil {
+		if catalog := c.catalog.Load(); !c.dirty.Load() && e.ctx.Err() == nil && c.credentialVersion == e.credentialVersion.Load() {
+			return catalog
 		}
 	}
-	if c == nil || c.dirty.Load() {
-		return nil
+	return nil
+}
+
+func (s *Service) ensureToolCatalog(ctx context.Context, e *entry) {
+	if e.acquire(ctx) != nil {
+		return
 	}
-	var out []tool.Tool
-	for _, name := range e.cfg.AllowedTools {
-		if t := c.tools[name]; t != nil {
-			out = append(out, t)
-		}
+	defer e.release()
+	if ctx.Err() != nil || cachedCatalog(e) != nil {
+		return
 	}
-	return out
+	ctx, cancel := entryContext(ctx, e)
+	defer cancel()
+	c, err := s.connect(ctx, e)
+	if err == nil && s.discover(ctx, e, c) != nil {
+		closeConnection(e)
+	}
 }
 
 func (s *Service) discover(ctx context.Context, e *entry, c *connection) error {
+	c.catalog.Store(nil)
 	c.dirty.Store(false)
 	next := map[string]*remoteTool{}
 	if cap := c.session.InitializeResult().Capabilities; cap == nil || cap.Tools == nil {
@@ -198,15 +222,12 @@ func (s *Service) discover(ctx context.Context, e *entry, c *connection) error {
 }
 
 func publishTools(c *connection, next map[string]*remoteTool) {
-	c.tools = next
 	tools := make([]ToolInfo, 0, len(next))
 	for _, t := range next {
 		tools = append(tools, t.info())
 	}
 	slices.SortFunc(tools, func(a, b ToolInfo) int { return strings.Compare(a.Name, b.Name) })
-	if !c.dirty.Load() {
-		c.publicTools.Store(&tools)
-	}
+	c.catalog.Store(&toolCatalog{byName: next, public: tools})
 }
 
 func (s *Service) adapt(e *entry, r *sdk.Tool) *remoteTool {
@@ -262,7 +283,7 @@ func (s *Service) call(ctx context.Context, t *remoteTool, args json.RawMessage)
 		closeConnection(e)
 		return notApplied, tool.ErrUnavailable
 	}
-	current := c.tools[t.name]
+	current := c.catalog.Load().byName[t.name]
 	if current == nil || current.version != t.version || t.credentialVersion != c.credentialVersion || c.credentialVersion != e.credentialVersion.Load() || c.dirty.Load() || ctx.Err() != nil {
 		return notApplied, tool.ErrDenied
 	}

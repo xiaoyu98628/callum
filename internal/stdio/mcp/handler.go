@@ -25,16 +25,19 @@ func (h *Handler) Handle(ctx, owner context.Context, req protocol.Request) (any,
 		result, err = h.service.List(ctx)
 	case "mcp.save":
 		var in struct {
-			Revision  int64               `json:"revision"`
-			Server    settings.MCPServer  `json:"server"`
-			Secrets   service.SecretInput `json:"secrets"`
-			Confirmed bool                `json:"confirmed"`
+			Revision   int64               `json:"revision"`
+			Server     settings.MCPServer  `json:"server"`
+			Secrets    service.SecretInput `json:"secrets"`
+			Confirmed  bool                `json:"confirmed"`
+			ClearScope bool                `json:"clear_scope,omitempty"`
 		}
 		if e := protocol.DecodeParams(req.Params, &in); e != nil {
 			return nil, e
 		}
 		var id string
-		id, err = h.service.Save(ctx, in.Revision, in.Server, in.Secrets, in.Confirmed)
+		id, err = h.service.Save(ctx, in.Revision, in.Server, in.Secrets, service.SaveOptions{
+			Confirmed: in.Confirmed, ClearScope: in.ClearScope,
+		})
 		result = map[string]string{"id": id}
 	case "mcp.delete":
 		var in struct {

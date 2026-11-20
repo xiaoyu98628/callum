@@ -58,6 +58,12 @@ type SecretInput struct {
 	Env   *map[string]string `json:"env,omitempty"`
 }
 
+// SaveOptions 区分旧客户端省略 scope 与明确恢复自动发现。
+type SaveOptions struct {
+	Confirmed  bool
+	ClearScope bool
+}
+
 type View struct {
 	settings.MCPServer
 	Connected     bool       `json:"connected"`
@@ -67,15 +73,15 @@ type View struct {
 	Tools         []ToolInfo `json:"tools"`
 }
 type Catalog struct {
-	Revision int64  `json:"revision"`
-	Servers  []View `json:"servers"`
+	Revision    int64  `json:"revision"`
+	Servers     []View `json:"servers"`
+	ScopeUpdate bool   `json:"scope_update"`
 }
 
 type connection struct {
-	publicTools       atomic.Pointer[[]ToolInfo]
+	catalog           atomic.Pointer[toolCatalog]
 	credentialVersion uint64
 	session           *sdk.ClientSession
-	tools             map[string]*remoteTool
 	dirty             atomic.Bool
 }
 
@@ -190,7 +196,7 @@ func (s *Service) List(ctx context.Context) (Catalog, error) {
 		entries = append(entries, s.entries[cfg.ID])
 	}
 	s.mu.Unlock()
-	out := Catalog{Revision: rev, Servers: make([]View, 0, len(entries))}
+	out := Catalog{Revision: rev, Servers: make([]View, 0, len(entries)), ScopeUpdate: true}
 	for _, e := range entries {
 		secret, err := s.repo.Credential(ctx, e.cfg.ID)
 		if err != nil {
@@ -203,8 +209,8 @@ func (s *Service) List(ctx context.Context) (Catalog, error) {
 		view.SecretEnvKeys = append(view.SecretEnvKeys, slices.Sorted(maps.Keys(secret.Env))...)
 		if conn := e.publicConnection.Load(); conn != nil && e.ctx.Err() == nil && conn.credentialVersion == e.credentialVersion.Load() {
 			view.Connected = true
-			if tools := conn.publicTools.Load(); tools != nil && !conn.dirty.Load() {
-				view.Tools = *tools
+			if catalog := conn.catalog.Load(); catalog != nil && !conn.dirty.Load() {
+				view.Tools = slices.Clone(catalog.public)
 			}
 		}
 		out.Servers = append(out.Servers, view)
@@ -212,7 +218,7 @@ func (s *Service) List(ctx context.Context) (Catalog, error) {
 	return out, nil
 }
 
-func (s *Service) Save(ctx context.Context, revision int64, cfg settings.MCPServer, secrets SecretInput, confirmed bool) (string, error) {
+func (s *Service) Save(ctx context.Context, revision int64, cfg settings.MCPServer, secrets SecretInput, options SaveOptions) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -234,6 +240,16 @@ func (s *Service) Save(ctx context.Context, revision int64, cfg settings.MCPServ
 	if cfg.AllowedTools == nil {
 		cfg.AllowedTools = []string{}
 	}
+	if options.ClearScope && (cfg.Scope != "" || cfg.Transport != settings.MCPHTTP || cfg.Auth != settings.MCPOAuth) {
+		return "", settings.ErrInvalid
+	}
+	if !options.ClearScope && cfg.Scope == "" && old != nil && old.cfg.Scope != "" {
+		previous := old.cfg
+		previous.Scope = ""
+		if sameIdentity(previous, cfg) {
+			cfg.Scope = old.cfg.Scope
+		}
+	}
 	if !cfg.Valid() {
 		return "", settings.ErrInvalid
 	}
@@ -242,7 +258,7 @@ func (s *Service) Save(ctx context.Context, revision int64, cfg settings.MCPServ
 	}
 	var credential *Credential
 	changed := old != nil && !sameIdentity(old.cfg, cfg)
-	if cfg.Transport == settings.MCPStdio && cfg.Enabled && (old == nil || !old.cfg.Enabled || changed || secrets.Env != nil) && !confirmed {
+	if cfg.Transport == settings.MCPStdio && cfg.Enabled && (old == nil || !old.cfg.Enabled || changed || secrets.Env != nil) && !options.Confirmed {
 		return "", settings.ErrInvalid
 	}
 	if changed {
@@ -394,11 +410,7 @@ func (s *Service) Test(ctx context.Context, id string, confirmed bool, revision 
 		closeConnection(e)
 		return nil, err
 	}
-	out := make([]ToolInfo, 0, len(c.tools))
-	for _, t := range c.tools {
-		out = append(out, t.info())
-	}
-	slices.SortFunc(out, func(a, b ToolInfo) int { return strings.Compare(a.Name, b.Name) })
+	out := slices.Clone(c.catalog.Load().public)
 	if !e.cfg.Enabled {
 		closeConnection(e)
 	}

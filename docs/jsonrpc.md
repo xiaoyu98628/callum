@@ -1,6 +1,6 @@
 # JSON-RPC 通信与手工测试
 
-本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `4`，两者含义不同。
+本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `8`，两者含义不同。
 
 运行参数和开发检查见 [运行与开发](development.md)，配置空值和持久化规则见 [存储与模型配置](storage.md)，工具策略见 [Agent 工具与审批](tools-and-approvals.md)，Token 估算及压缩规则见 [上下文统计与压缩](context-compaction.md)。
 
@@ -492,7 +492,7 @@ result 包含 conversation_id（新对话为空）、model_id、可选 run_id、
 
 可选 `model_id` 指定摘要模型，省略时使用会话当前模型；不改变会话的模型选择。关闭自动压缩后仍可手动调用；需要生成摘要时仍必须具备有效 Token 预算，没有较早完整轮次的无操作请求不调用模型。受理后保持 stdin 打开，通过 `run.cancel` 取消；同一会话已有执行时拒绝并发受理。使用 `run.started`、`step.created`、`step.updated` 及执行终态通知，不创建新的用户或回答消息，也不把摘要发送为 `message.delta`。没有较早完整轮次时正常完成，编排步骤 output 为 `{"compressed":false,"reason":"no_earlier_complete_turns"}`。
 
-执行内摘要通过现有步骤接口查询，无新增 JSON-RPC 方法。`context_compression.output.checkpoint` 的版本 `version:1` 包含 `id`、`conversation_id`、`source_run_id`、可选 `base_checkpoint_id`、`after_sequence`、`through_sequence`、`sources`（`step_id`、`through_sequence`、`fingerprint`）、`summary` 和 `size_stats`。摘要子模型步骤的 input 使用 `generated_checkpoint_id` 关联；普通会话摘要仍使用 `generated_context_version_id`。只有完成结构、容量、字节与 Token 缩减及来源事务校验的检查点才参与恢复；原始消息、步骤、操作事实及 usage 保留。`input_limit` 的 error_message 区分消息数量、上下文字节和实际请求字节，包含当前值及上限；错误种类保持兼容。
+执行内摘要通过现有步骤接口查询，无新增 JSON-RPC 方法。`context_compression.output.checkpoint` 的版本 `version:2` 包含 `id`、`conversation_id`、`source_run_id`、可选 `base_checkpoint_id`、`after_sequence`、`through_sequence`、`sources`（`step_id`、`through_sequence`、`fingerprint`）、`summary` 和 `size_stats`。摘要子模型步骤的 input 使用 `generated_checkpoint_id` 关联；普通会话摘要仍使用 `generated_context_version_id`。只有完成结构、容量、字节与 Token 缩减及来源事务校验的检查点才参与恢复；原始消息、步骤、操作事实及 usage 保留。`input_limit` 的 error_message 区分消息数量、上下文字节和实际请求字节，包含当前值及上限；错误种类保持兼容。
 
 压缩不设固定批次上限：手动压缩直到没有可压缩的较早轮次，自动压缩直到请求回到预算内。每批必须推进来源范围并减少摘要 Token 估算；循环检查取消，无法满足预算或资源边界时明确失败。
 
@@ -1100,8 +1100,8 @@ Chat Completions 适配器识别 `reasoning_content`，缺失或 null 表示未�
 
 | 方法 | 参数 | 返回 |
 | --- | --- | --- |
-| `mcp.list` | 空对象 | `revision` 和服务列表。含连接状态、授权状态、到期时间、加密环境变量键名及已发现工具。 |
-| `mcp.save` | `revision`、`server`、可选 `secrets` 和 `confirmed` | `id`。创建时留空 `server.id`。服务配置整体校验，更新以 revision 校验冲突。|
+| `mcp.list` | 空对象 | `revision`、能力标识 `scope_update` 和服务列表。含连接状态、授权状态、到期时间、加密环境变量键名及已发现工具。 |
+| `mcp.save` | `revision`、`server`、可选 `secrets`、`confirmed` 和 `clear_scope` | `id`。创建时留空 `server.id`。服务配置整体校验，更新以 revision 校验冲突。|
 | `mcp.delete` | `id`、`revision` | `true`。删除服务记录并清除凭据。 |
 | `mcp.test` | `id`，本地 stdio 另需 `revision`、`confirmed` | 工具列表，每项含 `name` 和 `description`。 |
 | `mcp.oauth.start` | `id` | `status = pending` 和仅提供给桌面主进程的授权 `url`。 |
@@ -1112,4 +1112,4 @@ Chat Completions 适配器识别 `reasoning_content`，缺失或 null 表示未�
 
 Go 在 `127.0.0.1` 启动临时 OAuth 回调，使用 PKCE S256，默认端口由系统分配。支持预注册的公共 OAuth 客户端和支持动态注册的授权服务。配置固定回调时，按登记路径和端口绑定。授权码交换和刷新都由 Go 发起。浏览器回调页等待换取令牌和保存凭据的最终结果，展示授权成功、取消或失败。页面加载时清理地址栏的回调参数，随后临时监听关闭。服务商拒绝本机回调时，可在服务商支持的情况下配置手填访问令牌。仅允许公网回调的 OAuth 对接需另行设计。常见 MCP 协议错误码为 3010（配置版本冲突）、3012（需要授权）、3013（本机回调）、3014（授权失败）、3015（配置已变化）、3017（连接失败）和 3018（需要预注册客户端）。
 
-`scope` 只适用于远程 OAuth 服务，是以空格分隔的权限名称字符串。显式配置时，动态注册、浏览器授权和令牌刷新均使用该范围。省略时从认证 challenge 或资源元数据发现初始授权范围，刷新沿用原授权。服务商拒绝请求范围时返回 3019。服务商在令牌响应中明确返回的范围与配置不一致时拒绝该令牌并返回 3020。回调已开始时，对应原因通过授权失败状态及浏览器结果页展示。[OAuth 2.0 允许在授予范围与请求一致时省略响应的 `scope`](https://www.rfc-editor.org/rfc/rfc6749.html#section-5.1)。
+`scope` 只适用于远程 OAuth 服务，是以空格分隔的权限名称字符串。显式配置时，动态注册、浏览器授权和令牌刷新均使用该范围。未配置显式范围时，从认证 challenge 或资源元数据发现初始授权范围，刷新沿用原授权。更新连接身份相同的 OAuth 服务时，省略 `server.scope` 保留原范围。服务返回 `scope_update: true` 时，保存请求可在省略 `server.scope` 的同时传入 `clear_scope: true`，明确恢复自动发现。改变或清除原范围会清除凭据和工具选择，需要重新授权。服务商拒绝请求范围时返回 3019。服务商在令牌响应中明确返回的范围与配置不一致时拒绝该令牌并返回 3020。回调已开始时，对应原因通过授权失败状态及浏览器结果页展示。[OAuth 2.0 允许在授予范围与请求一致时省略响应的 `scope`](https://www.rfc-editor.org/rfc/rfc6749.html#section-5.1)。

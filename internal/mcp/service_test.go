@@ -184,7 +184,7 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 			t.Fatal(err)
 		}
 		cfg.RedirectURI = "http://" + listener.Addr().String() + "/return"
-		id, err := service.Save(ctx, 1, cfg, mcp.SecretInput{}, false)
+		id, err := service.Save(ctx, 1, cfg, mcp.SecretInput{}, mcp.SaveOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -200,7 +200,7 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 	if fixed {
 		rev++
 	}
-	id, err := service.Save(ctx, rev, cfg, mcp.SecretInput{}, false)
+	id, err := service.Save(ctx, rev, cfg, mcp.SecretInput{}, mcp.SaveOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,12 +376,20 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 			t.Fatal("拒绝范围不符的授权后，已保存的凭据应继续有效")
 		}
 		cfg.ID, cfg.Scope = id, " read   read "
-		if _, err := service.Save(ctx, rev+1, cfg, mcp.SecretInput{}, false); err != nil {
+		if _, err := service.Save(ctx, rev+1, cfg, mcp.SecretInput{}, mcp.SaveOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		rev++
 		if catalog, err := service.List(ctx); err != nil || !catalog.Servers[0].Authorized || catalog.Servers[0].Scope != "read" || len(catalog.Servers[0].AllowedTools) != 1 {
 			t.Fatalf("规范化后的权限相同，应保留凭据和工具选择: %v", err)
+		}
+		cfg.Scope = "" // 旧客户端更新同一服务时省略 scope。
+		if _, err := service.Save(ctx, rev+1, cfg, mcp.SecretInput{}, mcp.SaveOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		rev++
+		if catalog, err := service.List(ctx); err != nil || !catalog.ScopeUpdate || !catalog.Servers[0].Authorized || catalog.Servers[0].Scope != "read" || len(catalog.Servers[0].AllowedTools) != 1 {
+			t.Fatalf("旧客户端省略 scope 应保留范围、凭据和工具选择: %v", err)
 		}
 		if _, err := service.Test(ctx, id, false, rev+1); err != nil {
 			t.Fatal(err)
@@ -402,12 +410,23 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 			t.Fatal(err)
 		}
 		cfg.Scope = "read profile"
-		if _, err := service.Save(ctx, rev+1, cfg, mcp.SecretInput{}, false); err != nil {
+		if _, err := service.Save(ctx, rev+1, cfg, mcp.SecretInput{}, mcp.SaveOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		rev++
 		if catalog, err := service.List(ctx); err != nil || catalog.Servers[0].Authorized || catalog.Servers[0].Scope != "profile read" || len(catalog.Servers[0].AllowedTools) != 0 {
 			t.Fatalf("权限范围变更后应清除原凭据和工具选择: %v", err)
+		}
+		if err := repo.SaveCredential(ctx, id, refreshed); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Scope = ""
+		if _, err := service.Save(ctx, rev+1, cfg, mcp.SecretInput{}, mcp.SaveOptions{ClearScope: true}); err != nil {
+			t.Fatal(err)
+		}
+		rev++
+		if catalog, err := service.List(ctx); err != nil || catalog.Servers[0].Authorized || catalog.Servers[0].Scope != "" || len(catalog.Servers[0].AllowedTools) != 0 {
+			t.Fatalf("显式清除 scope 应恢复自动发现并清除旧授权: %v", err)
 		}
 	}
 	if err := service.Delete(ctx, rev+1, id); err != nil {
@@ -419,7 +438,7 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 	}
 	if fixed {
 		cfg.ID, cfg.Auth, cfg.RedirectURI, cfg.ClientID = "", settings.MCPToken, "", ""
-		manualID, err := service.Save(ctx, rev+2, cfg, mcp.SecretInput{Token: new(access)}, false)
+		manualID, err := service.Save(ctx, rev+2, cfg, mcp.SecretInput{Token: new(access)}, mcp.SaveOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}

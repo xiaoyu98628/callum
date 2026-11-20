@@ -62,7 +62,7 @@ func TestGeneralSettingsSeedExistingDatabase(t *testing.T) {
 	if err := pool.QueryRowContext(ctx, "SELECT value, revision FROM app_settings WHERE key=?", settings.GeneralKey).Scan(&value, &revision); err != nil {
 		t.Fatal(err)
 	}
-	if version != 7 || revision != 1 || value != `{"follow_up_mode":"queue"}` {
+	if version != 8 || revision != 1 || value != `{"follow_up_mode":"queue"}` {
 		t.Fatalf("既有数据库常规设置补齐异常: %d, %d, %s", version, revision, value)
 	}
 }
