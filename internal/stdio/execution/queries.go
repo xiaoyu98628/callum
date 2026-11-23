@@ -2,6 +2,7 @@ package execution
 
 import (
 	"context"
+	"encoding/json"
 	"unicode/utf8"
 
 	"github.com/xiaoyu98628/callum/internal/model/provider"
@@ -112,6 +113,18 @@ func (h *Handler) Query(ctx context.Context, req protocol.Request) (any, *protoc
 			raw = row.Definition
 		case "input":
 			raw = row.Input
+		case "reasoning":
+			if row.Type == "model_call" && len(row.Output) > 0 {
+				var output struct {
+					Reasoning *string `json:"reasoning"`
+				}
+				if err := json.Unmarshal(row.Output, &output); err != nil {
+					return nil, &protocol.Error{Code: -32603, Message: "思考内容读取失败"}
+				}
+				if output.Reasoning != nil {
+					raw = []byte(*output.Reasoning)
+				}
+			}
 		default:
 			return nil, protocol.InvalidParams()
 		}

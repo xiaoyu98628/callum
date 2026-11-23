@@ -796,7 +796,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 {"jsonrpc":"2.0","id":"step-definition","method":"step.data","params":{"step_id":"<step_id>","field":"definition","offset":0,"limit":65536}}
 ```
 
-只支持 `input`、`output`、`usage`、`definition` 四个字段。`offset` 是字节偏移，必须非负且位于合法 UTF-8 边界；`limit` 默认 65536，范围 4 至 65536。
+`field` 支持 `input`、`output`、`usage`、`definition` 和 `reasoning`。`reasoning` 返回模型步骤独立保存的思考正文，片段拼接后直接作为 UTF-8 文本使用，无须读取或解析完整的 `output`。没有思考字段时返回 `present:false`。`offset` 是字节偏移，必须非负且位于合法 UTF-8 边界；`limit` 默认 65536，范围 4 至 65536。
 
 usage 片段响应示例：
 

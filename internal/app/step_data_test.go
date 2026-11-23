@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-	"github.com/xiaoyu98628/callum/internal/config"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,16 +9,23 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/xiaoyu98628/callum/internal/config"
 )
 
 func TestLargeModelResultUsesBoundedUTF8Fragments(t *testing.T) {
 	// 各用例独占临时目录、运行时及受控端点，可与其他应用回归并行。
 	t.Parallel()
-	large := strings.Repeat("中", 3<<20)
+	large := strings.Repeat("源", 3<<20)
+	reasoning := strings.Repeat("a", (64<<10)-2) + "🙂" + strings.Repeat("中", 1024)
+	reasoningJSON, err := json.Marshal(reasoning)
+	if err != nil {
+		t.Fatal(err)
+	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		// 原始结果超过单条通信限制，但模型正文很短；步骤通知必须只发送元数据。
-		if _, err := io.WriteString(w, `{"provider_extra":"`+large+`","choices":[{"index":0,"message":{"role":"assistant","content":"完成"},"finish_reason":"stop"}]}`); err != nil && r.Context().Err() == nil {
+		if _, err := io.WriteString(w, `{"provider_extra":"`+large+`","choices":[{"index":0,"message":{"role":"assistant","content":"完成","reasoning_content":`+string(reasoningJSON)+`},"finish_reason":"stop"}]}`); err != nil && r.Context().Err() == nil {
 			t.Error(err)
 		}
 	}))
@@ -49,21 +55,49 @@ func TestLargeModelResultUsesBoundedUTF8Fragments(t *testing.T) {
 	if chunk.TotalBytes <= 8<<20 || chunk.Done || len(chunk.Fragment) > 64<<10 || !utf8.ValidString(chunk.Fragment) {
 		t.Fatalf("结果没有分段: bytes=%d next=%d", chunk.TotalBytes, chunk.NextOffset)
 	}
-	start := strings.Index(chunk.Fragment, "中")
-	if start < 0 {
-		t.Fatal("未保存原始供应商字段")
+	offset := 0
+	for !strings.Contains(chunk.Fragment, "源") {
+		if chunk.Done || chunk.NextOffset <= offset {
+			t.Fatal("未保存原始供应商字段")
+		}
+		offset = chunk.NextOffset
+		page := p.call(t, "step.data", map[string]any{"step_id": stepID, "field": "output", "offset": offset})
+		requireOK(t, page)
+		if err := json.Unmarshal(page.Result, &chunk); err != nil {
+			t.Fatal(err)
+		}
 	}
+	start := offset + strings.Index(chunk.Fragment, "源")
 	part := p.call(t, "step.data", map[string]any{"step_id": stepID, "field": "output", "offset": start, "limit": 4})
 	requireOK(t, part)
 	if err := json.Unmarshal(part.Result, &chunk); err != nil {
 		t.Fatal(err)
 	}
-	if chunk.Fragment != "中" || chunk.NextOffset != start+3 {
+	if chunk.Fragment != "源" || chunk.NextOffset != start+3 {
 		t.Fatalf("UTF-8 字符被截断: %+v", chunk)
 	}
 	invalid := p.call(t, "step.data", map[string]any{"step_id": stepID, "field": "output", "offset": start + 1, "limit": 4})
 	if invalid.Error == nil || invalid.Error.Code != -32602 {
 		t.Fatalf("允许从字符中间开始: %+v", invalid)
+	}
+	var saved strings.Builder
+	for offset := 0; ; {
+		page := p.call(t, "step.data", map[string]any{"step_id": stepID, "field": "reasoning", "offset": offset})
+		requireOK(t, page)
+		if err := json.Unmarshal(page.Result, &chunk); err != nil {
+			t.Fatal(err)
+		}
+		if chunk.TotalBytes != len(reasoning) || chunk.NextOffset <= offset || len(chunk.Fragment) > 64<<10 || !utf8.ValidString(chunk.Fragment) {
+			t.Fatalf("思考分页无效: bytes=%d offset=%d next=%d", chunk.TotalBytes, offset, chunk.NextOffset)
+		}
+		saved.WriteString(chunk.Fragment)
+		if chunk.Done {
+			break
+		}
+		offset = chunk.NextOffset
+	}
+	if saved.String() != reasoning {
+		t.Fatalf("思考内容不完整: bytes=%d，应为 %d", saved.Len(), len(reasoning))
 	}
 	requireOK(t, p.call(t, "run.get", map[string]any{"id": rid}))
 	p.stop(t)
