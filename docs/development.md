@@ -161,7 +161,7 @@ CGO_ENABLED=0 go build -mod=readonly -tags release -o bin/callum ./cmd/callum
 
 构建产物写入 `bin/`，该目录已加入 `.gitignore`。
 `go fix -diff` 只预览当前 Go 版本可用的现代化建议，不写入源文件。
-有建议时命令返回非零退出码，CI 会将其作为检查失败；建议应逐项审查并落实，再确认预览无差异。`.gitattributes` 固定 Go 文件检出为 LF，保持 Windows、macOS 和 Linux 的 gofmt 检查一致。
+有建议时命令返回非零退出码。逐项审查并落实适用的建议后，再确认预览无差异。`.gitattributes` 固定 Go 文件检出为 LF，保持 Windows、macOS 和 Linux 的 gofmt 检查一致。
 代码优先使用当前 Go 版本支持且能提高清晰度的写法，例如 `errors.AsType`、`slices` 和 `t.Context()`。
 
 适配器测试使用可控的 HTTP transport 模拟响应，不访问真实模型服务。

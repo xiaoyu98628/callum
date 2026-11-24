@@ -268,7 +268,7 @@ sequence 在单个步骤内从 1 递增；两个流各自保持读取顺序，�
 结果包含 execution_boundary（sandboxed、sandbox_mode、escalated 及可选 risk）、started、pid（未启动时为 null，仅供核实，不作为重启后的进程控制凭据）、exit_code（未获得时为 null）、可选 signal、timed_out、cancelled、cleanup_complete、stdout、stderr、stream_truncated。每个输出对象为 encoding（utf-8 或 base64）、data、bytes、truncated；二进制或不能构成完整 UTF-8 的保留前缀使用 base64；UTF-8 文本按实际 JSON 转义长度和字符边界截断。
 启动失败为 not_applied；若权限建立后的回收失败则保守记录 unknown 并保留恢复日志。正常退出且生命周期收尾成功为 applied，仅证明命令调用已经执行完毕，非零 exit_code 仍原样交给模型判断业务失败。启动后取消、超时、信号终止或结果不明为 unknown，并保留已经收到的输出。未记录结果的中断命令沿用持久化保守未知及重新审批规则，不自动重试。
 
-`.github/workflows/verify.yml` 配置 macOS、Linux、Windows 的原生竞态测试、静态检查和无 CGO 构建；Go 版本读取 go.mod。工作流配置存在不等于运行通过，平台原生结果以实际 CI 记录为准；本地交叉编译只证明对应目标可构建。
+平台原生验证使用 `go.mod` 指定的 Go 版本，在对应系统上运行[检查与构建](development.md#检查与构建)中的命令。交叉编译验证目标平台可构建，原生运行以对应系统上的测试结果为准。
 
 ## MCP 工具
 
