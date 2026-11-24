@@ -4,6 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"io"
@@ -23,6 +26,7 @@ import (
 )
 
 var runtimeStageName = regexp.MustCompile(`^\.runtimes-install-[A-Za-z0-9]+$`)
+var runtimeManifestSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // 资源安装由客户端执行；此模式持有与服务相同的实例锁并校验安装目录，不打开数据库。
 // 标准流关闭或进程终止即释放锁，避免客户端异常退出留下过期锁状态。
@@ -114,7 +118,8 @@ func holdResourceLock(ctx context.Context, database string, in io.ReadCloser, ou
 
 func validateRuntimeDirectory(c *transport.Connection, req protocol.Request, dataDir string) error {
 	var params struct {
-		Name string `json:"name"`
+		Name           string          `json:"name"`
+		ManifestSHA256 json.RawMessage `json:"manifest_sha256"`
 	}
 	if err := protocol.DecodeParams(req.Params, &params); err != nil {
 		return c.Reply(req, nil, err)
@@ -122,12 +127,26 @@ func validateRuntimeDirectory(c *transport.Connection, req protocol.Request, dat
 	if params.Name != "runtimes" && !runtimeStageName.MatchString(params.Name) {
 		return c.Reply(req, nil, protocol.InvalidParams())
 	}
+	var digest [sha256.Size]byte
+	if params.ManifestSHA256 != nil {
+		var expected string
+		if err := json.Unmarshal(params.ManifestSHA256, &expected); err != nil || !runtimeManifestSHA256.MatchString(expected) {
+			return c.Reply(req, nil, protocol.InvalidParams())
+		}
+		if _, err := hex.Decode(digest[:], []byte(expected)); err != nil {
+			return c.Reply(req, nil, protocol.InvalidParams())
+		}
+	}
 	path := filepath.Join(dataDir, params.Name)
 	info, err := os.Lstat(path)
 	valid := false
 	if err == nil && info.IsDir() {
 		ctx, cancel := context.WithTimeout(c.Context(), 30*time.Second)
-		_, err = runtimeassets.Load(ctx, path)
+		if params.ManifestSHA256 == nil {
+			_, err = runtimeassets.Load(ctx, path)
+		} else {
+			_, err = runtimeassets.LoadWithManifestSHA256(ctx, path, digest)
+		}
 		cancel()
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return c.Reply(req, nil, &protocol.Error{Code: -32603, Message: "运行时目录校验未完成"})

@@ -1,10 +1,13 @@
 package runtimeassets
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -24,7 +27,16 @@ type Bundle struct {
 }
 
 // Load 校验平台、所有文件内容和链接，返回可供装配层借用的固定描述。
-func Load(ctx context.Context, directory string) (_ *Bundle, retErr error) {
+func Load(ctx context.Context, directory string) (*Bundle, error) {
+	return load(ctx, directory, nil)
+}
+
+// LoadWithManifestSHA256 将完整校验绑定到安装器提供的原始清单摘要。
+func LoadWithManifestSHA256(ctx context.Context, directory string, expected [sha256.Size]byte) (*Bundle, error) {
+	return load(ctx, directory, &expected)
+}
+
+func load(ctx context.Context, directory string, expected *[sha256.Size]byte) (_ *Bundle, retErr error) {
 	if !filepath.IsAbs(directory) {
 		return nil, errors.New("运行时目录必须是绝对路径")
 	}
@@ -37,13 +49,30 @@ func Load(ctx context.Context, directory string) (_ *Bundle, retErr error) {
 		return nil, err
 	}
 	defer func() { retErr = errors.Join(retErr, root.Close()) }()
+	if expected != nil {
+		info, err := root.Lstat("manifest.json")
+		if err != nil {
+			return nil, fmt.Errorf("读取内置运行时清单: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("待校验的运行时清单必须是普通文件")
+		}
+	}
 	file, err := root.Open("manifest.json")
 	if err != nil {
 		return nil, fmt.Errorf("读取内置运行时清单: %w", err)
 	}
-	manifest, decodeErr := Decode(file)
+	var reader io.Reader = file
+	hash := sha256.New()
+	if expected != nil {
+		reader = io.TeeReader(file, hash)
+	}
+	manifest, decodeErr := Decode(reader)
 	if err := errors.Join(decodeErr, file.Close()); err != nil {
 		return nil, err
+	}
+	if expected != nil && !bytes.Equal(hash.Sum(nil), expected[:]) {
+		return nil, errors.New("运行时清单与预期摘要不符")
 	}
 	if manifest.Platform != runtime.GOOS || manifest.Arch != runtime.GOARCH {
 		return nil, errors.New("内置运行时与当前平台或架构不匹配")

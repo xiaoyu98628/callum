@@ -37,6 +37,20 @@ func TestResourceLockExcludesServiceWithoutOpeningDatabase(t *testing.T) {
 	if !scanner.Scan() || !strings.Contains(scanner.Text(), `"valid":false`) {
 		t.Fatalf("缺失资源未报告校验失败: %s", scanner.Text())
 	}
+	if _, err := io.WriteString(writer, `{"jsonrpc":"2.0","id":"pinned","method":"runtime.validate","params":{"name":"runtimes","manifest_sha256":"`+strings.Repeat("a", 64)+`"}}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	if !scanner.Scan() || !strings.Contains(scanner.Text(), `"valid":false`) {
+		t.Fatalf("带摘要的校验未报告资源缺失: %s", scanner.Text())
+	}
+	for _, digest := range []string{`""`, `null`, `"wrong"`, `"` + strings.Repeat("A", 64) + `"`} {
+		if _, err := io.WriteString(writer, `{"jsonrpc":"2.0","id":"bad-digest","method":"runtime.validate","params":{"name":"runtimes","manifest_sha256":`+digest+`}}`+"\n"); err != nil {
+			t.Fatal(err)
+		}
+		if !scanner.Scan() || !strings.Contains(scanner.Text(), `"code":-32602`) {
+			t.Fatalf("未拒绝无效的清单摘要 %s: %s", digest, scanner.Text())
+		}
+	}
 	if _, err := io.WriteString(writer, "{\"jsonrpc\":\"2.0\",\"id\":\"invalid\",\"method\":\"runtime.validate\",\"params\":{\"name\":\"../runtimes\"}}\n"); err != nil {
 		t.Fatal(err)
 	}
