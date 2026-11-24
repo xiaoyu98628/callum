@@ -61,11 +61,13 @@ type Snapshot struct {
 	Revision int64 `json:"revision"`
 	Execution
 	Compaction *CompactionSnapshot `json:"context_compaction,omitempty"`
+	// MCPRevision 固定执行受理时的 MCP 设置版本，历史记录缺失时为零。
+	MCPRevision int64 `json:"mcp_revision,omitempty"`
 }
 
 // Valid 判断快照是否具有有效版本和当前服务支持的独立配置值。
 func (s Snapshot) Valid() bool {
-	return s.Revision > 0 && s.Execution.Valid() &&
+	return s.Revision > 0 && s.MCPRevision >= 0 && s.Execution.Valid() &&
 		(s.Compaction == nil || s.Compaction.Valid())
 }
 

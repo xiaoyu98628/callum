@@ -34,7 +34,7 @@ func TestImageFileReplacedByFIFODoesNotBlock(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, err := readFile(ctx, func() (*os.File, error) { return os.OpenFile(path, readFlags, 0) }, expected)
+		_, err := readFile(ctx, path, expected)
 		done <- err
 	}()
 	select {

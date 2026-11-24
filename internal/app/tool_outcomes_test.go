@@ -432,11 +432,23 @@ func TestUnknownOperationRetryAfterRestartRequiresApproval(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rt, cfg := runtimeFixture(t, 1)
 			instance := &outcomeTestTool{path: filepath.Join(t.TempDir(), "evidence"), outcome: tool.OutcomeUnknown}
+			var triedAgain atomic.Bool
 			client := outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
+				if strings.Contains(req.Messages[0].Content, "用户通过「继续任务」") && triedAgain.CompareAndSwap(false, true) {
+					last := req.Messages[len(req.Messages)-1]
+					if last.ToolCallID != "unstarted" || !strings.Contains(last.Content, "not_executed") {
+						return model.Response{}, errors.New("续跑未恢复停止时尚未执行的同批工具调用")
+					}
+					return model.Response{ToolCalls: []model.ToolCall{{ID: "retry", Name: "operation", Arguments: json.RawMessage(`{}`)}}}, nil
+				}
 				if req.Messages[len(req.Messages)-1].Role == model.RoleTool {
 					return model.Response{Text: "等待核实"}, nil
 				}
-				return model.Response{ToolCalls: []model.ToolCall{{ID: "call-operation", Name: "operation", Arguments: json.RawMessage(`{}`)}}}, nil
+				calls := []model.ToolCall{{ID: "call-operation", Name: "operation", Arguments: json.RawMessage(`{}`)}}
+				if continuing {
+					calls = append(calls, model.ToolCall{ID: "unstarted", Name: "operation", Arguments: json.RawMessage(`{}`)})
+				}
+				return model.Response{ToolCalls: calls}, nil
 			})
 			id := policyTestID(t)
 			svc, _ := outcomeService(t, rt, instance, client, id, nil)
@@ -469,7 +481,7 @@ func TestUnknownOperationRetryAfterRestartRequiresApproval(t *testing.T) {
 					t.Error(err)
 				}
 			})
-			svc, _ = outcomeService(t, restarted, instance, client, id, nil)
+			svc, runs := outcomeService(t, restarted, instance, client, id, nil)
 			sub, err = restarted.Subscribe(events.Filter{})
 			if err != nil {
 				t.Fatal(err)
@@ -483,8 +495,11 @@ func TestUnknownOperationRetryAfterRestartRequiresApproval(t *testing.T) {
 					next = accepted
 					return nil
 				})
-				if err != nil || next.ContinueFromRunID != ex.Run.ID || next.Run.ID == ex.Run.ID {
+				if err != nil || !next.Resumed || next.Run.ID != ex.Run.ID || next.User.ID != ex.User.ID || next.Assistant.ID != ex.Assistant.ID || next.Step.Sequence <= ex.Step.Sequence {
 					t.Fatalf("重启后未受理继续任务: %+v %v", next.Run, err)
+				}
+				if err := svc.Continue(t.Context(), request, func(conversation.Execution) error { t.Fatal("并发继续被重复受理"); return nil }); !errors.Is(err, agent.ErrBusy) {
+					t.Fatalf("重复继续未遇到执行互斥: %v", err)
 				}
 			} else {
 				next = sendOutcome(t, svc, id, ex.Conversation.ID, "核实后重试", nil)
@@ -504,8 +519,16 @@ func TestUnknownOperationRetryAfterRestartRequiresApproval(t *testing.T) {
 				t.Fatalf("重试审批未贯通: %+v approvals=%d calls=%d", terminal, approvals, instance.calls.Load())
 			}
 			if continuing {
+				traces, err := runs.ContextTranscript(t.Context(), ex.Conversation.ID, 0)
+				if err != nil || len(traces[ex.Run.ID]) != 6 || traces[ex.Run.ID][2].ToolCallID != "unstarted" {
+					t.Fatalf("完成后无法重建跨中断批次的轨迹: %+v %v", traces, err)
+				}
+				page, err := svc.History(t.Context(), ex.Conversation.ID, "", 25)
+				if err != nil || len(page.Runs) != 1 || len(page.Messages) != 2 || page.Runs[0].Status != agent.Completed || page.Runs[0].ResumedAt == nil || *page.Runs[0].ResumedAt != next.Step.CreatedAt {
+					t.Fatalf("继续后历史不一致: %+v %v", page, err)
+				}
 				stale := conversation.Continue{ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, ModelID: id}
-				err := svc.Continue(t.Context(), stale, func(conversation.Execution) error { t.Fatal("过期执行被重复继续"); return nil })
+				err = svc.Continue(t.Context(), stale, func(conversation.Execution) error { t.Fatal("过期执行被重复继续"); return nil })
 				if !errors.Is(err, conversation.ErrCannotContinue) {
 					t.Fatalf("过期继续请求结果错误: %v", err)
 				}

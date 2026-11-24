@@ -17,6 +17,27 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/registry"
 )
 
+func TestOpenPatchBaseReturnsErrorForMissingWorkspaceDirectory(t *testing.T) {
+	workspace := t.TempDir()
+	info, err := os.Stat(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := patchInvocation{workspace: workspace, workspaceInfo: info}
+	entry := patchTarget{basePath: filepath.Join(workspace, "missing"), target: tool.Target{WithinWorkspace: true}}
+	root, err := p.openBase(&entry)
+	if root != nil {
+		t.Cleanup(func() {
+			if err := root.Close(); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	if root != nil || !errors.Is(err, tool.ErrDenied) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("子目录打开失败应返回带原始原因的拒绝: %v %v", root, err)
+	}
+}
+
 func patchTestExecutor(t *testing.T) *executor.Executor {
 	t.Helper()
 	r := registry.New()

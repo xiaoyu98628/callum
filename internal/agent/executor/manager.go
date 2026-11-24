@@ -190,32 +190,42 @@ func (l *Lease) Finishing() error {
 }
 
 func (m *Manager) Cancel(id string) bool {
+	if lease := m.ActiveLease(id); lease != nil {
+		return lease.Cancel()
+	}
+	return false
+}
+
+// Cancel 只作用于这个租约，即使相同执行 ID 后续又被受理。
+func (l *Lease) Cancel() bool {
+	m := l.manager
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	lease := m.runs[id]
-	if lease == nil || lease.finishing {
+	if m.runs[l.id] != l || l.finishing {
 		return false
 	}
-	lease.cancel()
+	l.cancel()
 	return true
 }
 
-// Active 用于连接清理已完成的执行标识，不代表之后仍然处于活动状态。
-func (m *Manager) Active(id string) bool {
+// ActiveLease 返回当前受理的租约，供连接在退出时精准取消和等待本次执行。
+func (m *Manager) ActiveLease(id string) *Lease {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.runs[id] != nil
+	return m.runs[id]
 }
 
-// Wait 等待指定执行退出；调用者应先 Cancel，且不得在该执行自身调用。
+func (m *Manager) Active(id string) bool { return m.ActiveLease(id) != nil }
+
+// Wait 等待调用时找到的执行退出，调用者不得在该执行自身调用。
 func (m *Manager) Wait(id string) {
-	m.mu.Lock()
-	lease := m.runs[id]
-	m.mu.Unlock()
-	if lease != nil {
-		<-lease.done
+	if lease := m.ActiveLease(id); lease != nil {
+		lease.Wait()
 	}
 }
+
+// Wait 等待本次受理退出，调用者不得在该租约自身调用。
+func (l *Lease) Wait() { <-l.done }
 
 // Call 限制实际模型请求数；标题请求也使用同一容量，不能绕过限制。
 func (m *Manager) Call(ctx context.Context, task func() error) error {

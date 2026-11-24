@@ -31,6 +31,69 @@ func input(t *testing.T) conversation.Begin {
 	return conversation.Begin{Create: true, ConversationID: id(t), UserMessageID: id(t), AssistantMessageID: id(t), RunID: id(t), StepID: id(t), Protocol: "chatcompletions", Model: model.Snapshot{ID: id(t), DisplayName: "模型", RemoteModelID: "remote", Provider: model.ProviderSnapshot{ID: id(t), Name: "厂商"}}, Content: []model.Block{{Type: "text", Text: "原问题"}}, Stream: true}
 }
 
+func TestResumeImageCheckUsesActiveContextAndAppliedSteering(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		steering bool
+	}{
+		{name: "历史图片由有效摘要覆盖"},
+		{name: "原执行的已应用引导带图", steering: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, repository, runs, last := contextFixture(t)
+			ctx := t.Context()
+			image := []model.Block{{Type: "image", AttachmentRef: "stored.png"}}
+			if !tc.steering {
+				raw, err := json.Marshal(image)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := db.DB.Model(&schema.Message{}).Where("conversation_id=? AND sequence=1", last.Conversation.ID).
+					Update("content", string(raw)).Error; err != nil {
+					t.Fatal(err)
+				}
+			}
+			in := input(t)
+			in.Create, in.ConversationID = false, last.Conversation.ID
+			target, err := repository.Begin(ctx, in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.steering {
+				item, err := repository.CreateFollowUp(ctx, conversation.FollowUp{ID: id(t), ConversationID: in.ConversationID,
+					ExpectedRunID: in.RunID, ModelID: in.Model.ID, Status: conversation.FollowUpSteering, Content: image})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := repository.ApplySteering(ctx, in.RunID, target.Step.ID, []string{item.ID}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			now := time.Now().UnixMilli()
+			target.Run.Status, target.Run.FinishedAt, target.Run.UpdatedAt = agent.Cancelled, &now, now
+			if err := runs.Finish(ctx, target.Run); err != nil {
+				t.Fatal(err)
+			}
+			resume := conversation.Begin{Resume: true, ConversationID: in.ConversationID, RunID: in.RunID, StepID: id(t), Model: in.Model, Protocol: in.Protocol}
+			if _, err := repository.Begin(ctx, resume); !errors.Is(err, model.ErrUnsupportedOutput) {
+				t.Fatalf("该图片未参与继续任务校验: %v", err)
+			}
+			if tc.steering {
+				resume.ResumeImageInput = true
+			} else {
+				compress, version := buildingContext(t, repository, runs, last, 2)
+				if err := repository.ActivateContext(ctx, version); err != nil {
+					t.Fatal(err)
+				}
+				finishContextRun(t, runs, compress)
+			}
+			if ex, err := repository.Begin(ctx, resume); err != nil || ex.Run.ID != in.RunID {
+				t.Fatalf("任务无法继续: %+v %v", ex.Run, err)
+			}
+		})
+	}
+}
+
 func TestConversationConstraintsAndResendRollback(t *testing.T) {
 	db, err := sqlite.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
 	if err != nil {

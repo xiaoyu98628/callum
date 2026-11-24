@@ -18,7 +18,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/policy"
 )
 
-func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, parent agent.Step, call model.ToolCall, denied, uncertain map[string]bool) (message model.Message, retErr error) {
+func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, steering *runSteering, parent agent.Step, call model.ToolCall, denied, uncertain map[string]bool, external tool.Tool) (message model.Message, retErr error) {
 	scope, operationErr := e.toolScope(ctx, ex)
 	var prepared *toolexecutor.Prepared
 	if operationErr == nil {
@@ -31,7 +31,11 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 		if snapshot := ex.Run.SettingsSnapshot; snapshot != nil {
 			permissions.SandboxMode = snapshot.SandboxMode
 		}
-		prepared, operationErr = e.options.Tools.PrepareWithPermissions(ctx, scope, call.Name, call.Arguments, permissions)
+		if external != nil {
+			prepared, operationErr = e.options.Tools.PrepareExternal(ctx, scope, external, call.Arguments, permissions)
+		} else {
+			prepared, operationErr = e.options.Tools.PrepareWithPermissions(ctx, scope, call.Name, call.Arguments, permissions)
+		}
 	}
 	var step agent.Step
 	result := tool.Result{Outcome: tool.OutcomeNotApplied}
@@ -79,7 +83,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 	if operationErr != nil {
 		return
 	}
-	approvalID, err := e.authorizeTool(ctx, ex, resolved, &step, prepared, decision, denied)
+	approvalID, err := e.authorizeTool(ctx, ex, resolved, steering, &step, prepared, decision, denied)
 	if err != nil {
 		operationErr = err
 		if errors.Is(err, tool.ErrDenied) || errors.Is(err, conversation.ErrSteered) {
@@ -97,7 +101,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 		return
 	}
 	var claimed agent.Step
-	err = e.beforeTool(ctx, ex.Run.ID, func() error {
+	err = e.beforeTool(ctx, steering, func() error {
 		var err error
 		claimed, err = e.repository.StartTool(ctx, ex.Run.ID, step.ID, approvalID, prepared.Hash())
 		return err
@@ -184,7 +188,7 @@ func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, 
 	return step, nil
 }
 
-func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, step *agent.Step, prepared *toolexecutor.Prepared, decision policy.Decision, denied map[string]bool) (string, error) {
+func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, steering *runSteering, step *agent.Step, prepared *toolexecutor.Prepared, decision policy.Decision, denied map[string]bool) (string, error) {
 	switch decision.Action {
 	case policy.Allow:
 		return "", nil
@@ -205,7 +209,7 @@ func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, r
 		}
 	}
 	var a agent.Approval
-	err := e.beforeTool(ctx, ex.Run.ID, func() error {
+	err := e.beforeTool(ctx, steering, func() error {
 		var err error
 		a, err = e.options.Approvals.Request(ctx, ex.Run.ID, step.ID, prepared.Request(), prepared.Hash(), review)
 		return err

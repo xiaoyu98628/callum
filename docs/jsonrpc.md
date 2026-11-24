@@ -1,6 +1,6 @@
 # JSON-RPC 通信与手工测试
 
-本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `4`，两者含义不同。
+本文按当前代码整理已实现的 stdio JSON-RPC 接口。协议版本为 `1`，数据库结构版本为 `8`，两者含义不同。
 
 运行参数和开发检查见 [运行与开发](development.md)，配置空值和持久化规则见 [存储与模型配置](storage.md)，工具策略见 [Agent 工具与审批](tools-and-approvals.md)，Token 估算及压缩规则见 [上下文统计与压缩](context-compaction.md)。
 
@@ -392,9 +392,11 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 ### conversation.continue：继续已停止或中断的任务
 
-参数为 `conversation_id`、`run_id` 和可选的 `model_id`。`run_id` 必须属于当前会话最新一条普通用户消息，且状态为 `cancelled` 或 `interrupted`。有活动执行时返回 `1006`，执行已被替换或来源已过期时返回 `1003`。手动压缩单独记录，仍可继续此前停止的对话任务。
+参数为 `conversation_id`、`run_id` 和可选的 `model_id`、`resume_in_place`。客户端可传 `resume_in_place: true` 来避免对旧版服务触发新增消息的继续操作，旧版会拒绝此参数。`run_id` 必须属于当前会话最新一条普通用户消息，且状态为 `cancelled` 或 `interrupted`。有活动执行时返回 `1006`，执行已被替换或来源已过期时返回 `1003`。手动压缩单独记录，仍可继续此前停止的对话任务。
 
-受理结果与 `conversation.send` 相同，返回原会话 ID、新执行 ID 和新消息 ID。新执行在历史中记录「继续任务」，以原需求、已生效的引导和保存的工具轨迹作为上下文，并使用当前设置快照。原执行保留，结果待核实的操作继续受审批约束。受理成功后，原执行绑定的待发队列随新执行一起继续，仍须等待成功终态才可自动发出。
+原问题、已生效引导或有效摘要之后的用户历史有图片时，继续任务需要支持图片输入的模型。选中的模型不兼容时，受理阶段返回 `1005`（`unsupported`），保留原执行终态与记录，可改用支持图片的模型继续。
+
+受理结果与 `conversation.send` 同形，返回原会话、原执行和原用户及回答消息的 ID。受理后发送 `run.resumed`、原回复的 `message.updated` 及新步骤的 `step.created`。新的模型请求使用原需求、已生效的引导、保存的工具轨迹及本次设置快照。已发布的交付物仍在原回复中。结果待核实的操作继续受审批约束，原执行绑定的待发队列在执行成功后才可自动发出。
 
 ### 后续消息
 
@@ -466,7 +468,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 每次回答模型请求前，将摘要、有效消息、图片估算、工具定义、调用与结果及服务端操作事实计入本地 Token 估算；超过 Token 预算或触及消息数量、上下文 JSON 与实际请求字节边界时尝试压缩。保留指定用户轮次和当前问题；较早已完成的模型及全部工具结果可生成步骤摘要，正在执行的批次保持完整，模型请求前保留最近完整批次。压缩后重新检查全部边界；摘要模型的源批次也必须满足预算和实际请求编码边界。历史按完整轮次分页读取，旧超长轨迹在恢复阶段按完整批次推进，不能安全压缩时明确失败，不静默丢弃内容。有效请求仍最多 256 条、上下文 JSON 最多 8 MiB。
 
-估算方法 unicode-v1 按有效文本字符、代码标点和封装开销计算，图片使用可配置单图估算；不是厂商 tokenizer。仅在同一执行的请求前缀和工具定义未变时，可参考上一轮实际 prompt_tokens 并估算增量；不以累计 usage 判断当前上下文，估算不写入 usage。无效预算使异步执行以 token_budget_unconfigured 失败；必须保留的输入或单个源轮次超预算时为 token_budget_exceeded。远端仍负责最终容量校验，失败不自动重发。context_compaction 直接初始化当前 Token 配置，revision 为 1；旧条数/字节设置及相应执行快照不做自动转换，版本 6 数据库不受支持。拒绝时保留已有数据和版本，不删除或重建数据库。
+估算方法 unicode-v1 按有效文本字符、代码标点和封装开销计算，图片使用可配置单图估算；不是厂商 tokenizer。仅在同一执行的请求前缀和工具定义未变时，可参考上一轮实际 prompt_tokens 并估算增量；不以累计 usage 判断当前上下文，估算不写入 usage。无效预算使异步执行以 token_budget_unconfigured 失败；必须保留的输入或单个源轮次超预算时为 token_budget_exceeded。远端仍负责最终容量校验，失败不自动重发。context_compaction 直接初始化当前 Token 配置，revision 为 1；旧条数或字节设置及相应执行快照不做自动转换。拒绝时保留已有数据和版本，不删除或重建数据库。
 
 #### conversation.context_usage
 
@@ -492,7 +494,7 @@ result 包含 conversation_id（新对话为空）、model_id、可选 run_id、
 
 可选 `model_id` 指定摘要模型，省略时使用会话当前模型；不改变会话的模型选择。关闭自动压缩后仍可手动调用；需要生成摘要时仍必须具备有效 Token 预算，没有较早完整轮次的无操作请求不调用模型。受理后保持 stdin 打开，通过 `run.cancel` 取消；同一会话已有执行时拒绝并发受理。使用 `run.started`、`step.created`、`step.updated` 及执行终态通知，不创建新的用户或回答消息，也不把摘要发送为 `message.delta`。没有较早完整轮次时正常完成，编排步骤 output 为 `{"compressed":false,"reason":"no_earlier_complete_turns"}`。
 
-执行内摘要通过现有步骤接口查询，无新增 JSON-RPC 方法。`context_compression.output.checkpoint` 的版本 `version:1` 包含 `id`、`conversation_id`、`source_run_id`、可选 `base_checkpoint_id`、`after_sequence`、`through_sequence`、`sources`（`step_id`、`through_sequence`、`fingerprint`）、`summary` 和 `size_stats`。摘要子模型步骤的 input 使用 `generated_checkpoint_id` 关联；普通会话摘要仍使用 `generated_context_version_id`。只有完成结构、容量、字节与 Token 缩减及来源事务校验的检查点才参与恢复；原始消息、步骤、操作事实及 usage 保留。`input_limit` 的 error_message 区分消息数量、上下文字节和实际请求字节，包含当前值及上限；错误种类保持兼容。
+执行内摘要通过现有步骤接口查询，无新增 JSON-RPC 方法。`context_compression.output.checkpoint` 的版本 `version:2` 包含 `id`、`conversation_id`、`source_run_id`、可选 `base_checkpoint_id`、`after_sequence`、`through_sequence`、`sources`（`step_id`、`through_sequence`、`fingerprint`）、`summary` 和 `size_stats`。摘要子模型步骤的 input 使用 `generated_checkpoint_id` 关联；普通会话摘要仍使用 `generated_context_version_id`。只有完成结构、容量、字节与 Token 缩减及来源事务校验的检查点才参与恢复；原始消息、步骤、操作事实及 usage 保留。`input_limit` 的 error_message 区分消息数量、上下文字节和实际请求字节，包含当前值及上限；错误种类保持兼容。
 
 压缩不设固定批次上限：手动压缩直到没有可压缩的较早轮次，自动压缩直到请求回到预算内。每批必须推进来源范围并减少摘要 Token 估算；循环检查取消，无法满足预算或资源边界时明确失败。
 
@@ -621,7 +623,7 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 四个文件工具都接受绝对路径；相对路径需要工作区且不能使用 `..` 越界。工作区内绝对路径与相对路径采用相同规则，符号链接按实际目标判断范围。
 纯读取在 `on-request` 与 `never` 下自动执行，包括无工作区和工作区外路径，仍受当前系统用户访问权限及文件工具的校验约束；`always` 逐次询问。无工作区或工作区外普通修改在 `on-request` 下需要审批，`never` 拒绝仍需审批的操作。默认批准只授权该次固定目标；具备目录选项时，用户可明确选择当前会话的目录及子目录授权。
-目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。文件创建与修改使用 `apply_patch`；当前没有独立删除、移动、交互终端、MCP 或插件工具。`run_command` 可显式启动解释器，但不自动套 Shell，cwd 不构成访问隔离。
+目录访问限制在本次目标目录内，搜索不跟随子项符号链接；等待期间目标被替换或链接被重定向时，批准后仍拒绝执行。文件创建与修改使用 `apply_patch`；当前没有独立删除、移动、交互终端或插件工具。MCP 工具由用户配置启用。`run_command` 可显式启动解释器，但不自动套 Shell，cwd 不构成访问隔离。
 `search_text` 搜索空目录返回空匹配，遇到空子目录继续搜索；空目录不作为工具错误。
 
 ### 11.2 approval.get / approval.list
@@ -779,6 +781,8 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 通知、列表和 `step.get` 均将大型 `output`、`usage`、`definition` 置为 `null`，这不代表数据库中没有数据。通过下面的 `step.data` 获取原始字段。
 
+`step.list` 和 `step.get` 在存储层读取元数据和字段字节数。`step.data` 按偏移从指定字段读取有界字节窗口，长度与窗口取自同一次查询。
+
 参数纠正期间执行保持 running。完整模型响应中的工具参数 JSON 损坏时，失败模型步骤保留原响应和 usage，本轮不创建任何工具步骤；下一模型步骤 input.tool_arguments_correction 记录 source_step_id 和从 0 开始的 call_index。该反馈仅用于本次请求且计入容量校验，不是用户输入或授权。纠正后重新校验和审批；重复同一坏参数且无进展时通过 run.failed 的 invalid_response 和具体安全说明结束。类型错误或简单 Shell 包装则产生 failed 工具步骤，error_kind=invalid_arguments，error_message 提供字段纠正说明，operation.outcome=not_applied。详见 [Agent 工具与审批](tools-and-approvals.md#非交互命令执行)。
 
 单项参数超过 16 KiB 时，失败模型步骤的 `error_kind` 为 `tool_arguments_limit`，说明包含工具名、接收字节数和上限。流式响应可在结束标记前因该边界关闭。确认整批工具未执行且无其他失败后进入同一纠正流程，`input.tool_arguments_correction` 额外记录 `tool`、`actual_bytes`、`limit_bytes`。超限片段及缺失的结束标记保留在失败模型结果中，缺失 usage 不补造。
@@ -794,9 +798,10 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 {"jsonrpc":"2.0","id":"step-output","method":"step.data","params":{"step_id":"<step_id>","field":"output","offset":0,"limit":65536}}
 {"jsonrpc":"2.0","id":"step-usage","method":"step.data","params":{"step_id":"<step_id>","field":"usage","offset":0,"limit":65536}}
 {"jsonrpc":"2.0","id":"step-definition","method":"step.data","params":{"step_id":"<step_id>","field":"definition","offset":0,"limit":65536}}
+{"jsonrpc":"2.0","id":"step-text","method":"step.data","params":{"step_id":"<step_id>","field":"text","offset":0,"limit":65536}}
 ```
 
-只支持 `input`、`output`、`usage`、`definition` 四个字段。`offset` 是字节偏移，必须非负且位于合法 UTF-8 边界；`limit` 默认 65536，范围 4 至 65536。
+`field` 支持 `input`、`output`、`usage`、`definition`、`text` 和 `reasoning`。`text` 读取模型步骤中角色为 `assistant` 的统一消息 `context_message.content`，只返回字符串值。`reasoning` 读取模型步骤独立保存的思考正文。两者都直接以 UTF-8 文本返回，无需读取或解析完整的 `output`，旧记录缺少对应字段时返回 `present:false`。`offset` 是字节偏移，必须非负且位于合法 UTF-8 边界。`limit` 默认 65536，范围 4 至 65536。
 
 usage 片段响应示例：
 
@@ -804,7 +809,7 @@ usage 片段响应示例：
 {"jsonrpc":"2.0","id":"step-usage","result":{"step_id":"<step_id>","field":"usage","present":true,"offset":0,"next_offset":18,"total_bytes":18,"done":true,"fragment":"{\"total_tokens\":7}"}}
 ```
 
-`fragment` 是字符串，拼接完整后再作为 JSON 解析。未读完时，把返回的 `next_offset` 原样作为下一次请求的 `offset`；不要按 Unicode 字符数自行计算偏移。字段缺失时 `present:false`、片段为空，不生成估算用量。
+`fragment` 是字符串。`text` 和 `reasoning` 的片段可直接拼接成文本，其他字段拼接完整后再按 JSON 解析。未读完时，把返回的 `next_offset` 原样作为下一次请求的 `offset`。字段缺失时 `present:false`、片段为空，不生成估算用量。
 
 - 模型调用步骤的 `output` 保存协议适配后的完整结果及相关原始响应数据；格式和保存时机见本节后文。
 - 模型调用步骤的 `usage` 原样保存厂商返回的用量；主回答、每轮继续调用及辅助标题分别记录，缺失保持未知。
@@ -886,6 +891,7 @@ usage 原样保留供应商字段，缺失为 NULL；不把零值或估算值当
 | `conversation.updated` | `conversation_id`、`conversation`，执行内通常还有 `run_id` | 更新会话属性或标题 |
 | `conversation.context_usage.updated` | `conversation_id`、`run_id`、`context_usage` | 更新当前执行数字快照；refresh_required 时重新查询有效历史 |
 | `run.started` | `conversation_id`、`run_id`、`run` | 记录受理执行及设置快照 |
+| `run.resumed` | `conversation_id`、`run_id`、`run` | 原执行回到运行状态，`run.resumed_at` 为最近一次继续的受理时间 |
 | `run.updated` | `conversation_id`、`run_id`、`run` | 更新运行／等待审批状态 |
 | `message.created` | 会话、执行、消息标识及 `message` | 新增用户或回答消息 |
 | `message.delta` | 消息标识、`block_index`、`delta` | 追加对应文本增量 |
@@ -1092,6 +1098,24 @@ scope 仅接受 once、conversation_directory；拒绝决定不能授予目录�
 
 ## 独立推理内容
 
-主对话支持 `reasoning.delta` 通知，参数为 `conversation_id`、`run_id`、`step_id` 与字符串 `text`，绑定一个 `model_call` 步骤，不写入回答正文。仅在供应商实际提供推理字段时发送，可能包含显式空字符串；通知不表示步骤成功。结束、取消或失败后通过 `step.data` 的 `output` 字段读取统一的 `reasoning` 字符串。活动期间定期保存已接受的片段；进程异常退出可能丢失最近未落盘片段，恢复不会自动重试。失败和取消的推理可能不完整，客户端应结合步骤状态展示。
+主对话支持 `reasoning.delta` 通知，参数为 `conversation_id`、`run_id`、`step_id` 与字符串 `text`，绑定一个 `model_call` 步骤，不写入回答正文。仅在供应商实际提供推理字段时发送，可能包含显式空字符串，通知不表示步骤成功。结束、取消或失败后通过 `step.data` 的 `reasoning` 字段读取思考正文。活动期间定期保存已接受的片段，进程异常退出可能丢失最近未落盘片段，恢复不会自动重试。失败和取消的推理可能不完整，客户端应结合步骤状态展示。
 
 Chat Completions 适配器识别 `reasoning_content`，缺失或 null 表示未提供，非字符串报协议错误；不从正文中的 `<think>` 等标签推断。成功结果的 `context_message.reasoning` 保留显式字段供适配器在工具循环回传，推理计入输入预算与累计内容边界；失败的部分推理不生成成功上下文。原始供应商结果与 usage 按原有规则保留。旧步骤没有统一推理投影时保持缺失，不解析原始供应商 JSON 补造内容。无需数据库结构迁移。
+
+## MCP 设置与授权
+
+| 方法 | 参数 | 返回 |
+| --- | --- | --- |
+| `mcp.list` | 空对象 | `revision`、能力标识 `scope_update` 和服务列表。含连接状态、授权状态、到期时间、加密环境变量键名及已发现工具。 |
+| `mcp.save` | `revision`、`server`、可选 `secrets`、`confirmed` 和 `clear_scope` | `id`。创建时留空 `server.id`。服务配置整体校验，更新以 revision 校验冲突。|
+| `mcp.delete` | `id`、`revision` | `true`。删除服务记录并清除凭据。 |
+| `mcp.test` | `id`，本地 stdio 另需 `revision`、`confirmed` | 工具列表，每项含 `name` 和 `description`。 |
+| `mcp.oauth.start` | `id` | `status = pending` 和仅提供给桌面主进程的授权 `url`。 |
+| `mcp.oauth.status`、`mcp.oauth.cancel` | `id` | `status` 为 `idle`、`pending`、`authorized`、`cancelled` 或 `failed`，可含受控说明。 |
+| `mcp.disconnect` | `id` | `true`。清除本地保存的 HTTP 凭据并关闭连接。|
+
+本地服务配置使用 `transport = stdio` 和 `auth = none`，填写 `command`、`args`、可选 `directory` 和普通 `env`。测试和启用本地程序时，客户端展示命令和工作目录后提交 `confirmed = true`。远程配置使用 `transport = streamable_http`，填写 HTTPS `url`，`auth` 可取 `none`、`token` 或 `oauth`。OAuth 可配置 `client_id`、完整的 `redirect_uri` 和 `scope`。两种方式均可配置 `allowed_tools`。替换手填令牌和加密环境变量分别使用 `secrets.token`、`secrets.env`。凭据字段只用于写入，查询返回状态和元数据。
+
+Go 在 `127.0.0.1` 启动临时 OAuth 回调，使用 PKCE S256，默认端口由系统分配。支持预注册的公共 OAuth 客户端和支持动态注册的授权服务。配置固定回调时，按登记路径和端口绑定。授权码交换和刷新都由 Go 发起。浏览器回调页等待换取令牌和保存凭据的最终结果，展示授权成功、取消或失败。页面加载时清理地址栏的回调参数，随后临时监听关闭。服务商拒绝本机回调时，可在服务商支持的情况下配置手填访问令牌。仅允许公网回调的 OAuth 对接需另行设计。常见 MCP 协议错误码为 3010（配置版本冲突）、3012（需要授权）、3013（本机回调）、3014（授权失败）、3015（配置已变化）、3017（连接失败）和 3018（需要预注册客户端）。
+
+`scope` 只适用于远程 OAuth 服务，是以空格分隔的权限名称字符串。显式配置时，动态注册、浏览器授权和令牌刷新均使用该范围。未配置显式范围时，从认证 challenge 或资源元数据发现初始授权范围，刷新沿用原授权。更新连接身份相同的 OAuth 服务时，省略 `server.scope` 保留原范围。服务返回 `scope_update: true` 时，保存请求可在省略 `server.scope` 的同时传入 `clear_scope: true`，明确恢复自动发现。改变或清除原范围会清除凭据和工具选择，需要重新授权。服务商拒绝请求范围时返回 3019。服务商在令牌响应中明确返回的范围与配置不一致时拒绝该令牌并返回 3020。回调已开始时，对应原因通过授权失败状态及浏览器结果页展示。[OAuth 2.0 允许在授予范围与请求一致时省略响应的 `scope`](https://www.rfc-editor.org/rfc/rfc6749.html#section-5.1)。

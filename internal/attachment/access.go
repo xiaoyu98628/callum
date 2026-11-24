@@ -141,7 +141,7 @@ func (a *Access) recover(ctx context.Context) (retErr error) {
 }
 
 // Begin 创建独立私有目录。副本直到对应执行的所有工具结束后才回收。
-func (a *Access) Begin(ctx context.Context, conversationID, runID string) (_ RunFiles, retErr error) {
+func (a *Access) Begin(ctx context.Context, conversationID, runID string, published ...model.Block) (_ RunFiles, retErr error) {
 	if !validID(conversationID) || !validID(runID) {
 		return RunFiles{}, model.ErrAttachment
 	}
@@ -162,7 +162,7 @@ func (a *Access) Begin(ctx context.Context, conversationID, runID string) (_ Run
 			retErr = errors.Join(retErr, os.RemoveAll(directory))
 		}
 	}()
-	value := &RunFiles{ConversationID: conversationID, Inputs: filepath.Join(directory, "inputs"), Work: filepath.Join(directory, "work"), directory: directory, files: make(map[string]string)}
+	value := &RunFiles{ConversationID: conversationID, Inputs: filepath.Join(directory, "inputs"), Work: filepath.Join(directory, "work"), directory: directory, files: make(map[string]string), Artifacts: append([]model.Block(nil), published...)}
 	for _, path := range []string{value.Inputs, value.Work} {
 		if err := os.Mkdir(path, 0700); err != nil {
 			return RunFiles{}, err

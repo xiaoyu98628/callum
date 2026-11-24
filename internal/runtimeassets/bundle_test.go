@@ -2,6 +2,7 @@ package runtimeassets_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"os"
 	"path/filepath"
@@ -105,6 +106,39 @@ func TestBundleContextAndEscapingLink(t *testing.T) {
 	}
 	if _, err := runtimeassets.Inventory(t.Context(), directory); err == nil {
 		t.Fatal("接受了资源外链接")
+	}
+}
+
+func TestBundleManifestSHA256BindsRawManifestAndChecksFiles(t *testing.T) {
+	directory := fixture(t)
+	path := filepath.Join(directory, "manifest.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256.Sum256(data)
+	if _, err := runtimeassets.LoadWithManifestSHA256(t.Context(), directory, expected); err != nil {
+		t.Fatalf("拒绝符合预期清单的完整资源: %v", err)
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	changed := append(data, '\n')
+	if err := os.WriteFile(path, changed, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeassets.Load(t.Context(), directory); err != nil {
+		t.Fatalf("旧校验调用应继续接受等价 JSON: %v", err)
+	}
+	if _, err := runtimeassets.LoadWithManifestSHA256(t.Context(), directory, expected); err == nil {
+		t.Fatal("接受了原始字节与源清单不同的清单")
+	}
+	file := filepath.Join(directory, "python", "lib", "stdlib.py")
+	if err := os.WriteFile(file, []byte("changed-content"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtimeassets.LoadWithManifestSHA256(t.Context(), directory, sha256.Sum256(changed)); err == nil {
+		t.Fatal("清单摘要相同后跳过了普通文件内容校验")
 	}
 }
 

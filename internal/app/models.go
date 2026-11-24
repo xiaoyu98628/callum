@@ -10,8 +10,16 @@ import (
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/adapter/chatcompletions"
+	"github.com/xiaoyu98628/callum/internal/model/provider"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
 )
+
+func newModelClient(runtime provider.RuntimeConfig, client *http.Client, readAttachment func(context.Context, string) ([]byte, string, error)) (model.Client, error) {
+	if runtime.Protocol != "chatcompletions" {
+		return nil, inference.ErrUnsupported
+	}
+	return chatcompletions.New(chatcompletions.Config{BaseURL: runtime.BaseURL, APIKey: runtime.APIKey, ReadAttachment: readAttachment}, client)
+}
 
 // newModelResolver 将配置业务与具体适配器连接，不持有数据库查询或网络调用事务。
 func newModelResolver(providers *providerservice.Service, client *http.Client) inference.Resolver {
@@ -20,11 +28,11 @@ func newModelResolver(providers *providerservice.Service, client *http.Client) i
 		if err != nil {
 			return nil, "", err
 		}
-		if runtime.Protocol != "chatcompletions" {
-			return nil, "", inference.ErrUnsupported
+		adapter, err := newModelClient(runtime, client, nil)
+		if err != nil {
+			return nil, "", err
 		}
-		adapter, err := chatcompletions.New(chatcompletions.Config{BaseURL: runtime.BaseURL, APIKey: runtime.APIKey}, client)
-		return adapter, runtime.Model.RemoteModelID, err
+		return adapter, runtime.Model.RemoteModelID, nil
 	}
 }
 
@@ -34,10 +42,7 @@ func newConversationResolver(providers *providerservice.Service, client *http.Cl
 		if err != nil {
 			return agent.Resolved{}, err
 		}
-		if runtime.Protocol != "chatcompletions" {
-			return agent.Resolved{}, inference.ErrUnsupported
-		}
-		adapter, err := chatcompletions.New(chatcompletions.Config{BaseURL: runtime.BaseURL, APIKey: runtime.APIKey, ReadAttachment: attachments.Read}, client)
+		adapter, err := newModelClient(runtime, client, attachments.Read)
 		if err != nil {
 			return agent.Resolved{}, err
 		}

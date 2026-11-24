@@ -29,8 +29,10 @@ func inputCapacity(ctx context.Context, ex conversation.Execution, resolved agen
 		if err != nil {
 			return model.ErrTokenBudget
 		}
-		estimate := tokens.Estimate(messages, definitions, cfg.ImageTokenEstimate)
-		if meter != nil {
+		var estimate int64
+		if meter == nil {
+			estimate = tokens.Estimate(messages, definitions, cfg.ImageTokenEstimate)
+		} else {
 			estimate = meter.Estimate(messages, definitions, cfg.ImageTokenEstimate).Tokens
 		}
 		if estimate > budget {

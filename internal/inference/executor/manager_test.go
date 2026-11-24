@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	scheduler "github.com/xiaoyu98628/callum/internal/agent/executor"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 )
@@ -34,6 +35,25 @@ func nextEvent(t *testing.T, events <-chan inference.Event) inference.Event {
 	}
 }
 
+func newTestManager(t *testing.T, client model.Client, limit int, timeout time.Duration, events chan<- inference.Event) (*Manager, *scheduler.Manager) {
+	t.Helper()
+	runs, err := scheduler.New(t.Context(), limit, timeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(runs.Close)
+	manager, err := NewWithScheduler(runs, func(context.Context, string) (model.Client, string, error) {
+		return client, "remote", nil
+	}, func(e inference.Event) error {
+		events <- e
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return manager, runs
+}
+
 func TestConcurrentExecutionCancellationAndCapacity(t *testing.T) {
 	events := make(chan inference.Event, 16)
 	started := make(chan string, 2)
@@ -47,11 +67,7 @@ func TestConcurrentExecutionCancellationAndCapacity(t *testing.T) {
 			return model.Response{Text: req.Messages[0].Content}, nil
 		}
 	}}
-	manager, err := New(t.Context(), func(context.Context, string) (model.Client, string, error) { return client, "remote", nil }, 2, time.Second, func(e inference.Event) error { events <- e; return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(manager.Close)
+	manager, runs := newTestManager(t, client, 2, time.Second, events)
 	var ids []string
 	for _, text := range []string{"甲", "乙"} {
 		in := inference.Request{ModelID: "01900000-0000-7000-8000-000000000001", Messages: []model.Message{{Role: model.RoleUser, Content: text}}}
@@ -74,8 +90,8 @@ func TestConcurrentExecutionCancellationAndCapacity(t *testing.T) {
 	if event := nextEvent(t, events); event.RunID != ids[1] || event.Type != "completed" || event.Text == nil || *event.Text != "乙" {
 		t.Fatalf("其他执行受到影响: %+v", event)
 	}
-	manager.Close()
-	manager.Close()
+	runs.Close()
+	runs.Close()
 	if manager.Cancel(ids[0]) {
 		t.Fatal("已结束执行不应再次取消")
 	}
@@ -96,11 +112,7 @@ func TestLookupContextDoesNotCancelAcceptedRun(t *testing.T) {
 			return model.Response{}, ctx.Err()
 		}
 	}}
-	manager, err := New(t.Context(), func(context.Context, string) (model.Client, string, error) { return client, "remote", nil }, 1, time.Second, func(e inference.Event) error { events <- e; return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(manager.Close)
+	manager, _ := newTestManager(t, client, 1, time.Second, events)
 	in := inference.Request{ModelID: "01900000-0000-7000-8000-000000000001", Messages: []model.Message{{Role: model.RoleUser, Content: "原文"}}}
 	if err := manager.Start(lookupCtx, in, func(string) error { return nil }); err != nil {
 		t.Fatal(err)
@@ -147,13 +159,7 @@ func TestStreamTerminalStateUsesReturnValue(t *testing.T) {
 			if errors.Is(test.cause, context.DeadlineExceeded) {
 				timeout = 50 * time.Millisecond
 			}
-			manager, err := New(t.Context(), func(context.Context, string) (model.Client, string, error) {
-				return fakeClient{stream: test.stream}, "remote", nil
-			}, 1, timeout, func(e inference.Event) error { events <- e; return nil })
-			if err != nil {
-				t.Fatal(err)
-			}
-			t.Cleanup(manager.Close)
+			manager, runs := newTestManager(t, fakeClient{stream: test.stream}, 1, timeout, events)
 			if err := manager.Start(t.Context(), inference.Request{ModelID: "01900000-0000-7000-8000-000000000001", Stream: true, Messages: []model.Message{{Role: model.RoleUser}}}, func(string) error { return nil }); err != nil {
 				t.Fatal(err)
 			}
@@ -164,7 +170,7 @@ func TestStreamTerminalStateUsesReturnValue(t *testing.T) {
 			if managerEvent.Type != test.want || !errors.Is(managerEvent.Err, test.cause) {
 				t.Fatalf("终态错误: %+v", managerEvent)
 			}
-			manager.Close()
+			runs.Close()
 			if len(events) != 0 {
 				t.Fatal("产生了重复终态")
 			}
@@ -179,11 +185,7 @@ func TestRejectedAcceptanceDoesNotCallModelOrConsumeCapacity(t *testing.T) {
 		called <- struct{}{}
 		return model.Response{}, nil
 	}}
-	manager, err := New(t.Context(), func(context.Context, string) (model.Client, string, error) { return client, "remote", nil }, 1, time.Second, func(e inference.Event) error { events <- e; return nil })
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(manager.Close)
+	manager, _ := newTestManager(t, client, 1, time.Second, events)
 	in := inference.Request{ModelID: "01900000-0000-7000-8000-000000000001", Messages: []model.Message{{Role: model.RoleUser}}}
 	rejected := errors.New("响应无法写入")
 	if err := manager.Start(t.Context(), in, func(string) error { return rejected }); !errors.Is(err, rejected) {

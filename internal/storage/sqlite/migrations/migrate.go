@@ -12,7 +12,8 @@ import (
 	"gorm.io/gorm"
 )
 
-const schemaVersion = 6
+// 版本 8 固定 MCP scope 的保存语义，阻止旧程序重写设置时静默丢弃权限范围。
+const schemaVersion = 8
 
 // Run 在同一个事务内初始化空库或校验当前结构。调用方持有连接与实例锁。
 func Run(ctx context.Context, db *gorm.DB) (err error) {
@@ -89,7 +90,7 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 		if err := allowAutoReviewer(tx); err != nil {
 			return fmt.Errorf("升级审批人约束: %w", err)
 		}
-	} else if version != 3 && version != 4 && version != schemaVersion {
+	} else if version != 3 && version != 4 && version != 6 && version != 7 && version != schemaVersion {
 		return fmt.Errorf("不支持数据库结构版本 %d，请使用独立开发数据目录", version)
 	}
 	if err := validateSchema(tx, tables); err != nil {
@@ -115,6 +116,9 @@ func runSchema(ctx context.Context, db *gorm.DB, version int) (err error) {
 	}
 	if err := ensureGeneralSettings(tx); err != nil {
 		return fmt.Errorf("初始化常规设置: %w", err)
+	}
+	if err := ensureMCP(tx, version); err != nil {
+		return fmt.Errorf("初始化 MCP 存储: %w", err)
 	}
 	if version != schemaVersion {
 		if err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)).Error; err != nil {

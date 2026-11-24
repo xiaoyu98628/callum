@@ -2,9 +2,11 @@ package agent
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
@@ -35,22 +37,22 @@ func notFound(err error) error {
 }
 
 func (r *Repository) Get(ctx context.Context, id string) (domain.Run, error) {
-	var row schema.Run
-	err := r.db.WithContext(ctx).Where("id = ?", id).Take(&row).Error
-	return execution(row), notFound(err)
+	var row RunRow
+	err := WithResumeTime(r.db.WithContext(ctx)).Where("id = ?", id).Take(&row).Error
+	return Run(row), notFound(err)
 }
 
 func (r *Repository) List(ctx context.Context, id string, limit, offset int) ([]domain.Run, error) {
 	if limit < 1 || limit > 200 || offset < 0 {
 		return nil, domain.ErrInvalid
 	}
-	var rows []schema.Run
-	if err := r.db.WithContext(ctx).Where("conversation_id = ?", id).Order("created_at DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
+	var rows []RunRow
+	if err := WithResumeTime(r.db.WithContext(ctx)).Where("conversation_id = ?", id).Order("created_at DESC").Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]domain.Run, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, execution(row))
+		out = append(out, Run(row))
 	}
 	return out, nil
 }
@@ -76,6 +78,115 @@ func (r *Repository) Steps(ctx context.Context, id string, after int64, limit in
 	for _, row := range rows {
 		out = append(out, step(row))
 	}
+	return out, nil
+}
+
+type stepSummaryRow struct {
+	schema.Step
+	OutputBytes     int
+	UsageBytes      int
+	DefinitionBytes int
+}
+
+func (row stepSummaryRow) summary() domain.StepSummary {
+	return domain.StepSummary{Step: step(row.Step), OutputBytes: row.OutputBytes,
+		UsageBytes: row.UsageBytes, DefinitionBytes: row.DefinitionBytes}
+}
+
+// jsonText 与 JSON 仓储映射一致，去掉旧记录顶层 JSON 值周围的空白，保留值内部字节。
+func jsonText(column string) string {
+	return "trim(" + column + ", char(9, 10, 13, 32))"
+}
+
+func stepSummaryQuery(db *gorm.DB) *gorm.DB {
+	return db.Model(&schema.Step{}).Select(
+		"id", "conversation_id", "run_id", "parent_step_id", "sequence", "type", "name", "status", "input",
+		"model", "provider_request_id", "tool_call_id", "error_kind", "error_message", "created_at", "started_at",
+		"updated_at", "finished_at",
+		"COALESCE(length(CAST("+jsonText("output")+" AS BLOB)), 0) AS output_bytes",
+		"COALESCE(length(CAST("+jsonText("usage")+" AS BLOB)), 0) AS usage_bytes",
+		"COALESCE(length(CAST("+jsonText("definition")+" AS BLOB)), 0) AS definition_bytes")
+}
+
+// GetStepSummary 读取步骤元数据和各字段大小，避免将大型结果传入 Go。
+func (r *Repository) GetStepSummary(ctx context.Context, id string) (domain.StepSummary, error) {
+	var row stepSummaryRow
+	err := stepSummaryQuery(r.db.WithContext(ctx)).Where("id = ?", id).Take(&row).Error
+	return row.summary(), notFound(err)
+}
+
+// StepSummaries 按现有步骤游标和条数读取有界的元数据页。
+func (r *Repository) StepSummaries(ctx context.Context, id string, after int64, limit int) ([]domain.StepSummary, error) {
+	if limit < 1 || limit > 200 || after < 0 {
+		return nil, domain.ErrInvalid
+	}
+	if _, err := r.Get(ctx, id); err != nil {
+		return nil, err
+	}
+	var rows []stepSummaryRow
+	if err := stepSummaryQuery(r.db.WithContext(ctx)).Where("run_id = ? AND sequence > ?", id, after).
+		Order("sequence").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]domain.StepSummary, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, row.summary())
+	}
+	return out, nil
+}
+
+// StepData 将所选值的当前长度和字节窗口一起读取，避免活动步骤更新时混用不同版本。
+func (r *Repository) StepData(ctx context.Context, id, field string, offset, limit int) (out domain.StepData, err error) {
+	if offset < 0 || limit < 4 || limit > 64<<10 {
+		return out, domain.ErrInvalid
+	}
+	var value string
+	invalid := "0"
+	switch field {
+	case "input", "output", "usage", "definition":
+		value = jsonText(field)
+	case "text":
+		value = `CASE WHEN type='model_call' AND json_extract(output, '$.context_message.role')='assistant'
+			AND json_type(output, '$.context_message.content')='text'
+			THEN json_extract(output, '$.context_message.content') END`
+	case "reasoning":
+		value = "CASE WHEN type='model_call' AND json_type(output, '$.reasoning')='text' THEN json_extract(output, '$.reasoning') END"
+		invalid = `CASE WHEN type='model_call' AND (
+			json_type(output) NOT IN ('object','null') OR json_type(output, '$.reasoning') NOT IN ('text','null')
+		) THEN 1 ELSE 0 END`
+	default:
+		return out, domain.ErrInvalid
+	}
+	db := r.db.WithContext(ctx)
+	selected := db.Model(&schema.Step{}).Where("id = ?", id).
+		Select("CAST(" + value + " AS BLOB) AS data, " + invalid + " AS invalid")
+	var size *int
+	var window []byte
+	var invalidReasoning bool
+	// 多读一个字节以检查右侧边界。先比较长度，再计算 SQLite 的起始位置。
+	err = db.Table("(?) AS step_field", selected).
+		Select("length(data), CASE WHEN ? < length(data) THEN substr(data, ? + 1, ? + 1) END, invalid", offset, offset, limit).
+		Row().Scan(&size, &window, &invalidReasoning)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, domain.ErrNotFound
+	}
+	if err != nil {
+		return out, err
+	}
+	if invalidReasoning {
+		return out, domain.ErrStepReasoning
+	}
+	if size != nil {
+		out.Present, out.TotalBytes = true, *size
+	}
+	if offset > out.TotalBytes || (len(window) > 0 && !utf8.RuneStart(window[0])) {
+		return domain.StepData{}, domain.ErrInvalid
+	}
+	end := min(limit, len(window))
+	for end < len(window) && !utf8.RuneStart(window[end]) {
+		end--
+	}
+	out.NextOffset, out.Fragment = offset+end, string(window[:end])
 	return out, nil
 }
 

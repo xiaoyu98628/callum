@@ -159,22 +159,32 @@ func (e *Engine) callModel(ctx, samplingCtx context.Context, ex conversation.Exe
 					}
 					return e.event(ex, "reasoning.delta", step.ID, "", map[string]any{"text": event.Text})
 				}
-				if event.Type != model.EventTextDelta {
+				if event.Type != model.EventTextDelta || event.Text == "" {
 					return nil
 				}
 				if *totalText+len(event.Text) > inference.MaxTextBytes {
 					return agent.ErrOutputLimit
 				}
 				*totalText += len(event.Text)
+				firstText := text.Len() == 0
 				text.WriteString(event.Text)
 				usageStream.add(event.Text, false)
 				if persisted == 0 || text.Len()-persisted >= 4096 || time.Since(lastPersist) >= 100*time.Millisecond {
-					if err := e.repository.SaveMessage(writeCtx, ex.Assistant.ID, []model.Block{{Type: "text", Text: text.String()}}, agent.Running); err != nil {
+					if err := e.repository.SaveMessage(writeCtx, ex.Assistant.ID, answerBlocks(ex, []model.Block{{Type: "text", Text: text.String()}}), agent.Running); err != nil {
 						return writeError(err)
 					}
 					persisted, lastPersist = text.Len(), time.Now()
 				}
-				return e.event(ex, "message.delta", step.ID, ex.Assistant.ID, map[string]any{"block_index": 0, "delta": map[string]any{"type": "text", "text": event.Text}})
+				if firstText && ex.Resumed && step.ID == ex.Step.ID && len(ex.Assistant.Content) > len(ex.PublishedArtifacts) {
+					// 已写入新正文，通知客户端清除中断时的草稿，再从同一消息开始拼接增量。
+					message := ex.Assistant
+					message.Content = ex.PublishedArtifacts
+					message.UpdatedAt = time.Now().UnixMilli()
+					if err := e.event(ex, "message.updated", "", message.ID, message); err != nil {
+						return err
+					}
+				}
+				return e.event(ex, "message.delta", step.ID, ex.Assistant.ID, map[string]any{"block_index": len(ex.PublishedArtifacts), "delta": map[string]any{"type": "text", "text": event.Text}})
 			})
 		}
 		var err error

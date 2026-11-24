@@ -29,6 +29,7 @@ type Run struct {
 	ErrorKind        *string            `json:"error_kind"`
 	ErrorMessage     *string            `json:"error_message"`
 	CreatedAt        int64              `json:"created_at"`
+	ResumedAt        *int64             `json:"resumed_at,omitempty"`
 	UpdatedAt        int64              `json:"updated_at"`
 	FinishedAt       *int64             `json:"finished_at"`
 }
@@ -56,6 +57,14 @@ type Step struct {
 	StartedAt         *int64          `json:"started_at"`
 	UpdatedAt         int64           `json:"updated_at"`
 	FinishedAt        *int64          `json:"finished_at"`
+}
+
+// StepData 是指定步骤字段的有界 UTF-8 片段，位置和大小均以字节计算。
+type StepData struct {
+	Present    bool
+	TotalBytes int
+	NextOffset int
+	Fragment   string
 }
 
 // Event 是与通信协议无关的业务通知，Data 及其引用内容在发布后只读。

@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"strings"
 
 	"github.com/xiaoyu98628/callum/internal/conversation"
 )
@@ -35,35 +34,19 @@ func (s *Service) Compact(ctx context.Context, in conversation.Compact, accepted
 		return err
 	}
 	defer lease.Abort()
-	lookup, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(lease.Context(), cancel)
-	defer func() { stop(); cancel() }()
-	resolved, err := s.resolve(lookup, in.ModelID)
+	lookup, cancel := acceptanceContext(ctx, lease)
+	defer cancel()
+	resolved, err := s.resolveModel(lookup, in.ModelID)
 	if err != nil {
 		return err
-	}
-	if resolved.Client == nil || resolved.Snapshot.ID != in.ModelID || strings.TrimSpace(resolved.Snapshot.RemoteModelID) == "" {
-		return conversation.ErrInvalid
 	}
 	ex, err := s.repository.BeginCompaction(lookup, conversation.Begin{ConversationID: in.ConversationID, RunID: runID, StepID: stepID, Model: resolved.Snapshot, Protocol: resolved.Protocol})
 	if err != nil {
 		return err
 	}
-	copy := ex
-	if ex.Run.SettingsSnapshot != nil {
-		value := ex.Run.SettingsSnapshot.Clone()
-		copy.Run.SettingsSnapshot = &value
-	}
-	if ex.Context != nil {
-		value := ex.Context.Clone()
-		copy.Context = &value
-	}
-	if err := accepted(copy); err != nil {
-		s.engine.Abandon(lease.Context(), ex, context.Canceled)
-		return err
-	}
-	lease.Start(func(ctx context.Context) { s.engine.ExecuteCompaction(ctx, lease, ex, resolved) })
-	return nil
+	return s.start(lease, ex, accepted, func(ctx context.Context) {
+		s.engine.ExecuteCompaction(ctx, lease, ex, resolved)
+	})
 }
 
 func (s *Service) ContextVersions(ctx context.Context, id string, limit, offset int) ([]conversation.ContextVersion, error) {

@@ -95,6 +95,18 @@ func (e *Executor) Prepare(ctx context.Context, scope tool.Scope, name string, a
 }
 
 func (e *Executor) PrepareWithPermissions(ctx context.Context, scope tool.Scope, name string, args json.RawMessage, permissions tool.ExecutionPermissions) (*Prepared, error) {
+	return e.prepare(ctx, scope, name, nil, args, permissions)
+}
+
+// PrepareExternal 用本轮固定的工具实例，避免通过同名目录重定向已获批请求。
+func (e *Executor) PrepareExternal(ctx context.Context, scope tool.Scope, t tool.Tool, args json.RawMessage, permissions tool.ExecutionPermissions) (*Prepared, error) {
+	if t == nil || t.Definition().Source != "mcp" {
+		return nil, tool.ErrInvalid
+	}
+	return e.prepare(ctx, scope, "", t, args, permissions)
+}
+
+func (e *Executor) prepare(ctx context.Context, scope tool.Scope, name string, t tool.Tool, args json.RawMessage, permissions tool.ExecutionPermissions) (*Prepared, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -104,9 +116,12 @@ func (e *Executor) PrepareWithPermissions(ctx context.Context, scope tool.Scope,
 	if len(args) > tool.MaxArgumentBytes {
 		return nil, tool.ErrLimit
 	}
-	t, err := e.registry.Get(name)
-	if err != nil {
-		return nil, err
+	if t == nil {
+		var err error
+		t, err = e.registry.Get(name)
+		if err != nil {
+			return nil, err
+		}
 	}
 	normalized, err := t.Validate(args)
 	if err != nil {

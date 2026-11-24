@@ -98,13 +98,17 @@ context_compression 编排下建立 model_call 子步骤保存生成摘要的模
 
 新引导提交后主动取消正在等待或流式输出的模型请求。旧模型步骤以 steered 标记，当前执行继续；写入已收到的增量仍受执行上下文和调用期限约束。下一次模型请求携带原任务与引导，新明确要求优先处理冲突；已启动的工具可在原有边界收尾，未启动的旧调用不会执行。引导仍参与 Token、上下文字节和消息数量校验。
 
+每次受理有独立的引导同步状态。普通对话提交后、发出受理响应前登记该状态，模型快照、工具启动和终态封存按本次租约协调。请求在读取任务和准备附件前固定目标租约，原地恢复沿用 run ID 时，持有旧租约的请求会被拒绝。不同会话各自同步引导，数据库访问沿用 SQLite 的事务顺序。受理回调失败时，已提交的引导随终态退回队列，并发布移除临时消息的事件。
+
 失败、停止和进程恢复保留队列，尚未使用的引导退回待发状态。桌面主进程在收到当前连接的成功终态后请求消费队首；用户可在队列暂停时继续发送。旧执行或旧 revision 的迟到请求会被拒绝。
 
 ## 继续任务
 
-继续操作在受理事务中核对最新普通用户消息所属的执行及终态，允许继续 `cancelled` 和 `interrupted` 的任务。受理在同一会话追加新消息及新执行，首个模型步骤的 `input.continued_from_run_id` 保存来源。原执行、已生效的引导和确认保存的工具结果保持可查。继续后的历史组装可恢复原任务的只读工具结果，沿用工具调用配对及上下文边界。
+继续操作在受理事务中核对最新普通用户消息所属的执行及终态，允许继续 `cancelled` 和 `interrupted` 的任务。原执行和回答恢复至运行状态，新模型步骤沿用该执行的递增序号，并在 `input.resume` 保留上次终态及模型和设置快照。新的调用恢复原需求、已生效的引导、工具结果和压缩检查点。上次已完成的步骤及已发布的交付物保留，未完成的回答正文由本次模型生成替换。历史中已有的 `input.continued_from_run_id` 记录仍按旧规则读取。
 
-原任务关联的待发队列在受理事务中改绑到新执行，成功终态到达后按既有顺序续发。已取出的草稿仍需显式提交。应用重启后由用户发起继续，结果待核实的操作沿用既有审批规则。
+受理事务在改写状态前校验模型图片输入能力。校验范围包含原用户消息、已生效引导，以及有效摘要边界之后的当前分支用户历史。工具结果中的图片继续由适配器处理。模型不兼容时退出受理事务，原任务仍可换用兼容模型继续。
+
+原任务关联的待发队列仍在原执行成功后按既有顺序续发。已取出的草稿仍需显式提交。应用重启后由用户发起继续，结果待核实的操作沿用既有审批规则。
 
 ## 编辑重发
 
@@ -119,7 +123,7 @@ context_compression 编排下建立 model_call 子步骤保存生成摘要的模
 事件名位于 method，params 按事件携带 conversation_id、run_id、step_id、message_id、approval_id。
 message.delta 使用 block_index 和带 type 的 delta，标题、工具、摘要输出不混入回答正文。
 
-当前事件：conversation.created、conversation.updated、run.started、run.updated、run.completed、run.failed、run.cancelled、message.created、message.delta、message.updated、step.created、step.updated、tool.output、approval.requested、approval.updated、user_input.requested、user_input.updated。
+当前事件包含 `conversation.created`、`conversation.updated`、`run.started`、`run.resumed`、`run.updated`、`run.completed`、`run.failed`、`run.cancelled`、`message.created`、`message.delta`、`message.updated`、`step.created`、`step.updated`、`tool.output`、`approval.requested`、`approval.updated`、`user_input.requested` 和 `user_input.updated`。
 
 压缩使用 type=context_compression 的步骤事件。步骤父子关系支持折叠、展开，折叠偏好由客户端保存。
 状态落库后通知；内容增量有界传输，终态前保存最终或部分结果。重新打开查询数据库状态，不承诺逐事件重放。

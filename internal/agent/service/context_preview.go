@@ -32,7 +32,7 @@ func (e *Engine) PreviewContext(ctx context.Context, in conversation.ContextUsag
 			return value, operationStorageError(ctx, err)
 		}
 	}
-	fixed, definitions, err := e.requestParts(ctx, conv, &state.Settings, facts)
+	fixed, definitions, err := e.requestParts(ctx, conv, &state.Settings, facts, e.extraTools(ctx, false, state.Settings.MCPRevision)...)
 	if err != nil {
 		return value, err
 	}
@@ -106,7 +106,7 @@ func previewFailure(value conversation.ContextUsage, err error) (conversation.Co
 }
 
 func sameContextState(a, b conversation.ContextState) bool {
-	if b.ActiveRun != nil || a.ThroughSequence != b.ThroughSequence || a.LastUserRunID != b.LastUserRunID || a.Conversation.UpdatedAt != b.Conversation.UpdatedAt || a.Settings.Revision != b.Settings.Revision || a.Settings.Compaction.Revision != b.Settings.Compaction.Revision {
+	if b.ActiveRun != nil || a.ThroughSequence != b.ThroughSequence || a.LastUserRunID != b.LastUserRunID || a.Conversation.UpdatedAt != b.Conversation.UpdatedAt || a.Settings.Revision != b.Settings.Revision || a.Settings.MCPRevision != b.Settings.MCPRevision || a.Settings.Compaction.Revision != b.Settings.Compaction.Revision {
 		return false
 	}
 	if (a.Context == nil) != (b.Context == nil) {

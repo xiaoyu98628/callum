@@ -128,7 +128,7 @@ macOS ARM64 实际运行已验证；其他架构的归档校验及交叉构建�
 
 技能 YAML 元数据使用固定 `go.yaml.in/yaml/v3` v3.0.4，标准库没有对应解析能力。该依赖不执行技能脚本或加载供应商 SDK。
 
-技能包不放入 Go 仓库。客户端 `resources/skills/.system/` 保存自带技能并安装到 `DataDir/skills/.system/`，用户技能平铺，用户 name 覆盖同名系统技能。`callum resource-lock --data-dir <路径>` 持有同一实例锁，提供就绪、关闭和只读的 `runtime.validate`。该方法只接受数据目录直属的 `runtimes` 或安装器暂存目录名称，使用正式服务的完整资源校验，不打开业务数据库。客户端通过校验后激活资源，释放锁并启动正式服务。
+技能包不放入 Go 仓库。客户端 `resources/skills/.system/` 保存自带技能并安装到 `DataDir/skills/.system/`，用户技能平铺，用户 name 覆盖同名系统技能。`callum resource-lock --data-dir <路径>` 持有同一实例锁，提供就绪、关闭和只读的 `runtime.validate`。该方法只接受数据目录直属的 `runtimes` 或安装器暂存目录名称，使用正式服务的完整资源校验，不打开业务数据库。可选参数 `manifest_sha256` 核对完整校验实际使用的清单原始字节，旧请求可只传 `name`。客户端通过校验后激活资源，释放锁并启动正式服务，正式服务独立复核已安装目录。
 
 当前完整技能依赖来自用户指定 macOS ARM64 资源，版本 `26.1111.10934-flat`，包含 Artifact Tool、LibreOffice、Poppler。Python 库统一进入 `python/`，Node 库进入 `node/node_modules/`，原生命令进入 `native/`；裸 `python3` 和技能查询共用 Python 3.12.14。其他三个平台的完整 Office 原生依赖仍未准备。
 
@@ -161,7 +161,7 @@ CGO_ENABLED=0 go build -mod=readonly -tags release -o bin/callum ./cmd/callum
 
 构建产物写入 `bin/`，该目录已加入 `.gitignore`。
 `go fix -diff` 只预览当前 Go 版本可用的现代化建议，不写入源文件。
-有建议时命令返回非零退出码，CI 会将其作为检查失败；建议应逐项审查并落实，再确认预览无差异。`.gitattributes` 固定 Go 文件检出为 LF，保持 Windows、macOS 和 Linux 的 gofmt 检查一致。
+有建议时命令返回非零退出码。逐项审查并落实适用的建议后，再确认预览无差异。`.gitattributes` 固定 Go 文件检出为 LF，保持 Windows、macOS 和 Linux 的 gofmt 检查一致。
 代码优先使用当前 Go 版本支持且能提高清晰度的写法，例如 `errors.AsType`、`slices` 和 `t.Context()`。
 
 适配器测试使用可控的 HTTP transport 模拟响应，不访问真实模型服务。

@@ -13,13 +13,20 @@ import (
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 )
 
-// Execute 只在受理响应已排队后运行；标题任务在终态前取消并等待退出。
-func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved) {
-	e.beginSteering(ex.Run.ID)
-	defer e.endSteering(ex.Run.ID)
+// PrepareExecution 为已提交的普通对话登记引导状态。调用方必须启动返回的任务或调用 Abandon。
+func (e *Engine) PrepareExecution(lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved) func(context.Context) {
+	steering := e.registerSteering(lease, ex.Run.ID)
+	return func(ctx context.Context) {
+		defer e.removeSteering(lease)
+		e.execute(ctx, lease, ex, resolved, steering)
+	}
+}
+
+// execute 在受理响应排队后运行，标题任务在终态前取消并等待退出。
+func (e *Engine) execute(ctx context.Context, lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved, steering *runSteering) {
 	err := e.initialEvents(ex)
 	if err == nil && e.options.Attachments != nil {
-		_, err = e.options.Attachments.Begin(ctx, ex.Conversation.ID, ex.Run.ID)
+		_, err = e.options.Attachments.Begin(ctx, ex.Conversation.ID, ex.Run.ID, ex.PublishedArtifacts...)
 	}
 	e.beginContextUsage(ex, resolved)
 	defer e.endContextUsage(ex)
@@ -29,8 +36,8 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	var titleWG sync.WaitGroup
 	titleCtx, titleCancel := context.WithCancel(ctx)
 	if err == nil {
-		err = e.loop(ctx, ex, resolved, func() {
-			if text := history.Text(ex.User.Content); ex.User.Sequence == 1 && ex.Conversation.TitleSource == "default" && strings.TrimSpace(text) != "" {
+		err = e.loop(ctx, ex, resolved, steering, func() {
+			if text := history.Text(ex.User.Content); !ex.Resumed && ex.User.Sequence == 1 && ex.Conversation.TitleSource == "default" && strings.TrimSpace(text) != "" {
 				if release, ok, _ := e.manager.TryAcquireCall(titleCtx); ok {
 					titleWG.Go(func() { defer release(); e.title(titleCtx, ex, resolved, text) })
 				}
@@ -40,12 +47,12 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	titleCancel()
 	titleWG.Wait()
 	if e.options.Attachments != nil {
-		if files, ok := e.options.Attachments.Files(ex.Conversation.ID, ex.Run.ID); ok && len(files.Artifacts) > 0 {
+		if files, ok := e.options.Attachments.Files(ex.Conversation.ID, ex.Run.ID); ok && len(files.Artifacts) > len(ex.PublishedArtifacts) {
 			cleanup, cancel := cleanupContext(ctx)
 			message, readErr := e.latestMessage(cleanup, ex)
 			cancel()
 			if readErr == nil {
-				readErr = e.saveAnswer(ctx, ex, append(message.Content, files.Artifacts...), "")
+				readErr = e.saveAnswer(ctx, ex, append(message.Content, files.Artifacts[len(ex.PublishedArtifacts):]...), "")
 			}
 			err = errors.Join(err, readErr)
 		}
@@ -65,10 +72,7 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	ex.Run.Status, ex.Run.ErrorKind, ex.Run.ErrorMessage, ex.Run.UpdatedAt, ex.Run.FinishedAt = status, kind, message, now, &now
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
-	pending, pendingErr := e.sealSteering(cleanup, ex.Run.ID)
-	if pendingErr != nil {
-		e.logger.Error("读取待恢复引导失败", "module", "run", "run_id", ex.Run.ID)
-	}
+	pending := e.sealSteering(cleanup, steering)
 	finishErr := e.repository.Finish(cleanup, ex.Run)
 	if finishErr != nil {
 		e.logger.Error("保存执行终态失败", "module", "run", "run_id", ex.Run.ID)
@@ -80,13 +84,7 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	} else if errors.Is(err, agent.ErrStorage) {
 		e.logger.Error("执行数据保存失败", "module", "run", "run_id", ex.Run.ID)
 	}
-	if len(pending) > 0 {
-		ids := make([]string, len(pending))
-		for i, followUp := range pending {
-			ids[i] = followUp.ID
-		}
-		_ = e.emit(agent.Event{Type: "conversation.steering_requeued", ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, RemovedMessageIDs: ids})
-	}
+	e.steeringRequeued(ex, pending)
 	if finishErr == nil {
 		if message, readErr := e.latestMessage(cleanup, ex); readErr == nil {
 			_ = e.event(ex, "message.updated", "", message.ID, message)
@@ -109,6 +107,15 @@ func (e *Engine) initialEvents(ex conversation.Execution) error {
 		if err := e.event(ex, "conversation.updated", "", "", ex.Conversation); err != nil {
 			return err
 		}
+	}
+	if ex.Resumed {
+		if err := e.event(ex, "run.resumed", "", "", ex.Run); err != nil {
+			return err
+		}
+		if err := e.event(ex, "message.updated", "", ex.Assistant.ID, ex.Assistant); err != nil {
+			return err
+		}
+		return e.event(ex, "step.created", ex.Step.ID, "", ex.Step)
 	}
 	if err := e.event(ex, "run.started", "", "", ex.Run); err != nil {
 		return err

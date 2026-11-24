@@ -88,7 +88,8 @@ type Begin struct {
 	StepID             string
 	ResendMessageID    string
 	ResendRunID        string
-	ContinueFromRunID  string
+	Resume             bool
+	ResumeImageInput   bool
 	Model              model.Snapshot
 	Protocol           string
 	Content            []model.Block
@@ -98,17 +99,18 @@ type Begin struct {
 // Execution 是提交后的执行快照，不持有数据库连接或事务。
 type Execution struct {
 	// HistoryMore 表示受理只装配有界前缀，执行阶段继续压缩并读取余下历史。
-	HistoryMore       bool
-	Context           *ContextVersion
-	RemovedMessageIDs []string
-	ContinueFromRunID string
-	Created           bool
-	Conversation      Conversation
-	User              Message
-	Assistant         Message
-	Run               agent.Run
-	Step              agent.Step
-	History           []Message
+	HistoryMore        bool
+	Context            *ContextVersion
+	RemovedMessageIDs  []string
+	Resumed            bool
+	PublishedArtifacts []model.Block
+	Created            bool
+	Conversation       Conversation
+	User               Message
+	Assistant          Message
+	Run                agent.Run
+	Step               agent.Step
+	History            []Message
 }
 
 // Send 是发送或编辑重发的输入。首次提问不提供 ConversationID；ModelID 可在已有会话省略。
@@ -121,7 +123,6 @@ type Send struct {
 	RetainedAttachments []int         `json:"retained_attachments,omitempty"`
 	Content             []model.Block `json:"content"`
 	Stream              *bool         `json:"stream,omitempty"`
-	ContinueFromRunID   string        `json:"-"`
 }
 
 // Continue 标识用户要继续的最新一轮；服务端在受理事务中复核所属会话和执行状态。

@@ -23,6 +23,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/credentials/system"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
+	"github.com/xiaoyu98628/callum/internal/mcp"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
 	"github.com/xiaoyu98628/callum/internal/runtimeassets"
 	"github.com/xiaoyu98628/callum/internal/settings"
@@ -32,6 +33,7 @@ import (
 	agentstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/agent"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/catalog"
 	conversationstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/conversation"
+	mcpstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/mcp"
 	settingsstore "github.com/xiaoyu98628/callum/internal/storage/sqlite/settings"
 	workspacestore "github.com/xiaoyu98628/callum/internal/storage/sqlite/workspace"
 	"github.com/xiaoyu98628/callum/internal/tool"
@@ -48,30 +50,33 @@ import (
 // Runtime 持有业务服务、共享调度器、事件发布器和存储，不依赖通信连接。
 // 创建者必须 Close；借用的业务服务不得在 Close 返回后继续使用。
 type Runtime struct {
-	ctx              context.Context
-	cancel           context.CancelFunc
-	logger           *slog.Logger
-	db               *sqlite.Database
-	ownership        *sqlite.Ownership
-	httpTransport    *http.Transport
-	manager          *agentexecutor.Manager
-	events           *events.Hub
-	providers        *providerservice.Service
-	workspaces       *workspaceservice.Service
-	conversations    *conversationservice.Service
-	engine           *agentservice.Engine
-	approvals        *approval.Service
-	settings         *settingsservice.Service
-	credentials      *credentials.Vault
-	attachments      *attachment.Store
-	attachmentAccess *attachment.Access
-	skills           *skills.Store
-	calls            *executor.Manager
-	mu               sync.Mutex
-	closed           bool
-	sessions         sync.WaitGroup
-	closeOnce        sync.Once
-	closeErr         error
+	ctx               context.Context
+	cancel            context.CancelFunc
+	logger            *slog.Logger
+	db                *sqlite.Database
+	ownership         *sqlite.Ownership
+	httpTransport     *http.Transport
+	mcpTransport      *http.Transport
+	mcpOAuthTransport *http.Transport
+	mcp               *mcp.Service
+	manager           *agentexecutor.Manager
+	events            *events.Hub
+	providers         *providerservice.Service
+	workspaces        *workspaceservice.Service
+	conversations     *conversationservice.Service
+	engine            *agentservice.Engine
+	approvals         *approval.Service
+	settings          *settingsservice.Service
+	credentials       *credentials.Vault
+	attachments       *attachment.Store
+	attachmentAccess  *attachment.Access
+	skills            *skills.Store
+	calls             *executor.Manager
+	mu                sync.Mutex
+	closed            bool
+	sessions          sync.WaitGroup
+	closeOnce         sync.Once
+	closeErr          error
 }
 
 // New 装配与协议无关的运行时；ctx 是应用运行上下文，初始化使用独立短超时。
@@ -186,6 +191,14 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	}
 	client, httpTransport := newHTTPClient(cfg.MaxConcurrentRuns)
 	r.httpTransport = httpTransport
+	mcpClient, mcpTransport := mcp.HTTPClient(false)
+	r.mcpTransport = mcpTransport
+	mcpOAuthClient, mcpOAuthTransport := mcp.HTTPClient(true)
+	r.mcpOAuthTransport = mcpOAuthTransport
+	r.mcp, err = mcp.New(initCtx, runtimeCtx, mcpstore.New(r.db.DB, r.credentials), mcpClient, mcpOAuthClient, logger)
+	if err != nil {
+		return nil, err
+	}
 	r.manager, err = agentexecutor.New(runtimeCtx, cfg.MaxConcurrentRuns, cfg.CallTimeout)
 	if err != nil {
 		return nil, err
@@ -249,7 +262,7 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	if err != nil {
 		return nil, err
 	}
-	r.engine, err = agentservice.New(runRepository, conversationRepository, r.manager, r.events.Publish, logger, agentservice.Options{Tools: tools, Approvals: r.approvals, Workspace: r.workspaces.Get, Skills: r.skills.Context, Attachments: r.attachmentAccess, CallTimeout: cfg.CallTimeout})
+	r.engine, err = agentservice.New(runRepository, conversationRepository, r.manager, r.events.Publish, logger, agentservice.Options{Tools: tools, ExtraTools: r.mcp.ToolsSnapshot, Approvals: r.approvals, Workspace: r.workspaces.Get, Skills: r.skills.Context, Attachments: r.attachmentAccess, CallTimeout: cfg.CallTimeout})
 	if err != nil {
 		return nil, err
 	}
@@ -309,6 +322,15 @@ func (r *Runtime) Close() error {
 		r.sessions.Wait()
 		if r.events != nil {
 			r.events.Close()
+		}
+		if r.mcp != nil {
+			r.mcp.Close()
+		}
+		if r.mcpOAuthTransport != nil {
+			r.mcpOAuthTransport.CloseIdleConnections()
+		}
+		if r.mcpTransport != nil {
+			r.mcpTransport.CloseIdleConnections()
 		}
 		if r.httpTransport != nil {
 			r.httpTransport.CloseIdleConnections()

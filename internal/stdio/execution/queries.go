@@ -2,9 +2,9 @@ package execution
 
 import (
 	"context"
-	"unicode/utf8"
+	"errors"
 
-	"github.com/xiaoyu98628/callum/internal/model/provider"
+	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/stdio/protocol"
 )
 
@@ -29,15 +29,12 @@ func (h *Handler) Query(ctx context.Context, req protocol.Request) (any, *protoc
 		if err := protocol.DecodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
-		if !provider.ValidID(p.ID) {
-			return nil, protocol.InvalidParams()
-		}
 		if req.Method == "run.get" {
 			value, err := h.persistent.Get(ctx, p.ID)
 			return value, queryError(err)
 		}
-		value, err := h.persistent.GetStep(ctx, p.ID)
-		return summary(value), queryError(err)
+		value, err := h.persistent.GetStepSummary(ctx, p.ID)
+		return value, queryError(err)
 	case "run.list":
 		var p struct {
 			ConversationID string `json:"conversation_id"`
@@ -46,9 +43,6 @@ func (h *Handler) Query(ctx context.Context, req protocol.Request) (any, *protoc
 		}
 		if err := protocol.DecodeParams(req.Params, &p); err != nil {
 			return nil, err
-		}
-		if !provider.ValidID(p.ConversationID) {
-			return nil, protocol.InvalidParams()
 		}
 		if p.Limit == 0 {
 			p.Limit = 100
@@ -64,21 +58,11 @@ func (h *Handler) Query(ctx context.Context, req protocol.Request) (any, *protoc
 		if err := protocol.DecodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
-		if !provider.ValidID(p.RunID) {
-			return nil, protocol.InvalidParams()
-		}
 		if p.Limit == 0 {
 			p.Limit = 100
 		}
-		rows, err := h.persistent.Steps(ctx, p.RunID, p.AfterSequence, p.Limit)
-		if err != nil {
-			return nil, queryError(err)
-		}
-		out := make([]StepSummary, 0, len(rows))
-		for _, row := range rows {
-			out = append(out, summary(row))
-		}
-		return out, nil
+		rows, err := h.persistent.StepSummaries(ctx, p.RunID, p.AfterSequence, p.Limit)
+		return rows, queryError(err)
 	case "step.data":
 		var p struct {
 			StepID string `json:"step_id"`
@@ -89,7 +73,7 @@ func (h *Handler) Query(ctx context.Context, req protocol.Request) (any, *protoc
 		if err := protocol.DecodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
-		if !provider.ValidID(p.StepID) || p.Offset < 0 {
+		if p.Offset < 0 {
 			return nil, protocol.InvalidParams()
 		}
 		if p.Limit == 0 {
@@ -98,31 +82,15 @@ func (h *Handler) Query(ctx context.Context, req protocol.Request) (any, *protoc
 		if p.Limit < 4 || p.Limit > 64<<10 {
 			return nil, protocol.InvalidParams()
 		}
-		row, err := h.persistent.GetStep(ctx, p.StepID)
+		data, err := h.persistent.StepData(ctx, p.StepID, p.Field, p.Offset, p.Limit)
+		if errors.Is(err, agent.ErrStepReasoning) {
+			return nil, &protocol.Error{Code: -32603, Message: agent.ErrStepReasoning.Error()}
+		}
 		if err != nil {
 			return nil, queryError(err)
 		}
-		var raw []byte
-		switch p.Field {
-		case "output":
-			raw = row.Output
-		case "usage":
-			raw = row.Usage
-		case "definition":
-			raw = row.Definition
-		case "input":
-			raw = row.Input
-		default:
-			return nil, protocol.InvalidParams()
-		}
-		if p.Offset > len(raw) || (p.Offset < len(raw) && !utf8.RuneStart(raw[p.Offset])) {
-			return nil, protocol.InvalidParams()
-		}
-		end := min(len(raw), p.Offset+p.Limit)
-		for end < len(raw) && !utf8.RuneStart(raw[end]) {
-			end--
-		}
-		return map[string]any{"step_id": p.StepID, "field": p.Field, "present": raw != nil, "offset": p.Offset, "next_offset": end, "total_bytes": len(raw), "done": end == len(raw), "fragment": string(raw[p.Offset:end])}, nil
+		return map[string]any{"step_id": p.StepID, "field": p.Field, "present": data.Present, "offset": p.Offset,
+			"next_offset": data.NextOffset, "total_bytes": data.TotalBytes, "done": data.NextOffset == data.TotalBytes, "fragment": data.Fragment}, nil
 	default:
 		return nil, protocol.MethodNotFound()
 	}

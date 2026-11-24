@@ -4,15 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/settings"
+	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
 // requestParts 为实际调用和只读占用预览共用系统指令、设置快照、目录元数据及工具定义。
-func (e *Engine) requestParts(ctx context.Context, conv conversation.Conversation, snapshot *settings.Snapshot, facts []agent.OperationFact) ([]model.Message, []model.ToolDefinition, error) {
+func (e *Engine) requestParts(ctx context.Context, conv conversation.Conversation, snapshot *settings.Snapshot, facts []agent.OperationFact, extra ...tool.Tool) ([]model.Message, []model.ToolDefinition, error) {
 	execution, err := executionSettingsPrompt(snapshot)
 	if err != nil {
 		return nil, nil, err
@@ -20,6 +22,9 @@ func (e *Engine) requestParts(ctx context.Context, conv conversation.Conversatio
 	var definitions []model.ToolDefinition
 	for _, d := range e.options.Tools.Definitions() {
 		definitions = append(definitions, d.ToolDefinition)
+	}
+	for _, t := range extra {
+		definitions = append(definitions, t.Definition().ToolDefinition)
 	}
 	definitions = append(definitions, agent.UserInputDefinition())
 	fixed := []model.Message{{Role: model.RoleSystem, Content: conversationPrompt + "\n\n" + execution}}
@@ -81,4 +86,14 @@ func executionSettingsPrompt(snapshot *settings.Snapshot) (string, error) {
 		return "", err
 	}
 	return "以下 JSON 是服务端固定的本次执行设置，模型不能修改。null 表示历史快照缺失或字段未记录，不能用默认值或当前全局设置补齐。on-request 由服务端按实际目标、影响和执行边界判断；always 逐次审批；never 不询问，对仍需要审批的操作直接拒绝。user 表示人工审批；auto_review 只审核服务端允许的低风险操作，其他情况由用户决定。danger-full-access 使用当前账户权限，仍保留参数、应用数据、历史拒绝和待核实结果检查；其他模式的命令系统沙箱边界还取决于平台和工具参数。设置说明不等于操作授权或执行成功，具体工具始终由服务端逐项校验。\n" + string(value), nil
+}
+
+// extraTools 给连接和扫描一个独立预算，未就绪的服务不阻塞普通对话。
+func (e *Engine) extraTools(ctx context.Context, connect bool, revision int64) []tool.Tool {
+	if e.options.ExtraTools == nil || revision == 0 {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	return e.options.ExtraTools(ctx, connect, revision)
 }

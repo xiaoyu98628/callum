@@ -30,6 +30,35 @@ func newTestRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger)
 	return newRuntime(ctx, cfg, logger, credentialstest.Keyring{})
 }
 
+func TestSessionCloseDoesNotCancelAnotherConnectionsResume(t *testing.T) {
+	runtime, _ := runtimeFixture(t, 1)
+	first := newSessionRuns(t.Context(), runtime.manager)
+	lease, err := runtime.manager.ReserveAgentContext(t.Context(), "run", "conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Abort()
+	if err := first.Register("run"); err != nil {
+		t.Fatal(err)
+	}
+	lease.Abort()
+	second := newSessionRuns(t.Context(), runtime.manager)
+	resumed, err := runtime.manager.ReserveAgentContext(t.Context(), "run", "conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resumed.Abort()
+	if err := second.Register("run"); err != nil {
+		t.Fatal(err)
+	}
+	resumed.Start(func(ctx context.Context) { <-ctx.Done() })
+	defer second.Close()
+	first.Close()
+	if resumed.Context().Err() != nil {
+		t.Fatal("旧连接取消了另一连接继续的执行")
+	}
+}
+
 func runtimeFixture(t *testing.T, limit int) (*Runtime, config.Config) {
 	t.Helper()
 	cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
@@ -146,6 +175,35 @@ func TestRuntimeWithoutProtocol(t *testing.T) {
 	if !ok || value.Title != title || value.TitleSource != "manual" {
 		t.Fatalf("直接业务修改没有发布事件: %+v", event)
 	}
+}
+
+func TestPersistentQueriesRejectInvalidUUIDVariant(t *testing.T) {
+	runtime, _ := runtimeFixture(t, 1)
+	const id = "01900000-0000-7000-c000-000000000001"
+	if _, err := runtime.Runs().Get(t.Context(), id); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("直接查询未拒绝无效 UUID variant: %v", err)
+	}
+	p := sharedPeer(t, runtime)
+	for _, request := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"run.get", map[string]any{"id": id}},
+		{"run.list", map[string]any{"conversation_id": id}},
+		{"step.get", map[string]any{"id": id}},
+		{"step.list", map[string]any{"run_id": id}},
+		{"step.data", map[string]any{"step_id": id, "field": "output"}},
+	} {
+		response := p.call(t, request.method, request.params)
+		if response.Error == nil || response.Error.Code != -32602 {
+			t.Fatalf("%s 未返回参数错误: %+v", request.method, response)
+		}
+	}
+	response := p.call(t, "run.get", map[string]any{"id": "01900000-0000-7000-8000-000000000001"})
+	if response.Error == nil || response.Error.Code != 1001 {
+		t.Fatalf("规范但不存在的执行 ID 未返回未找到: %+v", response)
+	}
+	p.stop(t)
 }
 
 func TestSharedRuntimeConnectionCleanup(t *testing.T) {

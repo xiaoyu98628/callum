@@ -98,7 +98,7 @@ func (e *Engine) publishInput(ctx context.Context, name string, step agent.Step)
 	return e.emit(agent.Event{Type: "message.updated", ConversationID: step.ConversationID, RunID: step.RunID, MessageID: rows[0].ID, Data: rows[0]})
 }
 
-func (e *Engine) askUser(ctx context.Context, ex conversation.Execution, parent agent.Step, call model.ToolCall) (model.Message, error) {
+func (e *Engine) askUser(ctx context.Context, ex conversation.Execution, steering *runSteering, parent agent.Step, call model.ToolCall) (model.Message, error) {
 	question, err := agent.ParseInputQuestion(call.Arguments)
 	if err != nil {
 		return e.invalidQuestion(ctx, ex, parent, call)
@@ -117,7 +117,7 @@ func (e *Engine) askUser(ctx context.Context, ex conversation.Execution, parent 
 	}
 	now := time.Now().UnixMilli()
 	var step agent.Step
-	err = e.beforeTool(ctx, ex.Run.ID, func() error {
+	err = e.beforeTool(ctx, steering, func() error {
 		var err error
 		step, err = e.repository.CreateUserInput(ctx, agent.Step{ID: id.String(), ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, ParentStepID: new(parent.ID), ToolCallID: new(call.ID), Type: "user_input", Name: "等待用户回复", Definition: definition, Input: raw, Status: agent.AwaitingUserInput, CreatedAt: now, UpdatedAt: now, StartedAt: &now})
 		return err

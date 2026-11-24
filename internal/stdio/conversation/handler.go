@@ -163,11 +163,15 @@ func (h *Handler) send(ctx context.Context, req protocol.Request, reply func(any
 		}
 		err = h.service.StartFollowUp(ctx, p, accepted)
 	case "conversation.continue":
-		var p domain.Continue
+		var p struct {
+			domain.Continue
+			// 旧服务拒绝此参数，桌面端可避免向旧版发送会产生新消息的继续请求。
+			ResumeInPlace bool `json:"resume_in_place,omitempty"`
+		}
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {
 			return reply(nil, rpcErr)
 		}
-		err = h.service.Continue(ctx, p, accepted)
+		err = h.service.Continue(ctx, p.Continue, accepted)
 	default:
 		var p domain.Send
 		if rpcErr := protocol.DecodeParams(req.Params, &p); rpcErr != nil {

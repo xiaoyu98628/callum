@@ -15,13 +15,34 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
-func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, startTitle func()) error {
+func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, steering *runSteering, startTitle func()) error {
 	transcripts, messages, err := e.prepareHistory(ctx, &ex, resolved, false)
 	if err != nil {
 		return err
 	}
 	current := executionContext{traces: transcripts, past: messages}
 	denied := map[string]bool{}
+	if ex.Resumed {
+		saved, err := e.repository.ResumeTranscript(ctx, ex.Conversation.ID, ex.Run.ID)
+		if err != nil {
+			return operationStorageError(ctx, err)
+		}
+		// 引导和模型批次分开保留，与执行过程中新增引导的组装方式一致。
+		for _, message := range saved {
+			if message.Role == model.RoleUser {
+				current.steering = append(current.steering, message)
+			} else {
+				current.current = append(current.current, message)
+			}
+		}
+		hashes, err := e.repository.RejectedOperationHashes(ctx, ex.Run.ID)
+		if err != nil {
+			return operationStorageError(ctx, err)
+		}
+		for _, hash := range hashes {
+			denied[hash] = true
+		}
+	}
 	facts, err := e.repository.OperationFacts(ctx, ex.Conversation.ID)
 	if err != nil {
 		return operationStorageError(ctx, err)
@@ -30,11 +51,16 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	for _, fact := range facts {
 		uncertain[fact.RequestHash] = true
 	}
-	fixed, definitions, err := e.requestParts(ctx, ex.Conversation, ex.Run.SettingsSnapshot, facts)
+	extra := e.extraTools(ctx, true, ex.Run.SettingsSnapshot.MCPRevision)
+	extraByName := make(map[string]tool.Tool, len(extra))
+	for _, t := range extra {
+		extraByName[t.Definition().Name] = t
+	}
+	fixed, definitions, err := e.requestParts(ctx, ex.Conversation, ex.Run.SettingsSnapshot, facts, extra...)
 	if err != nil {
 		return err
 	}
-	if ex.ContinueFromRunID != "" {
+	if ex.Resumed {
 		fixed[0].Content += "\n\n用户通过「继续任务」恢复上次停止或中断的任务。结合原需求、已收到的引导及工具结果，完成剩余工作。把确认已经生效的操作作为进度使用。结果未知或部分生效时先用只读方式核实，任何进一步操作仍须经过现有权限检查。"
 	}
 	totalText := 0
@@ -42,7 +68,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	var meter tokens.Meter
 	var correction *argumentCorrection
 	previousRejection := ""
-	appliedSteering := 0
+	appliedSteering := len(current.steering)
 	for round := int64(0); ; round++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -52,7 +78,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if correction != nil {
 			requestFixed = append(requestFixed, correction.message())
 		}
-		pending, generation, err := e.snapshotSteering(ctx, ex.Run.ID)
+		pending, generation, err := e.snapshotSteering(ctx, steering)
 		if err != nil {
 			return operationStorageError(ctx, err)
 		}
@@ -106,7 +132,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if round == 0 {
 			callback = startTitle
 		}
-		samplingCtx, finishSampling := e.samplingContext(ctx, ex.Run.ID, generation)
+		samplingCtx, finishSampling := steering.samplingContext(ctx, generation)
 		result, callErr := e.callModel(ctx, samplingCtx, ex, resolved, step, effective, definitions, callback, &totalText)
 		finishSampling()
 		if callErr == nil {
@@ -121,8 +147,10 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			}
 			continue
 		}
-		if err := e.saveAnswer(ctx, ex, result.Content, result.Text); err != nil {
-			return err
+		if callErr == nil || !ex.Resumed || round > 0 || len(result.Content) > 0 || result.Text != "" {
+			if err := e.saveAnswer(ctx, ex, result.Content, result.Text); err != nil {
+				return err
+			}
 		}
 		if callErr != nil {
 			if ctx.Err() != nil {
@@ -146,7 +174,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		correction = nil
 		meter.Observe(effective, definitions, result.InputTokens)
 		if len(result.ToolCalls) == 0 {
-			sealed, err := e.sealAnswer(ctx, ex.Run.ID)
+			sealed, err := e.sealAnswer(ctx, steering)
 			if err != nil || sealed {
 				return err
 			}
@@ -176,11 +204,11 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			}
 			var value model.Message
 			var err error
-			if err = e.beforeTool(ctx, ex.Run.ID, func() error { return nil }); err == nil {
+			if err = e.beforeTool(ctx, steering, func() error { return nil }); err == nil {
 				if call.Name == agent.UserInputTool {
-					value, err = e.askUser(ctx, ex, step, call)
+					value, err = e.askUser(ctx, ex, steering, step, call)
 				} else {
-					value, err = e.callTool(ctx, ex, resolved, step, call, denied, uncertain)
+					value, err = e.callTool(ctx, ex, resolved, steering, step, call, denied, uncertain, extraByName[call.Name])
 				}
 			}
 			if errors.Is(err, conversation.ErrSteered) {
@@ -216,6 +244,7 @@ func (e *Engine) saveAnswer(ctx context.Context, ex conversation.Execution, bloc
 	if blocks == nil {
 		blocks = []model.Block{}
 	}
+	blocks = answerBlocks(ex, blocks)
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
 	if err := e.repository.SaveMessage(cleanup, ex.Assistant.ID, blocks, agent.Running); err != nil {
@@ -225,6 +254,25 @@ func (e *Engine) saveAnswer(ctx context.Context, ex conversation.Execution, bloc
 	value.Content = blocks
 	value.UpdatedAt = time.Now().UnixMilli()
 	return e.event(ex, "message.updated", "", value.ID, value)
+}
+
+func answerBlocks(ex conversation.Execution, blocks []model.Block) []model.Block {
+	if len(ex.PublishedArtifacts) == 0 {
+		return blocks
+	}
+	// 旧交付物留在正文前，流式增量可以用固定索引创建和更新新的正文块。
+	content := append([]model.Block(nil), ex.PublishedArtifacts...)
+	seen := make(map[string]bool, len(content))
+	for _, block := range content {
+		seen[block.AttachmentRef] = true
+	}
+	for _, block := range blocks {
+		if block.AttachmentRef == "" || !seen[block.AttachmentRef] {
+			content = append(content, block)
+			seen[block.AttachmentRef] = true
+		}
+	}
+	return content
 }
 
 func toolFailure(err error) json.RawMessage {

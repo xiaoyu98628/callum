@@ -135,7 +135,7 @@ func checkFollowUpRun(tx *gorm.DB, id, runID string, steer bool) error {
 	return nil
 }
 
-// checkFollowUpContent keeps queue snapshots and per-run steering requests bounded.
+// checkFollowUpContent 限制待发快照及单次执行的引导请求大小和数量。
 func checkFollowUpContent(tx *gorm.DB, row schema.FollowUp, writing bool) error {
 	base := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND id<>?", row.ConversationID, row.ID)
 	check := func(q *gorm.DB, bound int64) error {
@@ -352,7 +352,9 @@ func consumeFollowUp(tx *gorm.DB, in domain.Begin) error {
 	}
 	if request.AfterRunID != "" {
 		var previous schema.Run
-		if err := tx.Where("conversation_id=?", in.ConversationID).Order("created_at DESC, id DESC").Take(&previous).Error; err != nil {
+		if err := tx.Model(&schema.Run{}).Select("conversation_runs.*").
+			Joins("JOIN conversation_messages m ON m.run_id=conversation_runs.id AND m.role='user'").
+			Where("conversation_runs.conversation_id=?", in.ConversationID).Order("m.sequence DESC").Take(&previous).Error; err != nil {
 			return err
 		}
 		if previous.ID != request.AfterRunID || previous.Status != agent.Completed || head.ExpectedRunID != previous.ID {
@@ -367,12 +369,9 @@ func consumeFollowUp(tx *gorm.DB, in domain.Begin) error {
 
 // bindFollowUpQueue links the remaining queue to the new run after it exists.
 func bindFollowUpQueue(tx *gorm.DB, in domain.Begin) error {
-	if in.FollowUp == nil && in.ContinueFromRunID == "" {
+	if in.FollowUp == nil {
 		return nil
 	}
-	q := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND status=?", in.ConversationID, domain.FollowUpQueued)
-	if in.ContinueFromRunID != "" {
-		q = q.Where("expected_run_id=?", in.ContinueFromRunID)
-	}
-	return q.Updates(map[string]any{"expected_run_id": in.RunID, "revision": gorm.Expr("revision+1")}).Error
+	return tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND status=?", in.ConversationID, domain.FollowUpQueued).
+		Updates(map[string]any{"expected_run_id": in.RunID, "revision": gorm.Expr("revision+1")}).Error
 }

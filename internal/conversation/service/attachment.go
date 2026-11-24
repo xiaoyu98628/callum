@@ -7,10 +7,41 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/attachment"
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/conversation/history"
+	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/imageinput"
 )
+
+// stageAttachments 在写入事务前准备托管引用和校验模型输入，事务结果由调用方交给 Batch.Finish。
+func (s *Service) stageAttachments(ctx context.Context, conversationID, ownerID string, content []model.Block, resolved agent.Resolved) (*attachment.Batch, error) {
+	hasAttachments := false
+	for _, block := range content {
+		if block.Type == "image" && !resolved.ImageInput {
+			return nil, inference.ErrUnsupported
+		}
+		hasAttachments = hasAttachments || block.Type == "image" || block.Type == "file"
+	}
+	if !hasAttachments {
+		return nil, nil
+	}
+	batch, err := s.attachments.Stage(ctx, conversationID, ownerID, content)
+	if err != nil {
+		return nil, err
+	}
+	if validator, ok := resolved.Client.(model.InputValidator); ok {
+		request := model.Request{Model: resolved.Snapshot.RemoteModelID, AllowImageInput: resolved.ImageInput,
+			Messages: []model.Message{{Role: model.RoleUser, Blocks: history.ModelContent(content)}}}
+		if err := validator.ValidateInput(ctx, request); err != nil {
+			// 尚未进入受理事务，可以直接回收拒绝的附件。
+			return nil, errors.Join(err, batch.Discard())
+		}
+	}
+	return batch, nil
+}
 
 // ReadAttachmentChunk 只读当前分支中消息明确持有的副本，不接受客户端指定任意路径。
 // 每次核对完整哈希，再返回不超过 1 MiB 的片段，保持 stdio 响应有界。

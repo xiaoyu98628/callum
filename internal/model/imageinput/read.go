@@ -36,21 +36,10 @@ func Read(ctx context.Context, path string) ([]byte, string, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return nil, "", model.ErrImageRead
 	}
-	return read(ctx, func() (os.FileInfo, error) { return os.Stat(path) },
-		func() (*os.File, error) { return os.OpenFile(path, readFlags, 0) })
-}
-
-// ReadRoot 将读取限制在调用方固定的目录内。
-func ReadRoot(ctx context.Context, root *os.Root, name string) ([]byte, string, error) {
-	return read(ctx, func() (os.FileInfo, error) { return root.Lstat(name) },
-		func() (*os.File, error) { return root.OpenFile(name, readFlags, 0) })
-}
-
-func read(ctx context.Context, stat func() (os.FileInfo, error), open func() (*os.File, error)) ([]byte, string, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
-	info, err := stat()
+	info, err := os.Stat(path)
 	if err != nil {
 		return nil, "", errors.Join(model.ErrImageRead, err)
 	}
@@ -60,7 +49,7 @@ func read(ctx context.Context, stat func() (os.FileInfo, error), open func() (*o
 	if info.Size() > MaxSourceBytes {
 		return nil, "", model.ErrImageLimit
 	}
-	content, err := readFile(ctx, open, info)
+	content, err := readFile(ctx, path, info)
 	if err != nil {
 		return nil, "", err
 	}
@@ -73,11 +62,11 @@ func read(ctx context.Context, stat func() (os.FileInfo, error), open func() (*o
 	}
 }
 
-func readFile(ctx context.Context, open func() (*os.File, error), expected os.FileInfo) (_ []byte, retErr error) {
+func readFile(ctx context.Context, path string, expected os.FileInfo) (_ []byte, retErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	file, err := open()
+	file, err := os.OpenFile(path, readFlags, 0)
 	if err != nil {
 		return nil, errors.Join(model.ErrImageRead, err)
 	}

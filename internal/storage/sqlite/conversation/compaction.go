@@ -37,6 +37,14 @@ func executionSettings(tx *gorm.DB, ctx context.Context) (settings.Snapshot, err
 		return settings.Snapshot{}, err
 	}
 	snapshot.Compaction = &compression
+	mcp, err := repository.Get(ctx, settings.MCPKey)
+	if err != nil {
+		return settings.Snapshot{}, err
+	}
+	if _, err := settings.DecodeMCPRecord(mcp); err != nil {
+		return settings.Snapshot{}, err
+	}
+	snapshot.MCPRevision = mcp.Revision
 	return snapshot, nil
 }
 

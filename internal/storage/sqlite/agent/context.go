@@ -12,6 +12,19 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
+// RejectedOperationHashes 恢复同一执行中已经拒绝的固定操作，继续任务不会重置这些决定。
+func (r *Repository) RejectedOperationHashes(ctx context.Context, runID string) ([]string, error) {
+	var hashes []string
+	if err := r.db.WithContext(ctx).Model(&schema.Approval{}).Where("run_id=? AND status=?", runID, domain.ApprovalRejected).
+		Distinct().Limit(4097).Pluck("request_hash", &hashes).Error; err != nil {
+		return nil, err
+	}
+	if len(hashes) > 4096 {
+		return nil, model.ErrInputLimit
+	}
+	return hashes, nil
+}
+
 // OperationFacts 从当前分支提取每个固定操作的最新待核实状态，摘要无权覆盖这些记录。
 func (r *Repository) OperationFacts(ctx context.Context, id string) ([]domain.OperationFact, error) {
 	base := func() *gorm.DB {

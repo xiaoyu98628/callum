@@ -39,28 +39,12 @@ func allowAutoReviewer(tx *gorm.DB) error {
 	if strings.Count(ddl, legacyReviewerCheck) != 1 {
 		return errors.New("未找到可升级的执行快照审批人约束")
 	}
-	var statements []string
-	if err := tx.Raw("SELECT sql FROM sqlite_schema WHERE tbl_name='conversation_runs' AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name").Scan(&statements).Error; err != nil {
-		return err
-	}
 	ddl = strings.Replace(ddl, legacyReviewerCheck, autoReviewerCheck, 1)
 	ddl = strings.Replace(ddl, "conversation_runs", "conversation_runs_v3", 1)
-	for _, query := range []string{ddl, "INSERT INTO conversation_runs_v3 SELECT * FROM conversation_runs", "DROP TABLE conversation_runs", "ALTER TABLE conversation_runs_v3 RENAME TO conversation_runs"} {
-		if err := tx.Exec(query).Error; err != nil {
-			return err
-		}
-	}
-	for _, statement := range statements {
-		if err := tx.Exec(statement).Error; err != nil {
-			return err
-		}
-	}
-	var invalid int
-	if err := tx.Raw("SELECT count(*) FROM (SELECT 1 FROM pragma_foreign_key_check LIMIT 1)").Scan(&invalid).Error; err != nil {
-		return err
-	}
-	if invalid != 0 {
-		return errors.New("审批人约束升级后外键校验失败")
-	}
-	return nil
+	return rebuildTable(tx, "conversation_runs", "审批人约束升级后外键校验失败",
+		ddl,
+		"INSERT INTO conversation_runs_v3 SELECT * FROM conversation_runs",
+		"DROP TABLE conversation_runs",
+		"ALTER TABLE conversation_runs_v3 RENAME TO conversation_runs",
+	)
 }

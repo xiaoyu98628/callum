@@ -248,7 +248,7 @@ func creationTarget(requested string) (string, string, os.FileInfo, []string, er
 
 func (p *patchInvocation) openBase(entry *patchTarget) (_ *os.Root, retErr error) {
 	var root *os.Root
-	var err error
+	var openErr error
 	if entry.target.WithinWorkspace {
 		workspace, err := os.OpenRoot(p.workspace)
 		if err != nil {
@@ -263,12 +263,12 @@ func (p *patchInvocation) openBase(entry *patchTarget) (_ *os.Root, retErr error
 		if err != nil || !filepath.IsLocal(rel) {
 			return nil, tool.ErrDenied
 		}
-		root, err = workspace.OpenRoot(rel)
+		root, openErr = workspace.OpenRoot(rel)
 	} else {
-		root, err = os.OpenRoot(entry.basePath)
+		root, openErr = os.OpenRoot(entry.basePath)
 	}
-	if err != nil {
-		return nil, tool.ErrDenied
+	if openErr != nil {
+		return nil, errors.Join(tool.ErrDenied, openErr)
 	}
 	info, err := root.Stat(".")
 	if err != nil || !os.SameFile(info, entry.baseInfo) {
