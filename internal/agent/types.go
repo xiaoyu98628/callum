@@ -59,6 +59,14 @@ type Step struct {
 	FinishedAt        *int64          `json:"finished_at"`
 }
 
+// StepData 是指定步骤字段的有界 UTF-8 片段，位置和大小均以字节计算。
+type StepData struct {
+	Present    bool
+	TotalBytes int
+	NextOffset int
+	Fragment   string
+}
+
 // Event 是与通信协议无关的业务通知，Data 及其引用内容在发布后只读。
 type Event struct {
 	Type              string

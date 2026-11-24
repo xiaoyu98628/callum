@@ -185,7 +185,7 @@ func (s *Service) ensureToolCatalog(ctx context.Context, e *entry) {
 	defer cancel()
 	c, err := s.connect(ctx, e)
 	if err == nil && s.discover(ctx, e, c) != nil {
-		closeConnection(e)
+		s.closeConnection(e)
 	}
 }
 
@@ -280,7 +280,7 @@ func (s *Service) call(ctx context.Context, t *remoteTool, args json.RawMessage)
 	}
 	// 获批后重新获取定义，避免静默更新导致旧参数发往不同工具。
 	if err := s.discover(ctx, e, c); err != nil {
-		closeConnection(e)
+		s.closeConnection(e)
 		return notApplied, tool.ErrUnavailable
 	}
 	current := c.catalog.Load().byName[t.name]

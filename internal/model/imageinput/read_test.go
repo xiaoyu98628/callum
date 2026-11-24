@@ -28,12 +28,12 @@ func TestImageFileReadRejectsReplacementAndCancellation(t *testing.T) {
 	if err := os.Rename(replacement, path); err != nil {
 		t.Fatal(err)
 	}
-	if content, err := readFile(t.Context(), func() (*os.File, error) { return os.OpenFile(path, readFlags, 0) }, expected); !errors.Is(err, model.ErrImageRead) || content != nil {
+	if content, err := readFile(t.Context(), path, expected); !errors.Is(err, model.ErrImageRead) || content != nil {
 		t.Fatalf("替换后的文件仍被读取: bytes=%d err=%v", len(content), err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	if _, err := readFile(ctx, func() (*os.File, error) { return os.OpenFile(path, readFlags, 0) }, expected); !errors.Is(err, context.Canceled) {
+	if _, err := readFile(ctx, path, expected); !errors.Is(err, context.Canceled) {
 		t.Fatalf("打开图片前忽略取消: %v", err)
 	}
 }
@@ -51,7 +51,7 @@ func TestImageFileGrowthPreservesLimitError(t *testing.T) {
 	if err := os.WriteFile(path, make([]byte, MaxSourceBytes+1), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if content, err := readFile(t.Context(), func() (*os.File, error) { return os.OpenFile(path, readFlags, 0) }, expected); !errors.Is(err, model.ErrImageLimit) || errors.Is(err, model.ErrImageRead) || content != nil {
+	if content, err := readFile(t.Context(), path, expected); !errors.Is(err, model.ErrImageLimit) || errors.Is(err, model.ErrImageRead) || content != nil {
 		t.Fatalf("文件增长后未保留输入限额错误: bytes=%d err=%v", len(content), err)
 	}
 }

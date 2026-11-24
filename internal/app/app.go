@@ -195,7 +195,7 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	r.mcpTransport = mcpTransport
 	mcpOAuthClient, mcpOAuthTransport := mcp.HTTPClient(true)
 	r.mcpOAuthTransport = mcpOAuthTransport
-	r.mcp, err = mcp.New(initCtx, runtimeCtx, mcpstore.New(r.db.DB, r.credentials), mcpClient, mcpOAuthClient)
+	r.mcp, err = mcp.New(initCtx, runtimeCtx, mcpstore.New(r.db.DB, r.credentials), mcpClient, mcpOAuthClient, logger)
 	if err != nil {
 		return nil, err
 	}

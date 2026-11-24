@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"maps"
 	"net/http"
 	"os"
@@ -121,6 +122,7 @@ type Service struct {
 	repo      Repository
 	http      *http.Client
 	oauthHTTP *http.Client
+	logger    *slog.Logger
 	mu        sync.Mutex
 	wg        sync.WaitGroup
 	cfg       settings.MCP
@@ -130,13 +132,18 @@ type Service struct {
 	closed  bool
 }
 
-func New(initCtx, ctx context.Context, repo Repository, client, oauthClient *http.Client) (*Service, error) {
+// New 加载保存的配置并创建运行期服务，使用调用方注入的日志记录器。
+func New(initCtx, ctx context.Context, repo Repository, client, oauthClient *http.Client, logger *slog.Logger) (*Service, error) {
+	if logger == nil {
+		return nil, errors.New("MCP 服务日志未配置")
+	}
 	cfg, revision, err := repo.Load(initCtx)
 	if err != nil {
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	s := &Service{ctx: ctx, cancel: cancel, repo: repo, http: client, oauthHTTP: oauthClient, cfg: cfg, revision: revision, entries: make(map[string]*entry)}
+	s := &Service{ctx: ctx, cancel: cancel, repo: repo, http: client, oauthHTTP: oauthClient,
+		logger: logger.With("module", "mcp"), cfg: cfg, revision: revision, entries: make(map[string]*entry)}
 	for _, item := range cfg.Servers {
 		s.add(item)
 	}
@@ -169,12 +176,11 @@ func (s *Service) retire(e *entry) {
 	s.wg.Go(func() {
 		e.lock <- struct{}{}
 		defer e.release()
-		if e.connection != nil {
-			_ = e.connection.session.Close()
-		}
+		s.closeConnection(e)
 	})
 }
 
+// Close 停止受理请求并等待本服务持有的会话和授权任务结束，可重复调用。
 func (s *Service) Close() {
 	s.mu.Lock()
 	if !s.closed {
@@ -398,7 +404,7 @@ func (s *Service) Test(ctx context.Context, id string, confirmed bool, revision 
 	if e.connection != nil && e.cfg.Scope != "" {
 		// 复用会话时提前刷新，以便把 scope 错误直接返回给设置页。
 		if _, err := s.accessToken(ctx, e); err != nil {
-			closeConnection(e)
+			s.closeConnection(e)
 			return nil, err
 		}
 	}
@@ -407,12 +413,12 @@ func (s *Service) Test(ctx context.Context, id string, confirmed bool, revision 
 		return nil, err
 	}
 	if err := s.discover(ctx, e, c); err != nil {
-		closeConnection(e)
+		s.closeConnection(e)
 		return nil, err
 	}
 	out := slices.Clone(c.catalog.Load().public)
 	if !e.cfg.Enabled {
-		closeConnection(e)
+		s.closeConnection(e)
 	}
 	return out, nil
 }
@@ -423,12 +429,36 @@ func entryContext(ctx context.Context, e *entry) (context.Context, context.Cance
 	return ctx, func() { stop(); cancel() }
 }
 
-func closeConnection(e *entry) {
+// closeConnection 在持有条目锁时撤销快照并关闭会话，只记录脱敏的清理诊断。
+func (s *Service) closeConnection(e *entry) {
 	e.publicConnection.Store(nil)
-	if e.connection != nil {
-		_ = e.connection.session.Close()
-		e.connection = nil
+	c := e.connection
+	e.connection = nil
+	if c == nil {
+		return
 	}
+	if err := c.session.Close(); unexpectedCloseError(err) {
+		kind := "close_failed"
+		if errors.Is(err, context.DeadlineExceeded) {
+			kind = "close_timeout"
+		}
+		s.logger.Warn("关闭 MCP 会话失败", "server_id", e.cfg.ID, "kind", kind)
+	}
+}
+
+func unexpectedCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// 本地进程等传输可能合并清理错误，预期取消不能遮蔽同批次的其他失败。
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		return slices.ContainsFunc(joined.Unwrap(), unexpectedCloseError)
+	}
+	if cause := errors.Unwrap(err); cause != nil {
+		return unexpectedCloseError(cause)
+	}
+	return !errors.Is(err, context.Canceled) && !errors.Is(err, ErrChanged) &&
+		!errors.Is(err, sdk.ErrConnectionClosed) && !errors.Is(err, sdk.ErrSessionMissing)
 }
 
 func (s *Service) connect(ctx context.Context, e *entry) (*connection, error) {
@@ -436,7 +466,7 @@ func (s *Service) connect(ctx context.Context, e *entry) (*connection, error) {
 		if e.connection.credentialVersion == e.credentialVersion.Load() {
 			return e.connection, nil
 		}
-		closeConnection(e)
+		s.closeConnection(e)
 	}
 	c := &connection{credentialVersion: e.credentialVersion.Load()}
 	var transport sdk.Transport
@@ -502,17 +532,18 @@ func (s *Service) connect(ctx context.Context, e *entry) (*connection, error) {
 	s.mu.Lock()
 	if s.closed || e.ctx.Err() != nil {
 		s.mu.Unlock()
-		closeConnection(e)
+		s.closeConnection(e)
 		return nil, ErrChanged
 	}
 	s.wg.Go(func() {
+		// Wait 用于感知连接结束，显式 Close 读取 SDK 单独保留的关闭错误。
 		_ = session.Wait()
 		c.dirty.Store(true)
 		e.publicConnection.CompareAndSwap(c, nil)
 		select {
 		case e.lock <- struct{}{}:
 			if e.connection == c {
-				e.connection = nil
+				s.closeConnection(e)
 			}
 			e.release()
 		case <-e.ctx.Done():

@@ -1,7 +1,9 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,9 +16,158 @@ import (
 	"testing"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/agent/events"
 	"github.com/xiaoyu98628/callum/internal/config"
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/conversation/history"
+	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/tool"
 )
+
+func TestStartFollowUpRejectsNilCallbackBeforeCommit(t *testing.T) {
+	rt, _ := runtimeFixture(t, 1)
+	ctx := t.Context()
+	modelID := directModel(t, rt, "https://example.test")
+	svc := rt.Conversations()
+	var queued conversation.FollowUp
+	err := svc.Send(ctx, conversation.Send{ModelID: modelID, Content: []model.Block{{Type: "text", Text: "当前任务"}}}, func(ex conversation.Execution) error {
+		var err error
+		queued, err = svc.AddFollowUp(ctx, conversation.FollowUpInput{
+			ConversationID: ex.Conversation.ID, ExpectedRunID: ex.Run.ID, Mode: "queue",
+			Content: []model.Block{{Type: "text", Text: "稍后发送"}},
+		})
+		if !rt.Cancel(ex.Run.ID) {
+			t.Fatal("受理阶段无法取消任务")
+		}
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt.manager.Wait(queued.ExpectedRunID)
+	request := conversation.FollowUpStart{ConversationID: queued.ConversationID, ID: queued.ID, Revision: queued.Revision}
+	if err := svc.StartFollowUp(ctx, request, nil); !errors.Is(err, conversation.ErrInvalid) {
+		t.Fatalf("缺失回调未返回参数错误: %v", err)
+	}
+	items, err := svc.FollowUps(ctx, queued.ConversationID)
+	if err != nil || len(items) != 1 || items[0].ID != queued.ID || items[0].Status != queued.Status || items[0].Revision != queued.Revision {
+		t.Fatalf("拒绝后队列被改写: %+v %v", items, err)
+	}
+	page, err := svc.History(ctx, queued.ConversationID, "", 25)
+	if err != nil || len(page.Runs) != 1 || page.Runs[0].ID != queued.ExpectedRunID || page.Runs[0].Status != agent.Cancelled {
+		t.Fatalf("拒绝后执行记录发生变化: %+v %v", page.Runs, err)
+	}
+}
+
+func TestSteeringAcceptedBeforeExecutionStarts(t *testing.T) {
+	for _, rejected := range []bool{false, true} {
+		t.Run(fmt.Sprintf("rejected=%t", rejected), func(t *testing.T) {
+			rt, _ := runtimeFixture(t, 1)
+			instance := &outcomeTestTool{path: filepath.Join(t.TempDir(), "unused")}
+			var sampled atomic.Bool
+			client := outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
+				last := req.Messages[len(req.Messages)-1]
+				if last.Role != model.RoleUser || !strings.Contains(history.Text(last.Blocks), "开跑前引导") {
+					return model.Response{}, errors.New("首个模型请求缺少启动前的引导")
+				}
+				sampled.Store(true)
+				return model.Response{Text: "按引导完成"}, nil
+			})
+			id := policyTestID(t)
+			svc, _ := outcomeService(t, rt, instance, client, id, nil)
+			sub, err := rt.Subscribe(events.Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sub.Close()
+			var ex conversation.Execution
+			var guide conversation.FollowUp
+			rejection := errors.New("受理响应不可写")
+			err = svc.Send(t.Context(), conversation.Send{ModelID: id, Stream: new(false), Content: []model.Block{{Type: "text", Text: "原始任务"}}}, func(accepted conversation.Execution) error {
+				ex = accepted
+				var err error
+				guide, err = svc.AddFollowUp(t.Context(), conversation.FollowUpInput{
+					ConversationID: ex.Conversation.ID, ExpectedRunID: ex.Run.ID, Mode: "steer",
+					Content: []model.Block{{Type: "text", Text: "开跑前引导"}},
+				})
+				if err != nil || guide.Receipt == nil {
+					t.Fatalf("启动前引导未被受理: %v", err)
+				}
+				if rejected {
+					return rejection
+				}
+				return nil
+			})
+			if rejected {
+				if !errors.Is(err, rejection) || sampled.Load() {
+					t.Fatalf("受理响应失败后仍启动执行或未保留原错误: %v", err)
+				}
+				requeued := nextBusiness(t, sub, "conversation.steering_requeued", ex.Run.ID)
+				items, err := svc.FollowUps(t.Context(), ex.Conversation.ID)
+				if err != nil || len(items) != 1 || items[0].ID != guide.ID || items[0].Status != conversation.FollowUpQueued ||
+					len(requeued.RemovedMessageIDs) != 1 || requeued.RemovedMessageIDs[0] != guide.ID {
+					t.Fatalf("启动失败后未回收引导及临时消息: %+v %+v %v", items, requeued, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if terminal := awaitOutcome(t, rt, sub, ex.Run.ID, nil); terminal.Type != "run.completed" || !sampled.Load() {
+				t.Fatalf("执行未使用启动前引导完成: %+v", terminal)
+			}
+		})
+	}
+}
+
+func TestSteeringLetsStartedToolFinishAndSkipsRemainingCall(t *testing.T) {
+	rt, _ := runtimeFixture(t, 1)
+	started, release := make(chan struct{}), make(chan struct{})
+	signalStarted := sync.OnceFunc(func() { close(started) })
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	instance := &outcomeTestTool{path: filepath.Join(t.TempDir(), "applied"), outcome: tool.OutcomeApplied, after: func() {
+		signalStarted()
+		<-release
+	}}
+	client := outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
+		last := req.Messages[len(req.Messages)-1]
+		if !strings.Contains(history.Text(last.Blocks), "跳过剩余旧工具") {
+			return model.Response{ToolCalls: []model.ToolCall{
+				{ID: "started", Name: "operation", Arguments: json.RawMessage(`{}`)},
+				{ID: "remaining", Name: "operation", Arguments: json.RawMessage(`{}`)},
+			}}, nil
+		}
+		var applied, skipped bool
+		for _, message := range req.Messages {
+			applied = applied || (message.ToolCallID == "started" && strings.Contains(message.Content, `"outcome":"applied"`))
+			skipped = skipped || (message.ToolCallID == "remaining" && strings.Contains(message.Content, `"kind":"steered"`))
+		}
+		if !applied || !skipped {
+			return model.Response{}, errors.New("引导后的模型请求缺少完整工具轨迹")
+		}
+		return model.Response{Text: "按引导完成"}, nil
+	})
+	id := policyTestID(t)
+	svc, _ := outcomeService(t, rt, instance, client, id, nil)
+	sub, err := rt.Subscribe(events.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sub.Close()
+	ex := sendOutcome(t, svc, id, "", "执行两项操作", nil)
+	waitSignal(t, started)
+	if _, err := svc.AddFollowUp(t.Context(), conversation.FollowUpInput{
+		ConversationID: ex.Conversation.ID, ExpectedRunID: ex.Run.ID, Mode: "steer",
+		Content: []model.Block{{Type: "text", Text: "跳过剩余旧工具"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	unblock()
+	if terminal := awaitOutcome(t, rt, sub, ex.Run.ID, nil); terminal.Type != "run.completed" || instance.calls.Load() != 1 {
+		t.Fatalf("工具引导边界错误，终态 %+v，实际工具调用次数 %d", terminal, instance.calls.Load())
+	}
+}
 
 func TestFollowUpQueueAndSteerThroughStdio(t *testing.T) {
 	started, cancelled := make(chan struct{}), make(chan struct{})

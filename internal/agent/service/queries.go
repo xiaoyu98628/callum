@@ -10,7 +10,7 @@ import (
 
 func validID(id string) bool {
 	value, err := uuid.Parse(id)
-	return err == nil && value.Version() == 7 && value.String() == id
+	return err == nil && value.Version() == 7 && value.Variant() == uuid.RFC4122 && value.String() == id
 }
 
 // Get 查询持久化执行，不把旧 model.invoke 的临时标识当作数据库主键。
@@ -29,7 +29,7 @@ func (e *Engine) List(ctx context.Context, id string, limit, offset int) ([]agen
 	return e.repository.List(ctx, id, limit, offset)
 }
 
-// GetStep 返回完整步骤，通信层按需要投影元数据或分段原始数据。
+// GetStep 返回包含原始数据的完整步骤。
 func (e *Engine) GetStep(ctx context.Context, id string) (agent.Step, error) {
 	if !validID(id) {
 		return agent.Step{}, agent.ErrInvalid
@@ -43,4 +43,28 @@ func (e *Engine) Steps(ctx context.Context, id string, after int64, limit int) (
 		return nil, agent.ErrInvalid
 	}
 	return e.repository.Steps(ctx, id, after, limit)
+}
+
+// GetStepSummary 查询单个步骤的展示元数据和原始字段大小。
+func (e *Engine) GetStepSummary(ctx context.Context, id string) (agent.StepSummary, error) {
+	if !validID(id) {
+		return agent.StepSummary{}, agent.ErrInvalid
+	}
+	return e.repository.GetStepSummary(ctx, id)
+}
+
+// StepSummaries 按执行内序号分页查询展示元数据。
+func (e *Engine) StepSummaries(ctx context.Context, id string, after int64, limit int) ([]agent.StepSummary, error) {
+	if !validID(id) || after < 0 || limit < 1 || limit > 200 {
+		return nil, agent.ErrInvalid
+	}
+	return e.repository.StepSummaries(ctx, id, after, limit)
+}
+
+// StepData 查询指定字段的有界字节窗口。
+func (e *Engine) StepData(ctx context.Context, id, field string, offset, limit int) (agent.StepData, error) {
+	if !validID(id) {
+		return agent.StepData{}, agent.ErrInvalid
+	}
+	return e.repository.StepData(ctx, id, field, offset, limit)
 }

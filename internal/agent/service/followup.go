@@ -3,8 +3,10 @@ package service
 import (
 	"context"
 	"slices"
+	"sync"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
+	"github.com/xiaoyu98628/callum/internal/agent/executor"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
@@ -13,17 +15,31 @@ import (
 )
 
 type runSteering struct {
+	runID      string
+	mu         sync.Mutex
 	generation uint64
 	sealed     bool
 	cancel     context.CancelCauseFunc
 }
 
+// SteeringLease 固定本次请求瞄准的执行。原地恢复时，同一 run ID 会对应另一个租约。
+func (e *Engine) SteeringLease(runID string) *executor.Lease {
+	lease := e.manager.ActiveLease(runID)
+	if e.steeringState(lease) == nil {
+		return nil
+	}
+	return lease
+}
+
 // AcceptSteering 先提交数据、发布用户消息，再唤醒当前模型调用。
-func (e *Engine) AcceptSteering(runID string, write func() (conversation.FollowUp, error)) error {
-	e.steeringMu.Lock()
-	defer e.steeringMu.Unlock()
-	state := e.steering[runID]
-	if state != nil && state.sealed {
+func (e *Engine) AcceptSteering(lease *executor.Lease, write func() (conversation.FollowUp, error)) error {
+	state := e.steeringState(lease)
+	if state == nil {
+		return conversation.ErrFollowUpChanged
+	}
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.sealed {
 		return conversation.ErrFollowUpChanged
 	}
 	followUp, err := write()
@@ -31,12 +47,10 @@ func (e *Engine) AcceptSteering(runID string, write func() (conversation.FollowU
 		return err
 	}
 	e.publishSteering("message.created", followUp.Receipt)
-	e.FollowUpsUpdated(followUp.ConversationID, runID)
-	if state != nil {
-		state.generation++
-		if state.cancel != nil {
-			state.cancel(conversation.ErrSteered)
-		}
+	e.FollowUpsUpdated(followUp.ConversationID, state.runID)
+	state.generation++
+	if state.cancel != nil {
+		state.cancel(conversation.ErrSteered)
 	}
 	return nil
 }
@@ -49,53 +63,72 @@ func (e *Engine) publishSteering(kind string, message *conversation.Message) {
 	}
 }
 
-func (e *Engine) beginSteering(runID string) {
+func (e *Engine) registerSteering(lease *executor.Lease, runID string) *runSteering {
+	state := &runSteering{runID: runID}
 	e.steeringMu.Lock()
-	e.steering[runID] = &runSteering{}
+	e.steering[lease] = state
 	e.steeringMu.Unlock()
+	return state
 }
 
-func (e *Engine) endSteering(runID string) {
+func (e *Engine) steeringState(lease *executor.Lease) *runSteering {
 	e.steeringMu.Lock()
-	delete(e.steering, runID)
+	defer e.steeringMu.Unlock()
+	return e.steering[lease]
+}
+
+// removeSteering 在封存后释放登记，已取得旧状态的请求仍会看到 sealed。
+func (e *Engine) removeSteering(lease *executor.Lease) {
+	e.steeringMu.Lock()
+	delete(e.steering, lease)
 	e.steeringMu.Unlock()
 }
 
 // snapshotSteering 让引导快照与受理互斥，避免在创建模型步骤期间漏掉新引导。
-func (e *Engine) snapshotSteering(ctx context.Context, runID string) ([]conversation.FollowUp, uint64, error) {
-	e.steeringMu.Lock()
-	defer e.steeringMu.Unlock()
-	pending, err := e.conversations.PendingSteering(ctx, runID)
-	return pending, e.steering[runID].generation, err
+func (e *Engine) snapshotSteering(ctx context.Context, state *runSteering) ([]conversation.FollowUp, uint64, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	pending, err := e.conversations.PendingSteering(ctx, state.runID)
+	return pending, state.generation, err
 }
 
 // samplingContext 只取消模型调用，保留当前执行、已启动的工具和用户取消语义。
-func (e *Engine) samplingContext(ctx context.Context, runID string, generation uint64) (context.Context, func()) {
+func (state *runSteering) samplingContext(ctx context.Context, generation uint64) (context.Context, func()) {
 	request, cancel := context.WithCancelCause(ctx)
-	e.steeringMu.Lock()
-	state := e.steering[runID]
+	state.mu.Lock()
 	if state.generation != generation {
 		cancel(conversation.ErrSteered)
 	}
 	state.cancel = cancel
-	e.steeringMu.Unlock()
+	state.mu.Unlock()
 	return request, func() {
-		e.steeringMu.Lock()
+		state.mu.Lock()
 		state.cancel = nil
-		e.steeringMu.Unlock()
+		state.mu.Unlock()
 		cancel(nil)
 	}
 }
 
-func (e *Engine) sealSteering(ctx context.Context, runID string) ([]conversation.FollowUp, error) {
-	e.steeringMu.Lock()
-	defer e.steeringMu.Unlock()
-	e.steering[runID].sealed = true
-	return e.conversations.PendingSteering(ctx, runID)
+func (e *Engine) sealSteering(ctx context.Context, state *runSteering) []conversation.FollowUp {
+	state.mu.Lock()
+	state.sealed = true
+	state.mu.Unlock()
+	pending, err := e.conversations.PendingSteering(ctx, state.runID)
+	if err != nil {
+		e.logger.Error("读取待恢复引导失败", "module", "run", "run_id", state.runID)
+	}
+	return pending
 }
 
-func (e *Engine) GetRun(ctx context.Context, id string) (agent.Run, error) {
-	return e.repository.Get(ctx, id)
+func (e *Engine) steeringRequeued(ex conversation.Execution, pending []conversation.FollowUp) {
+	if len(pending) == 0 {
+		return
+	}
+	ids := make([]string, len(pending))
+	for i, followUp := range pending {
+		ids[i] = followUp.ID
+	}
+	_ = e.emit(agent.Event{Type: "conversation.steering_requeued", ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, RemovedMessageIDs: ids})
 }
 
 func (e *Engine) FollowUpsUpdated(conversationID, runID string) {
@@ -105,10 +138,10 @@ func (e *Engine) FollowUpsUpdated(conversationID, runID string) {
 }
 
 // beforeTool 按同一顺序处理引导与工具的持久化启动边界。
-func (e *Engine) beforeTool(ctx context.Context, runID string, start func() error) error {
-	e.steeringMu.Lock()
-	defer e.steeringMu.Unlock()
-	pending, err := e.conversations.PendingSteering(ctx, runID)
+func (e *Engine) beforeTool(ctx context.Context, state *runSteering, start func() error) error {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	pending, err := e.conversations.PendingSteering(ctx, state.runID)
 	if err != nil {
 		return operationStorageError(ctx, err)
 	}
@@ -118,17 +151,17 @@ func (e *Engine) beforeTool(ctx context.Context, runID string, start func() erro
 	return start()
 }
 
-func (e *Engine) sealAnswer(ctx context.Context, runID string) (bool, error) {
-	e.steeringMu.Lock()
-	defer e.steeringMu.Unlock()
-	pending, err := e.conversations.PendingSteering(ctx, runID)
+func (e *Engine) sealAnswer(ctx context.Context, state *runSteering) (bool, error) {
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	pending, err := e.conversations.PendingSteering(ctx, state.runID)
 	if err != nil {
 		return false, operationStorageError(ctx, err)
 	}
 	if len(pending) != 0 {
 		return false, nil
 	}
-	e.steering[runID].sealed = true
+	state.sealed = true
 	return true, nil
 }
 

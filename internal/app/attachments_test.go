@@ -13,13 +13,104 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/config"
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/model/provider"
 )
+
+func TestContinueRejectsIncompatibleModelBeforeChangingRun(t *testing.T) {
+	rt, _ := runtimeFixture(t, 1)
+	ctx := t.Context()
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil || !bytes.Contains(body, []byte("data:image/png;base64,")) {
+			t.Errorf("继续请求缺少原图片: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"index":0,"message":{"role":"assistant","content":"已继续"},"finish_reason":"stop"}]}`)
+	}))
+	t.Cleanup(upstream.Close)
+	pid, err := rt.Providers().CreateProvider(ctx, provider.ProviderInput{Name: "厂商", Protocol: "chatcompletions", BaseURL: upstream.URL + "/v1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addModel := func(name string, types ...string) string {
+		t.Helper()
+		id, err := rt.Providers().CreateModel(ctx, provider.ModelInput{ProviderID: pid, DisplayName: name, RemoteModelID: name,
+			Enabled: true, ModelType: types, ContextWindow: new(int64(1000000))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	vision, text := addModel("vision", "image"), addModel("text", "text")
+	var original bytes.Buffer
+	if err := png.Encode(&original, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "resume.png")
+	if err := os.WriteFile(path, original.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := rt.Conversations()
+	var initial conversation.Execution
+	err = svc.Send(ctx, conversation.Send{ModelID: vision, Stream: new(false), Content: []model.Block{{Type: "image", Path: path}}}, func(ex conversation.Execution) error {
+		initial = ex
+		if !rt.Cancel(ex.Run.ID) {
+			t.Fatal("受理阶段无法取消任务")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, run := initial.Conversation.ID, initial.Run.ID
+	rt.manager.Wait(run)
+	before, err := svc.History(ctx, id, "", 25)
+	if err != nil || len(before.Runs) != 1 || before.Runs[0].Status != agent.Cancelled {
+		t.Fatalf("未准备好已停止的任务: %+v %v", before, err)
+	}
+	steps, err := rt.Runs().Steps(ctx, run, 0, 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := sharedPeer(t, rt)
+	params := map[string]any{"conversation_id": id, "run_id": run, "model_id": text}
+	if rejected := p.call(t, "conversation.continue", params); rejected.Error == nil || rejected.Error.Code != 1005 {
+		t.Fatalf("不兼容的恢复未返回既有错误: %+v", rejected)
+	}
+	after, err := svc.History(ctx, id, "", 25)
+	if err != nil || !reflect.DeepEqual(before, after) || calls.Load() != 0 {
+		t.Fatalf("拒绝恢复后原执行状态被修改或调用了模型: %v", err)
+	}
+	afterSteps, err := rt.Runs().Steps(ctx, run, 0, 20)
+	if err != nil || !reflect.DeepEqual(steps, afterSteps) {
+		t.Fatalf("拒绝恢复后改写了执行步骤: %v", err)
+	}
+	saved, err := svc.Get(ctx, id)
+	if err != nil || saved.Model.ID != vision {
+		t.Fatalf("拒绝恢复后改写了会话模型: %+v %v", saved.Model, err)
+	}
+	params["model_id"] = vision
+	if got := resultString(t, p.call(t, "conversation.continue", params), "run_id"); got != run {
+		t.Fatalf("继续使用了不同执行: %q", got)
+	}
+	p.event(t, "run.completed")
+	if calls.Load() != 1 {
+		t.Fatalf("模型调用次数: %d", calls.Load())
+	}
+	p.stop(t)
+}
 
 func TestAttachmentHistoryResendAndRecovery(t *testing.T) {
 	var original bytes.Buffer

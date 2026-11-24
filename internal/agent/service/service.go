@@ -27,8 +27,8 @@ type Engine struct {
 	options       Options
 	inputMu       sync.Mutex
 	inputSignals  map[string]chan struct{}
-	steeringMu    sync.Mutex
-	steering      map[string]*runSteering
+	steeringMu    sync.Mutex // 只保护租约与状态的映射。
+	steering      map[*executor.Lease]*runSteering
 	usageMu       sync.RWMutex
 	usage         map[string]liveContextUsage
 	usageRevision atomic.Int64
@@ -54,7 +54,7 @@ func New(repository agent.Repository, conversations conversation.Repository, man
 			return nil, agent.ErrInvalid
 		}
 	}
-	return &Engine{repository: repository, conversations: conversations, manager: manager, emit: emit, logger: logger, options: options, inputSignals: make(map[string]chan struct{}), steering: make(map[string]*runSteering), usage: make(map[string]liveContextUsage)}, nil
+	return &Engine{repository: repository, conversations: conversations, manager: manager, emit: emit, logger: logger, options: options, inputSignals: make(map[string]chan struct{}), steering: make(map[*executor.Lease]*runSteering), usage: make(map[string]liveContextUsage)}, nil
 }
 
 func (e *Engine) event(ex conversation.Execution, name, stepID, messageID string, data any) error {
@@ -71,15 +71,22 @@ func cleanupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }
 
-func (e *Engine) Abandon(ctx context.Context, ex conversation.Execution, cause error) {
-	cleanup, cancel := cleanupContext(ctx)
+func (e *Engine) Abandon(lease *executor.Lease, ex conversation.Execution, cause error) {
+	cleanup, cancel := cleanupContext(lease.Context())
 	defer cancel()
+	var pending []conversation.FollowUp
+	if state := e.steeringState(lease); state != nil {
+		defer e.removeSteering(lease)
+		pending = e.sealSteering(cleanup, state)
+	}
 	status, kind, message := failure(cause)
 	now := time.Now().UnixMilli()
 	ex.Run.Status, ex.Run.ErrorKind, ex.Run.ErrorMessage, ex.Run.UpdatedAt, ex.Run.FinishedAt = status, &kind, &message, now, &now
 	if err := e.repository.Finish(cleanup, ex.Run); err != nil {
 		e.logger.Error("保存未启动执行的终态失败", "module", "run", "run_id", ex.Run.ID)
+		return
 	}
+	e.steeringRequeued(ex, pending)
 }
 
 // ConversationUpdated 在会话变更提交后发布通知，订阅故障不能回滚已提交的修改。

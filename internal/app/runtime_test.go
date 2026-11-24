@@ -177,6 +177,35 @@ func TestRuntimeWithoutProtocol(t *testing.T) {
 	}
 }
 
+func TestPersistentQueriesRejectInvalidUUIDVariant(t *testing.T) {
+	runtime, _ := runtimeFixture(t, 1)
+	const id = "01900000-0000-7000-c000-000000000001"
+	if _, err := runtime.Runs().Get(t.Context(), id); !errors.Is(err, agent.ErrInvalid) {
+		t.Fatalf("直接查询未拒绝无效 UUID variant: %v", err)
+	}
+	p := sharedPeer(t, runtime)
+	for _, request := range []struct {
+		method string
+		params map[string]any
+	}{
+		{"run.get", map[string]any{"id": id}},
+		{"run.list", map[string]any{"conversation_id": id}},
+		{"step.get", map[string]any{"id": id}},
+		{"step.list", map[string]any{"run_id": id}},
+		{"step.data", map[string]any{"step_id": id, "field": "output"}},
+	} {
+		response := p.call(t, request.method, request.params)
+		if response.Error == nil || response.Error.Code != -32602 {
+			t.Fatalf("%s 未返回参数错误: %+v", request.method, response)
+		}
+	}
+	response := p.call(t, "run.get", map[string]any{"id": "01900000-0000-7000-8000-000000000001"})
+	if response.Error == nil || response.Error.Code != 1001 {
+		t.Fatalf("规范但不存在的执行 ID 未返回未找到: %+v", response)
+	}
+	p.stop(t)
+}
+
 func TestSharedRuntimeConnectionCleanup(t *testing.T) {
 	ownedStarted, otherStarted := make(chan struct{}), make(chan struct{})
 	releaseOther := make(chan struct{})

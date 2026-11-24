@@ -394,6 +394,8 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 
 参数为 `conversation_id`、`run_id` 和可选的 `model_id`、`resume_in_place`。客户端可传 `resume_in_place: true` 来避免对旧版服务触发新增消息的继续操作，旧版会拒绝此参数。`run_id` 必须属于当前会话最新一条普通用户消息，且状态为 `cancelled` 或 `interrupted`。有活动执行时返回 `1006`，执行已被替换或来源已过期时返回 `1003`。手动压缩单独记录，仍可继续此前停止的对话任务。
 
+原问题、已生效引导或有效摘要之后的用户历史有图片时，继续任务需要支持图片输入的模型。选中的模型不兼容时，受理阶段返回 `1005`（`unsupported`），保留原执行终态与记录，可改用支持图片的模型继续。
+
 受理结果与 `conversation.send` 同形，返回原会话、原执行和原用户及回答消息的 ID。受理后发送 `run.resumed`、原回复的 `message.updated` 及新步骤的 `step.created`。新的模型请求使用原需求、已生效的引导、保存的工具轨迹及本次设置快照。已发布的交付物仍在原回复中。结果待核实的操作继续受审批约束，原执行绑定的待发队列在执行成功后才可自动发出。
 
 ### 后续消息
@@ -779,6 +781,8 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 
 通知、列表和 `step.get` 均将大型 `output`、`usage`、`definition` 置为 `null`，这不代表数据库中没有数据。通过下面的 `step.data` 获取原始字段。
 
+`step.list` 和 `step.get` 在存储层读取元数据和字段字节数。`step.data` 按偏移从指定字段读取有界字节窗口，长度与窗口取自同一次查询。
+
 参数纠正期间执行保持 running。完整模型响应中的工具参数 JSON 损坏时，失败模型步骤保留原响应和 usage，本轮不创建任何工具步骤；下一模型步骤 input.tool_arguments_correction 记录 source_step_id 和从 0 开始的 call_index。该反馈仅用于本次请求且计入容量校验，不是用户输入或授权。纠正后重新校验和审批；重复同一坏参数且无进展时通过 run.failed 的 invalid_response 和具体安全说明结束。类型错误或简单 Shell 包装则产生 failed 工具步骤，error_kind=invalid_arguments，error_message 提供字段纠正说明，operation.outcome=not_applied。详见 [Agent 工具与审批](tools-and-approvals.md#非交互命令执行)。
 
 单项参数超过 16 KiB 时，失败模型步骤的 `error_kind` 为 `tool_arguments_limit`，说明包含工具名、接收字节数和上限。流式响应可在结束标记前因该边界关闭。确认整批工具未执行且无其他失败后进入同一纠正流程，`input.tool_arguments_correction` 额外记录 `tool`、`actual_bytes`、`limit_bytes`。超限片段及缺失的结束标记保留在失败模型结果中，缺失 usage 不补造。
@@ -794,9 +798,10 @@ Agent 不设固定模型轮次、累计工具次数或单次响应工具调用�
 {"jsonrpc":"2.0","id":"step-output","method":"step.data","params":{"step_id":"<step_id>","field":"output","offset":0,"limit":65536}}
 {"jsonrpc":"2.0","id":"step-usage","method":"step.data","params":{"step_id":"<step_id>","field":"usage","offset":0,"limit":65536}}
 {"jsonrpc":"2.0","id":"step-definition","method":"step.data","params":{"step_id":"<step_id>","field":"definition","offset":0,"limit":65536}}
+{"jsonrpc":"2.0","id":"step-text","method":"step.data","params":{"step_id":"<step_id>","field":"text","offset":0,"limit":65536}}
 ```
 
-`field` 支持 `input`、`output`、`usage`、`definition` 和 `reasoning`。`reasoning` 返回模型步骤独立保存的思考正文，片段拼接后直接作为 UTF-8 文本使用，无须读取或解析完整的 `output`。没有思考字段时返回 `present:false`。`offset` 是字节偏移，必须非负且位于合法 UTF-8 边界；`limit` 默认 65536，范围 4 至 65536。
+`field` 支持 `input`、`output`、`usage`、`definition`、`text` 和 `reasoning`。`text` 读取模型步骤中角色为 `assistant` 的统一消息 `context_message.content`，只返回字符串值。`reasoning` 读取模型步骤独立保存的思考正文。两者都直接以 UTF-8 文本返回，无需读取或解析完整的 `output`，旧记录缺少对应字段时返回 `present:false`。`offset` 是字节偏移，必须非负且位于合法 UTF-8 边界。`limit` 默认 65536，范围 4 至 65536。
 
 usage 片段响应示例：
 
@@ -804,7 +809,7 @@ usage 片段响应示例：
 {"jsonrpc":"2.0","id":"step-usage","result":{"step_id":"<step_id>","field":"usage","present":true,"offset":0,"next_offset":18,"total_bytes":18,"done":true,"fragment":"{\"total_tokens\":7}"}}
 ```
 
-`fragment` 是字符串，拼接完整后再作为 JSON 解析。未读完时，把返回的 `next_offset` 原样作为下一次请求的 `offset`；不要按 Unicode 字符数自行计算偏移。字段缺失时 `present:false`、片段为空，不生成估算用量。
+`fragment` 是字符串。`text` 和 `reasoning` 的片段可直接拼接成文本，其他字段拼接完整后再按 JSON 解析。未读完时，把返回的 `next_offset` 原样作为下一次请求的 `offset`。字段缺失时 `present:false`、片段为空，不生成估算用量。
 
 - 模型调用步骤的 `output` 保存协议适配后的完整结果及相关原始响应数据；格式和保存时机见本节后文。
 - 模型调用步骤的 `usage` 原样保存厂商返回的用量；主回答、每轮继续调用及辅助标题分别记录，缺失保持未知。
@@ -1093,7 +1098,7 @@ scope 仅接受 once、conversation_directory；拒绝决定不能授予目录�
 
 ## 独立推理内容
 
-主对话支持 `reasoning.delta` 通知，参数为 `conversation_id`、`run_id`、`step_id` 与字符串 `text`，绑定一个 `model_call` 步骤，不写入回答正文。仅在供应商实际提供推理字段时发送，可能包含显式空字符串；通知不表示步骤成功。结束、取消或失败后通过 `step.data` 的 `output` 字段读取统一的 `reasoning` 字符串。活动期间定期保存已接受的片段；进程异常退出可能丢失最近未落盘片段，恢复不会自动重试。失败和取消的推理可能不完整，客户端应结合步骤状态展示。
+主对话支持 `reasoning.delta` 通知，参数为 `conversation_id`、`run_id`、`step_id` 与字符串 `text`，绑定一个 `model_call` 步骤，不写入回答正文。仅在供应商实际提供推理字段时发送，可能包含显式空字符串，通知不表示步骤成功。结束、取消或失败后通过 `step.data` 的 `reasoning` 字段读取思考正文。活动期间定期保存已接受的片段，进程异常退出可能丢失最近未落盘片段，恢复不会自动重试。失败和取消的推理可能不完整，客户端应结合步骤状态展示。
 
 Chat Completions 适配器识别 `reasoning_content`，缺失或 null 表示未提供，非字符串报协议错误；不从正文中的 `<think>` 等标签推断。成功结果的 `context_message.reasoning` 保留显式字段供适配器在工具循环回传，推理计入输入预算与累计内容边界；失败的部分推理不生成成功上下文。原始供应商结果与 usage 按原有规则保留。旧步骤没有统一推理投影时保持缺失，不解析原始供应商 JSON 补造内容。无需数据库结构迁移。
 

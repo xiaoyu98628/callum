@@ -13,10 +13,17 @@ import (
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 )
 
-// Execute 只在受理响应已排队后运行；标题任务在终态前取消并等待退出。
-func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved) {
-	e.beginSteering(ex.Run.ID)
-	defer e.endSteering(ex.Run.ID)
+// PrepareExecution 为已提交的普通对话登记引导状态。调用方必须启动返回的任务或调用 Abandon。
+func (e *Engine) PrepareExecution(lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved) func(context.Context) {
+	steering := e.registerSteering(lease, ex.Run.ID)
+	return func(ctx context.Context) {
+		defer e.removeSteering(lease)
+		e.execute(ctx, lease, ex, resolved, steering)
+	}
+}
+
+// execute 在受理响应排队后运行，标题任务在终态前取消并等待退出。
+func (e *Engine) execute(ctx context.Context, lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved, steering *runSteering) {
 	err := e.initialEvents(ex)
 	if err == nil && e.options.Attachments != nil {
 		_, err = e.options.Attachments.Begin(ctx, ex.Conversation.ID, ex.Run.ID, ex.PublishedArtifacts...)
@@ -29,7 +36,7 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	var titleWG sync.WaitGroup
 	titleCtx, titleCancel := context.WithCancel(ctx)
 	if err == nil {
-		err = e.loop(ctx, ex, resolved, func() {
+		err = e.loop(ctx, ex, resolved, steering, func() {
 			if text := history.Text(ex.User.Content); !ex.Resumed && ex.User.Sequence == 1 && ex.Conversation.TitleSource == "default" && strings.TrimSpace(text) != "" {
 				if release, ok, _ := e.manager.TryAcquireCall(titleCtx); ok {
 					titleWG.Go(func() { defer release(); e.title(titleCtx, ex, resolved, text) })
@@ -65,10 +72,7 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	ex.Run.Status, ex.Run.ErrorKind, ex.Run.ErrorMessage, ex.Run.UpdatedAt, ex.Run.FinishedAt = status, kind, message, now, &now
 	cleanup, cancel := cleanupContext(ctx)
 	defer cancel()
-	pending, pendingErr := e.sealSteering(cleanup, ex.Run.ID)
-	if pendingErr != nil {
-		e.logger.Error("读取待恢复引导失败", "module", "run", "run_id", ex.Run.ID)
-	}
+	pending := e.sealSteering(cleanup, steering)
 	finishErr := e.repository.Finish(cleanup, ex.Run)
 	if finishErr != nil {
 		e.logger.Error("保存执行终态失败", "module", "run", "run_id", ex.Run.ID)
@@ -80,13 +84,7 @@ func (e *Engine) Execute(ctx context.Context, lease *executor.Lease, ex conversa
 	} else if errors.Is(err, agent.ErrStorage) {
 		e.logger.Error("执行数据保存失败", "module", "run", "run_id", ex.Run.ID)
 	}
-	if len(pending) > 0 {
-		ids := make([]string, len(pending))
-		for i, followUp := range pending {
-			ids[i] = followUp.ID
-		}
-		_ = e.emit(agent.Event{Type: "conversation.steering_requeued", ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, RemovedMessageIDs: ids})
-	}
+	e.steeringRequeued(ex, pending)
 	if finishErr == nil {
 		if message, readErr := e.latestMessage(cleanup, ex); readErr == nil {
 			_ = e.event(ex, "message.updated", "", message.ID, message)

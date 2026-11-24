@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	scheduler "github.com/xiaoyu98628/callum/internal/agent/executor"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/inference/executor"
 	"github.com/xiaoyu98628/callum/internal/model"
@@ -80,11 +81,15 @@ func (f *serverFixture) Serve(ctx context.Context, in io.ReadCloser, out io.Writ
 		return err
 	}
 	defer func() { retErr = errors.Join(retErr, connection.Close()) }()
-	runs, err := executor.New(connection.Context(), f.resolve, 2, time.Second, func(event inference.Event) error { return execution.Emit(connection.Notify, event) })
+	shared, err := scheduler.New(connection.Context(), 2, time.Second)
 	if err != nil {
 		return err
 	}
-	defer runs.Close()
+	defer shared.Close()
+	runs, err := executor.NewWithScheduler(shared, f.resolve, func(event inference.Event) error { return execution.Emit(connection.Notify, event) })
+	if err != nil {
+		return err
+	}
 	server, err := New(f.providers, runs, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		return err

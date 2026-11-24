@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -14,8 +13,6 @@ import (
 	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
 	"github.com/xiaoyu98628/callum/internal/attachment"
 	"github.com/xiaoyu98628/callum/internal/conversation"
-	"github.com/xiaoyu98628/callum/internal/conversation/history"
-	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/skills"
 )
@@ -183,9 +180,8 @@ func (s *Service) Continue(ctx context.Context, in conversation.Continue, accept
 		return err
 	}
 	defer lease.Abort()
-	lookup, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(lease.Context(), cancel)
-	defer func() { stop(); cancel() }()
+	lookup, cancel := acceptanceContext(ctx, lease)
+	defer cancel()
 	if in.ModelID == "" {
 		conv, err := s.repository.Get(lookup, in.ConversationID)
 		if err != nil {
@@ -197,11 +193,12 @@ func (s *Service) Continue(ctx context.Context, in conversation.Continue, accept
 	if err != nil {
 		return err
 	}
-	ex, err := s.repository.Begin(lookup, conversation.Begin{Resume: true, ConversationID: in.ConversationID, RunID: in.RunID, StepID: stepID, Model: resolved.Snapshot, Protocol: resolved.Protocol})
+	ex, err := s.repository.Begin(lookup, conversation.Begin{Resume: true, ResumeImageInput: resolved.ImageInput,
+		ConversationID: in.ConversationID, RunID: in.RunID, StepID: stepID, Model: resolved.Snapshot, Protocol: resolved.Protocol})
 	if err != nil {
 		return err
 	}
-	return s.start(lease, ex, resolved, accepted)
+	return s.start(lease, ex, accepted, s.engine.PrepareExecution(lease, ex, resolved))
 }
 
 func (s *Service) send(ctx context.Context, in conversation.Send, followUp *conversation.FollowUpStart, accepted func(conversation.Execution) error) error {
@@ -250,9 +247,8 @@ func (s *Service) send(ctx context.Context, in conversation.Send, followUp *conv
 		return err
 	}
 	defer lease.Abort()
-	lookup, cancel := context.WithCancel(ctx)
-	stop := context.AfterFunc(lease.Context(), cancel)
-	defer func() { stop(); cancel() }()
+	lookup, cancel := acceptanceContext(ctx, lease)
+	defer cancel()
 	resolved, err := s.resolveModel(lookup, in.ModelID)
 	if err != nil {
 		return err
@@ -263,30 +259,9 @@ func (s *Service) send(ctx context.Context, in conversation.Send, followUp *conv
 			return err
 		}
 	}
-	hasAttachments := false
-	for _, block := range in.Content {
-		if block.Type == "image" {
-			if !resolved.ImageInput {
-				return inference.ErrUnsupported
-			}
-		}
-		if block.Type == "image" || block.Type == "file" {
-			hasAttachments = true
-		}
-	}
-	var batch *attachment.Batch
-	if hasAttachments {
-		batch, err = s.attachments.Stage(lookup, in.ConversationID, ids[0], in.Content)
-		if err != nil {
-			return err
-		}
-		if validator, ok := resolved.Client.(model.InputValidator); ok {
-			req := model.Request{Model: resolved.Snapshot.RemoteModelID, AllowImageInput: resolved.ImageInput,
-				Messages: []model.Message{{Role: model.RoleUser, Blocks: history.ModelContent(in.Content)}}}
-			if err := validator.ValidateInput(lookup, req); err != nil {
-				return errors.Join(err, batch.Discard())
-			}
-		}
+	batch, err := s.stageAttachments(lookup, in.ConversationID, ids[0], in.Content, resolved)
+	if err != nil {
+		return err
 	}
 	stream := true
 	if in.Stream != nil {
@@ -297,7 +272,17 @@ func (s *Service) send(ctx context.Context, in conversation.Send, followUp *conv
 	if err != nil {
 		return err
 	}
-	return s.start(lease, ex, resolved, accepted)
+	return s.start(lease, ex, accepted, s.engine.PrepareExecution(lease, ex, resolved))
+}
+
+// acceptanceContext 随请求或租约取消受理工作，已受理执行仍使用自己的上下文。
+func acceptanceContext(ctx context.Context, lease *executor.Lease) (context.Context, context.CancelFunc) {
+	lookup, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(lease.Context(), cancel)
+	return lookup, func() {
+		stop()
+		cancel()
+	}
 }
 
 func (s *Service) resolveModel(ctx context.Context, id string) (agent.Resolved, error) {
@@ -314,7 +299,13 @@ func (s *Service) resolveModel(ctx context.Context, id string) (agent.Resolved, 
 	return resolved, nil
 }
 
-func (s *Service) start(lease *executor.Lease, ex conversation.Execution, resolved agent.Resolved, accepted func(conversation.Execution) error) error {
+func (s *Service) start(lease *executor.Lease, ex conversation.Execution, accepted func(conversation.Execution) error, execute func(context.Context)) error {
+	started := false
+	defer func() {
+		if !started {
+			s.engine.Abandon(lease, ex, context.Canceled)
+		}
+	}()
 	acceptedValue := ex
 	if ex.Run.SettingsSnapshot != nil {
 		// 受理回调借用独立快照，不能通过指针修改即将执行的权限设置。
@@ -326,9 +317,9 @@ func (s *Service) start(lease *executor.Lease, ex conversation.Execution, resolv
 		acceptedValue.Context = &value
 	}
 	if err := accepted(acceptedValue); err != nil {
-		s.engine.Abandon(lease.Context(), ex, context.Canceled)
 		return err
 	}
-	lease.Start(func(ctx context.Context) { s.engine.Execute(ctx, lease, ex, resolved) })
+	lease.Start(execute)
+	started = true
 	return nil
 }

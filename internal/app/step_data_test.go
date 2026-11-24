@@ -43,17 +43,28 @@ func TestLargeModelResultUsesBoundedUTF8Fragments(t *testing.T) {
 	stepID := resultStringFromSteps(t, p.call(t, "step.list", map[string]any{"run_id": rid}))
 	first := p.call(t, "step.data", map[string]any{"step_id": stepID, "field": "output"})
 	requireOK(t, first)
-	var chunk struct {
+	type window struct {
 		Fragment   string `json:"fragment"`
 		TotalBytes int    `json:"total_bytes"`
 		Done       bool   `json:"done"`
 		NextOffset int    `json:"next_offset"`
+		Present    bool   `json:"present"`
 	}
+	var chunk window
 	if err := json.Unmarshal(first.Result, &chunk); err != nil {
 		t.Fatal(err)
 	}
 	if chunk.TotalBytes <= 8<<20 || chunk.Done || len(chunk.Fragment) > 64<<10 || !utf8.ValidString(chunk.Fragment) {
 		t.Fatalf("结果没有分段: bytes=%d next=%d", chunk.TotalBytes, chunk.NextOffset)
+	}
+	preview := p.call(t, "step.data", map[string]any{"step_id": stepID, "field": "text"})
+	requireOK(t, preview)
+	var text window
+	if err := json.Unmarshal(preview.Result, &text); err != nil {
+		t.Fatal(err)
+	}
+	if want := (window{Fragment: "完成", TotalBytes: len("完成"), NextOffset: len("完成"), Done: true, Present: true}); text != want {
+		t.Fatalf("大型原始结果的正文投影: %+v，应为 %+v", text, want)
 	}
 	offset := 0
 	for !strings.Contains(chunk.Fragment, "源") {

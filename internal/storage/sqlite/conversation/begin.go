@@ -209,6 +209,11 @@ func resumeRun(tx *gorm.DB, in domain.Begin, conv schema.Conversation, snapshot 
 	if err != nil {
 		return out, err
 	}
+	if !in.ResumeImageInput {
+		if err := checkResumeImageInput(tx, user, current); err != nil {
+			return out, err
+		}
+	}
 	var sequence int64
 	if err := tx.Model(&schema.Step{}).Where("run_id=?", run.ID).Select("COALESCE(MAX(sequence),0)").Scan(&sequence).Error; err != nil {
 		return out, err
@@ -251,6 +256,37 @@ func resumeRun(tx *gorm.DB, in domain.Begin, conv schema.Conversation, snapshot 
 		Run:  agentstore.Run(agentstore.RunRow{Run: run, ResumedAt: &now}),
 		Step: agent.Step{ID: step.ID, ConversationID: conv.ID, RunID: run.ID, Sequence: step.Sequence, Type: step.Type, Name: step.Name, Status: step.Status, Input: input, Model: &in.Model, CreatedAt: now, UpdatedAt: now},
 	}, nil
+}
+
+// checkResumeImageInput 检查摘要边界后的用户消息及已生效引导，包含历史分页尚未加载的轮次。
+// 当前任务的原消息始终随继续请求发送。工具图片由适配器按模型能力处理。
+func checkResumeImageInput(tx *gorm.DB, user schema.Message, current *domain.ContextVersion) error {
+	var floor int64
+	if current != nil {
+		floor = current.ThroughSequence
+	}
+	messageImages := tx.Table("json_each(m.content) AS b").Select("1").
+		Where("json_extract(b.value, '$.type') = 'image'")
+	steeringImages := tx.Model(&schema.FollowUp{}).Table("conversation_followups AS f").Select("1").
+		Joins("JOIN conversation_run_steps AS s ON s.id = f.applied_step_id AND s.run_id = r.id").
+		Joins("JOIN json_each(f.content) AS b").
+		Where("f.conversation_id = m.conversation_id AND f.expected_run_id = r.id").
+		Where("f.status = ? AND (r.finished_at IS NOT NULL OR m.id = ?)", domain.FollowUpApplied, user.ID).
+		Where("json_extract(b.value, '$.type') = 'image'")
+	var needsImage bool
+	err := tx.Model(&schema.Message{}).Table("conversation_messages AS m").Select("1").
+		Joins("JOIN conversation_runs AS r ON r.id = m.run_id").
+		Where("m.conversation_id = ? AND m.role = 'user' AND m.sequence <= ?", user.ConversationID, user.Sequence).
+		Where("(m.sequence > ? OR m.id = ?)", floor, user.ID).
+		Where("(EXISTS (?) OR EXISTS (?))", messageImages, steeringImages).
+		Limit(1).Scan(&needsImage).Error
+	if err != nil {
+		return err
+	}
+	if needsImage {
+		return model.ErrUnsupportedOutput
+	}
+	return nil
 }
 
 func (r *Repository) ApplyTitle(ctx context.Context, id, userID, fingerprint, title string) (out domain.Conversation, applied bool, err error) {

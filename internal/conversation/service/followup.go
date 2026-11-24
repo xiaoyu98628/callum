@@ -5,9 +5,8 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/xiaoyu98628/callum/internal/attachment"
+	"github.com/xiaoyu98628/callum/internal/agent/executor"
 	"github.com/xiaoyu98628/callum/internal/conversation"
-	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/inference"
 	"github.com/xiaoyu98628/callum/internal/model"
 )
@@ -22,6 +21,13 @@ func (s *Service) FollowUps(ctx context.Context, id string) ([]conversation.Foll
 func (s *Service) AddFollowUp(ctx context.Context, in conversation.FollowUpInput) (out conversation.FollowUp, err error) {
 	if !validID(in.ConversationID) || !validID(in.ExpectedRunID) || (in.Mode != "queue" && in.Mode != "steer") {
 		return out, conversation.ErrInvalid
+	}
+	var lease *executor.Lease
+	if in.Mode == "steer" {
+		lease = s.engine.SteeringLease(in.ExpectedRunID)
+		if lease == nil {
+			return out, conversation.ErrFollowUpChanged
+		}
 	}
 	content := append([]model.Block(nil), in.Content...)
 	if err := validate(conversation.Send{ConversationID: in.ConversationID, ModelID: in.ModelID, Content: content}); err != nil {
@@ -38,13 +44,13 @@ func (s *Service) AddFollowUp(ctx context.Context, in conversation.FollowUpInput
 		in.ModelID = conv.Model.ID
 	}
 	if in.Mode == "steer" {
-		run, err := s.engine.GetRun(ctx, in.ExpectedRunID)
+		run, err := s.engine.Get(ctx, in.ExpectedRunID)
 		if err != nil || run.ConversationID != in.ConversationID {
 			return out, conversation.ErrFollowUpChanged
 		}
 		in.ModelID = run.Model.ID
 	}
-	resolved, err := s.resolve(ctx, in.ModelID)
+	resolved, err := s.resolveModel(ctx, in.ModelID)
 	if err != nil {
 		return out, err
 	}
@@ -52,28 +58,11 @@ func (s *Service) AddFollowUp(ctx context.Context, in conversation.FollowUpInput
 	if err != nil {
 		return out, err
 	}
-	var batch *attachment.Batch
-	hasAttachments := false
-	for _, block := range content {
-		if block.Type == "image" && !resolved.ImageInput {
-			return out, inference.ErrUnsupported
-		}
-		hasAttachments = hasAttachments || block.Type == "image" || block.Type == "file"
+	batch, err := s.stageAttachments(ctx, in.ConversationID, id, content, resolved)
+	if err != nil {
+		return out, err
 	}
-	if hasAttachments {
-		batch, err = s.attachments.Stage(ctx, in.ConversationID, id, content)
-		if err != nil {
-			return out, err
-		}
-		defer func() { batch.Finish(ctx, err == nil) }()
-		if validator, ok := resolved.Client.(model.InputValidator); ok {
-			request := model.Request{Model: resolved.Snapshot.RemoteModelID, AllowImageInput: resolved.ImageInput,
-				Messages: []model.Message{{Role: model.RoleUser, Blocks: history.ModelContent(content)}}}
-			if err := validator.ValidateInput(ctx, request); err != nil {
-				return out, err
-			}
-		}
-	}
+	defer func() { batch.Finish(ctx, err == nil) }()
 	status := conversation.FollowUpQueued
 	if in.Mode == "steer" {
 		status = conversation.FollowUpSteering
@@ -84,7 +73,7 @@ func (s *Service) AddFollowUp(ctx context.Context, in conversation.FollowUpInput
 		return out, err
 	}
 	if in.Mode == "steer" {
-		err = s.engine.AcceptSteering(in.ExpectedRunID, write)
+		err = s.engine.AcceptSteering(lease, write)
 	} else {
 		_, err = write()
 		if err == nil {
@@ -104,6 +93,13 @@ func (s *Service) ChangeFollowUp(ctx context.Context, in conversation.FollowUpCh
 		edit != (in.Text != nil) || (in.ModelID != "" && (!queue || !validID(in.ModelID))) {
 		return out, conversation.ErrInvalid
 	}
+	var lease *executor.Lease
+	if steer {
+		lease = s.engine.SteeringLease(in.ExpectedRunID)
+		if lease == nil {
+			return out, conversation.ErrFollowUpChanged
+		}
+	}
 	item, err := s.repository.FollowUp(ctx, in.ConversationID, in.ID)
 	if err != nil {
 		return out, err
@@ -118,7 +114,7 @@ func (s *Service) ChangeFollowUp(ctx context.Context, in conversation.FollowUpCh
 	if steer || queue {
 		modelID := item.ModelID
 		if steer {
-			run, err := s.engine.GetRun(ctx, in.ExpectedRunID)
+			run, err := s.engine.Get(ctx, in.ExpectedRunID)
 			if err != nil || run.ConversationID != in.ConversationID {
 				return out, conversation.ErrFollowUpChanged
 			}
@@ -126,7 +122,7 @@ func (s *Service) ChangeFollowUp(ctx context.Context, in conversation.FollowUpCh
 		} else if in.ModelID != "" {
 			modelID = in.ModelID
 		}
-		resolved, err := s.resolve(ctx, modelID)
+		resolved, err := s.resolveModel(ctx, modelID)
 		if err != nil {
 			return out, err
 		}
@@ -141,7 +137,7 @@ func (s *Service) ChangeFollowUp(ctx context.Context, in conversation.FollowUpCh
 		return out, err
 	}
 	if steer {
-		err = s.engine.AcceptSteering(in.ExpectedRunID, write)
+		err = s.engine.AcceptSteering(lease, write)
 	} else {
 		_, err = write()
 		if err == nil {
@@ -172,7 +168,7 @@ func editedFollowUpContent(item conversation.FollowUp, text string) ([]model.Blo
 }
 
 func (s *Service) StartFollowUp(ctx context.Context, in conversation.FollowUpStart, accepted func(conversation.Execution) error) error {
-	if !validID(in.ConversationID) || !validID(in.ID) || in.Revision < 1 ||
+	if accepted == nil || !validID(in.ConversationID) || !validID(in.ID) || in.Revision < 1 ||
 		(in.AfterRunID != "" && (!validID(in.AfterRunID) || in.Text != nil)) ||
 		(in.ModelID != "" && (in.Text == nil || !validID(in.ModelID))) {
 		return conversation.ErrInvalid

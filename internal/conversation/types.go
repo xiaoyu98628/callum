@@ -89,6 +89,7 @@ type Begin struct {
 	ResendMessageID    string
 	ResendRunID        string
 	Resume             bool
+	ResumeImageInput   bool
 	Model              model.Snapshot
 	Protocol           string
 	Content            []model.Block

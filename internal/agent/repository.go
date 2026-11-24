@@ -14,6 +14,9 @@ type Repository interface {
 	List(context.Context, string, int, int) ([]Run, error)
 	GetStep(context.Context, string) (Step, error)
 	Steps(context.Context, string, int64, int) ([]Step, error)
+	GetStepSummary(context.Context, string) (StepSummary, error)
+	StepSummaries(context.Context, string, int64, int) ([]StepSummary, error)
+	StepData(context.Context, string, string, int, int) (StepData, error)
 	CreateStep(context.Context, Step) (Step, error)
 	SaveStep(context.Context, Step) error
 	SaveMessage(context.Context, string, []model.Block, string) error

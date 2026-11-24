@@ -125,6 +125,11 @@ type childProcess struct {
 	err     error
 }
 
+const (
+	processExitGrace = 250 * time.Millisecond
+	processStopWait  = 2 * time.Second
+)
+
 func (p *childProcess) Read(b []byte) (int, error)  { return p.out.Read(b) }
 func (p *childProcess) Write(b []byte) (int, error) { return p.in.Write(b) }
 func (p *childProcess) Close() error {
@@ -132,10 +137,16 @@ func (p *childProcess) Close() error {
 		inputErr := p.in.Close()
 		select {
 		case <-p.done:
-		case <-time.After(250 * time.Millisecond):
+		case <-time.After(processExitGrace):
 		}
+		// 即使主进程已经退出，仍要清理它的进程组或 Job。
 		p.err = errors.Join(inputErr, p.out.Close(), p.stop())
-		<-p.done
+		select {
+		case <-p.done:
+		case <-time.After(processStopWait):
+			// 停止失败时，保留 cmd.Wait 的回收责任，允许会话及应用继续关闭。
+			p.err = errors.Join(p.err, context.DeadlineExceeded)
+		}
 	})
 	return p.err
 }

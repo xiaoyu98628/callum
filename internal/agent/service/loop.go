@@ -15,7 +15,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
-func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, startTitle func()) error {
+func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, steering *runSteering, startTitle func()) error {
 	transcripts, messages, err := e.prepareHistory(ctx, &ex, resolved, false)
 	if err != nil {
 		return err
@@ -78,7 +78,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if correction != nil {
 			requestFixed = append(requestFixed, correction.message())
 		}
-		pending, generation, err := e.snapshotSteering(ctx, ex.Run.ID)
+		pending, generation, err := e.snapshotSteering(ctx, steering)
 		if err != nil {
 			return operationStorageError(ctx, err)
 		}
@@ -132,7 +132,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if round == 0 {
 			callback = startTitle
 		}
-		samplingCtx, finishSampling := e.samplingContext(ctx, ex.Run.ID, generation)
+		samplingCtx, finishSampling := steering.samplingContext(ctx, generation)
 		result, callErr := e.callModel(ctx, samplingCtx, ex, resolved, step, effective, definitions, callback, &totalText)
 		finishSampling()
 		if callErr == nil {
@@ -174,7 +174,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		correction = nil
 		meter.Observe(effective, definitions, result.InputTokens)
 		if len(result.ToolCalls) == 0 {
-			sealed, err := e.sealAnswer(ctx, ex.Run.ID)
+			sealed, err := e.sealAnswer(ctx, steering)
 			if err != nil || sealed {
 				return err
 			}
@@ -204,11 +204,11 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 			}
 			var value model.Message
 			var err error
-			if err = e.beforeTool(ctx, ex.Run.ID, func() error { return nil }); err == nil {
+			if err = e.beforeTool(ctx, steering, func() error { return nil }); err == nil {
 				if call.Name == agent.UserInputTool {
-					value, err = e.askUser(ctx, ex, step, call)
+					value, err = e.askUser(ctx, ex, steering, step, call)
 				} else {
-					value, err = e.callTool(ctx, ex, resolved, step, call, denied, uncertain, extraByName[call.Name])
+					value, err = e.callTool(ctx, ex, resolved, steering, step, call, denied, uncertain, extraByName[call.Name])
 				}
 			}
 			if errors.Is(err, conversation.ErrSteered) {

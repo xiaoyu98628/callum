@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -166,7 +167,7 @@ func testStreamableOAuth(t *testing.T, fixed bool) {
 	}
 	t.Cleanup(func() { _ = vault.Close() })
 	repo := mcpstore.New(db.DB, vault)
-	service, err := mcp.New(ctx, ctx, repo, client, client)
+	service, err := mcp.New(ctx, ctx, repo, client, client, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}

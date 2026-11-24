@@ -214,27 +214,30 @@ func (r *Repository) Messages(ctx context.Context, id string, before int64, limi
 
 // Attachment 只从当前消息分支查询输入或交付引用。已替换消息和其他会话不授予读取权限。
 func (r *Repository) Attachment(ctx context.Context, conversationID, ref string) (model.Block, error) {
-	var values []struct{ Value string }
-	err := r.db.WithContext(ctx).Raw(`
-		SELECT entry.value FROM conversation_messages m, json_each(m.content) entry
-		WHERE m.conversation_id = ? AND m.role IN ('user', 'assistant')
-		AND json_extract(entry.value, '$.attachment_ref') = ?
-		AND json_extract(entry.value, '$.type') = 'file'
-		UNION ALL
-		SELECT entry.value FROM conversation_followups f, json_each(f.content) entry
-		WHERE f.conversation_id = ? AND f.status IN ('steering','applied')
-		AND EXISTS (SELECT 1 FROM conversation_messages m WHERE m.run_id = f.expected_run_id AND m.role='user')
-		AND json_extract(entry.value, '$.attachment_ref') = ?
-		AND json_extract(entry.value, '$.type') = 'file'
-		LIMIT 1`, conversationID, ref, conversationID, ref).Scan(&values).Error
+	const matchFile = "json_extract(entry.value, '$.attachment_ref') = ? AND json_extract(entry.value, '$.type') = 'file'"
+	db := r.db.WithContext(ctx)
+	messages := db.Model(&schema.Message{}).Table("conversation_messages AS m").Select("entry.value").
+		Joins("JOIN json_each(m.content) AS entry").
+		Where("m.conversation_id = ? AND m.role IN ('user', 'assistant')", conversationID).
+		Where(matchFile, ref)
+	userMessage := db.Model(&schema.Message{}).Select("1").Where("run_id = f.expected_run_id AND role = 'user'")
+	steering := db.Model(&schema.FollowUp{}).Table("conversation_followups AS f").Select("entry.value").
+		Joins("JOIN json_each(f.content) AS entry").
+		Where("f.conversation_id = ? AND f.status IN ?", conversationID, []string{domain.FollowUpSteering, domain.FollowUpApplied}).
+		Where("EXISTS (?)", userMessage).
+		Where(matchFile, ref)
+
+	// 两个来源共用一次查询的快照，避免读到重发前后的不同分支。
+	var row struct{ Value string }
+	err := db.Table("(? UNION ALL ?) AS attachments", messages, steering).Select("value").Take(&row).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return model.Block{}, domain.ErrNotFound
+	}
 	if err != nil {
 		return model.Block{}, err
 	}
-	if len(values) == 0 {
-		return model.Block{}, domain.ErrNotFound
-	}
 	var block model.Block
-	if err := json.Unmarshal([]byte(values[0].Value), &block); err != nil {
+	if err := json.Unmarshal([]byte(row.Value), &block); err != nil {
 		return block, err
 	}
 	return block, nil

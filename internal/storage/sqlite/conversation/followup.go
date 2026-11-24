@@ -135,7 +135,7 @@ func checkFollowUpRun(tx *gorm.DB, id, runID string, steer bool) error {
 	return nil
 }
 
-// checkFollowUpContent keeps queue snapshots and per-run steering requests bounded.
+// checkFollowUpContent 限制待发快照及单次执行的引导请求大小和数量。
 func checkFollowUpContent(tx *gorm.DB, row schema.FollowUp, writing bool) error {
 	base := tx.Model(&schema.FollowUp{}).Where("conversation_id=? AND id<>?", row.ConversationID, row.ID)
 	check := func(q *gorm.DB, bound int64) error {

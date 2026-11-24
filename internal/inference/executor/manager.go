@@ -21,18 +21,7 @@ type Manager struct {
 	emit      func(inference.Event) error
 }
 
-func New(ctx context.Context, resolve inference.Resolver, limit int, timeout time.Duration, emit func(inference.Event) error) (*Manager, error) {
-	if resolve == nil || emit == nil {
-		return nil, inference.ErrInvalidRequest
-	}
-	manager, err := scheduler.New(ctx, limit, timeout)
-	if err != nil {
-		return nil, inference.ErrInvalidRequest
-	}
-	return NewWithScheduler(manager, resolve, emit)
-}
-
-// NewWithScheduler 借用共享调度器；Close 会取消并等待该调度器的所有任务。
+// NewWithScheduler 借用共享调度器，调用方负责关闭调度器。
 func NewWithScheduler(manager *scheduler.Manager, resolve inference.Resolver, emit func(inference.Event) error) (*Manager, error) {
 	if manager == nil || resolve == nil || emit == nil {
 		return nil, inference.ErrInvalidRequest
@@ -100,4 +89,3 @@ func (m *Manager) Start(ctx context.Context, in inference.Request, accepted func
 }
 
 func (m *Manager) Cancel(id string) bool { return m.scheduler.Cancel(id) }
-func (m *Manager) Close()                { m.scheduler.Close() }
