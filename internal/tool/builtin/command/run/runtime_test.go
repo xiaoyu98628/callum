@@ -2,8 +2,10 @@ package run
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -97,14 +99,34 @@ func TestBundledInterpreters(t *testing.T) {
 	if directory == "" {
 		t.Skip("需要本次准备的独立运行时资源")
 	}
-	bundle, err := runtimeassets.Load(t.Context(), directory)
+	manifestFile, err := os.Open(filepath.Join(directory, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 版本断言与命令实际使用的运行时绑定到同一份清单。
+	digest := sha256.New()
+	manifest, decodeErr := runtimeassets.Decode(io.TeeReader(manifestFile, digest))
+	if err := errors.Join(decodeErr, manifestFile.Close()); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := runtimeassets.LoadWithManifestSHA256(t.Context(), directory, [sha256.Size]byte(digest.Sum(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
 	instance := NewWithRuntime([]string{"PATH=" + t.TempDir(), "OPENAI_API_KEY=must-not-leak"}, tool.ProtectedData{Directory: t.TempDir()}, bundle).(*commandTool)
-	python := `import sys, ssl, sqlite3, json, subprocess, os; assert sys.version_info[:3] == (3,14,10); assert os.getenv("OPENAI_API_KEY") is None; assert sqlite3.connect(":memory:").execute("select 1").fetchone() == (1,); ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); assert subprocess.check_output(["python3", "-c", "print('child-ok')"], text=True).strip() == "child-ok"; print("bundled-python-ok")`
+	python := `
+import json, os, sqlite3, ssl, subprocess, sys
+
+actual_version = ".".join(map(str, sys.version_info[:3]))
+assert actual_version == sys.argv[1], f"Python version: got {actual_version}, want {sys.argv[1]}"
+assert os.getenv("OPENAI_API_KEY") is None
+assert sqlite3.connect(":memory:").execute("select 1").fetchone() == (1,)
+ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+assert subprocess.check_output(["python3", "-c", "print('child-ok')"], text=True).strip() == "child-ok"
+print("bundled-python-ok")
+`
 	node := `const assert=require('node:assert/strict'); require('node:fs'); require('node:crypto').randomBytes(4); assert.equal(process.version,'v26.13.0'); assert.equal(process.env.OPENAI_API_KEY,undefined); assert.equal(require('node:child_process').execFileSync('node',['-p',"'child-ok'"],{encoding:'utf8'}).trim(),'child-ok'); console.log('bundled-node-ok')`
-	commands := [][]string{{"python3", "-c", python}, {"node", "-e", node}, {"python3", "-c", "print('x'*100000)"}}
+	commands := [][]string{{"python3", "-c", python, manifest.Python.Version}, {"node", "-e", node}, {"python3", "-c", "print('x'*100000)"}}
 	if runtime.GOOS != "windows" {
 		pythonPath, _ := bundle.Resolve("python3")
 		nodePath, _ := bundle.Resolve("node")
