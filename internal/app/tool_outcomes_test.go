@@ -4,8 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -14,6 +19,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/agent/events"
 	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
+	"github.com/xiaoyu98628/callum/internal/config"
 	"github.com/xiaoyu98628/callum/internal/conversation"
 	conversationservice "github.com/xiaoyu98628/callum/internal/conversation/service"
 	"github.com/xiaoyu98628/callum/internal/model"
@@ -534,6 +540,130 @@ func TestUnknownOperationRetryAfterRestartRequiresApproval(t *testing.T) {
 				}
 			}
 
+		})
+	}
+}
+
+func TestSandboxCommandRetryAfterRestartRequiresApproval(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("验证 macOS 只读沙箱命令原本自动放行的入口")
+	}
+	t.Parallel()
+	helper := commandHelper(t)
+	for _, choice := range []string{"approved", "rejected", "never"} {
+		t.Run(choice, func(t *testing.T) {
+			release := filepath.Join(t.TempDir(), "release")
+			args, err := json.Marshal(map[string]any{"command": []string{helper, "stream", release}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var request struct {
+					Tools    []json.RawMessage
+					Messages []struct {
+						Role       string
+						ToolCallID string `json:"tool_call_id"`
+					}
+				}
+				if err := json.NewDecoder(r.Body).Decode(&request); err != nil || len(request.Messages) == 0 {
+					t.Errorf("无效模型请求: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				last := request.Messages[len(request.Messages)-1]
+				if len(request.Tools) == 0 || last.Role == "tool" && last.ToolCallID != "command-1" {
+					writeFileToolResponse(t, w, false, map[string]any{"content": "完成"}, "stop")
+					return
+				}
+				call := map[string]any{"id": fmt.Sprintf("command-%d", calls.Add(1)), "type": "function", "function": map[string]any{"name": "run_command", "arguments": string(args)}}
+				writeFileToolResponse(t, w, false, map[string]any{"tool_calls": []any{call}}, "tool_calls")
+			}))
+			t.Cleanup(upstream.Close)
+			cfg, err := config.Load(filepath.Join(t.TempDir(), "data"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			peer := startApp(t, cfg, io.Discard)
+			modelID := setupConversationModel(t, peer, upstream.URL)
+			workspaceID := resultString(t, peer.call(t, "workspace.create", map[string]any{"name": "命令恢复", "root_path": t.TempDir()}), "id")
+			accepted := peer.call(t, "conversation.send", map[string]any{"model_id": modelID, "workspace_id": workspaceID, "stream": false, "content": messageBlocks("启动命令")})
+			runID := resultString(t, accepted, "run_id")
+			conversationID := resultString(t, accepted, "conversation_id")
+			peer.event(t, "tool.output")
+			requireOK(t, peer.call(t, "run.cancel", map[string]string{"run_id": runID}))
+			peer.event(t, "run.cancelled")
+			first, output := commandStepOutput(t, peer, runID)
+			var original struct{ Operation tool.OutcomeRecord }
+			if err := json.Unmarshal(output, &original); err != nil || original.Operation.Outcome != tool.OutcomeUnknown {
+				t.Fatalf("首次命令的结果未记录为未知: %s %v", output, err)
+			}
+			peer.stop(t)
+
+			peer = startApp(t, cfg, io.Discard)
+			if choice == "never" {
+				setApprovalPolicy(t, peer, choice)
+			}
+			continued := peer.call(t, "conversation.continue", map[string]any{"conversation_id": conversationID, "run_id": runID, "resume_in_place": true})
+			if resultString(t, continued, "run_id") != runID {
+				t.Fatal("继续任务未复用原执行")
+			}
+			var stepID string
+			if choice != "never" {
+				notification := peer.event(t, "approval.requested")
+				var event struct{ Approval agent.Approval }
+				if err := json.Unmarshal(notification.Params, &event); err != nil {
+					t.Fatal(err)
+				}
+				stepID = event.Approval.StepID
+				if event.Approval.RunID != runID || stepID == first.ID || event.Approval.RequestHash == original.Operation.RequestHash {
+					t.Fatalf("当前命令未使用自己独立的审批快照: %+v", event.Approval)
+				}
+				if choice == "approved" {
+					if err := os.WriteFile(release, nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				requireOK(t, peer.call(t, "approval.decide", map[string]string{"approval_id": event.Approval.ID, "decision": choice}))
+			}
+			peer.event(t, "run.completed")
+			list := peer.call(t, "step.list", map[string]string{"run_id": runID})
+			requireOK(t, list)
+			var steps []agent.StepSummary
+			if err := json.Unmarshal(list.Result, &steps); err != nil {
+				t.Fatal(err)
+			}
+			for _, step := range steps {
+				if step.Name == "run_command" && step.ID != first.ID {
+					stepID = step.ID
+				}
+			}
+			for field, want := range map[string]string{"input": "previous_result_requires_confirmation", "output": string(tool.OutcomeNotApplied)} {
+				if field == "output" && choice == "approved" {
+					want = `"started":true`
+				}
+				data := peer.call(t, "step.data", map[string]string{"step_id": stepID, "field": field})
+				requireOK(t, data)
+				if fragment := resultString(t, data, "fragment"); !strings.Contains(fragment, want) {
+					t.Fatalf("命令 %s 缺少 %s: %s", field, want, fragment)
+				}
+			}
+			if choice != "approved" {
+				for _, event := range peer.pending {
+					if event.Method == "tool.output" || choice == "never" && event.Method == "approval.requested" {
+						t.Fatalf("禁止重试的命令产生多余事件: %s", event.Params)
+					}
+				}
+				return
+			}
+			// 同一会话的后续调用在历史成功后恢复普通只读命令策略。
+			next := peer.call(t, "conversation.send", map[string]any{"conversation_id": conversationID, "model_id": modelID, "stream": false, "content": messageBlocks("再次读取")})
+			nextRun := resultString(t, next, "run_id")
+			peer.event(t, "run.completed")
+			_, output = commandStepOutput(t, peer, nextRun)
+			if !strings.Contains(string(output), `"started":true`) {
+				t.Fatalf("成功核实后仍未自动运行: %s", output)
+			}
 		})
 	}
 }

@@ -7,4 +7,5 @@ type OperationFact struct {
 	Tool        string `json:"tool"`
 	RequestHash string `json:"request_hash"`
 	Outcome     string `json:"outcome"`
+	HistoryKey  string `json:"-"`
 }

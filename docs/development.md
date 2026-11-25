@@ -148,7 +148,7 @@ Shell 语法静态校验依赖固定的 `mvdan.cc/sh/v3` v3.14.1，仅使用 `sy
 gofmt -l cmd internal
 go vet -mod=readonly ./...
 go fix -mod=readonly -diff ./...
-CALLUM_LIVE_TEST=0 go test -mod=readonly -race -timeout 60s ./...
+./scripts/check-race.sh
 CGO_ENABLED=0 go build -mod=readonly -o bin/callum ./cmd/callum
 git diff --check
 ```
@@ -190,4 +190,4 @@ CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./interna
 
 macOS 可显式运行系统集成检查：`CALLUM_LIVE_KEYRING_TEST=1 go test -mod=readonly -run TestIsolatedSystemKeychainRoundTrip -v ./internal/credentials/system`。测试只创建随机专用条目并在结束时删除。Windows Credential Manager 与 Linux Secret Service 已做纯 Go 交叉编译，原生锁定、取消和读写仍需各自系统验收，不能由 macOS 测试替代。
 
-迁移结构校验直接读取 SQLite 元数据，避免 GORM 反复解析整张表 DDL。无共享数据及全局进程状态的应用场景并行执行，保留完整的 420 次工具长任务回归；单场景等待预算为 30 秒，包级竞态检查仍为 60 秒。测试在每个场景关闭服务、连接和临时资源。
+迁移结构校验直接读取 SQLite 元数据，避免 GORM 反复解析整张表 DDL。默认竞态检查关闭测试结果缓存，顺序执行其他 Go 包、常规应用回归及逐项隔离的应用回归。其他包的单包时限为 60 秒，常规应用组限制为三个并行用例、单包时限为 120 秒。大模型响应分片、420 次工具长任务、旧轨迹恢复和多会话长历史压缩分别运行，每次的单包时限为 60 秒。420 次工具长任务的场景等待预算仍为 30 秒。脚本在启动测试前检查隔离用例是否存在，逐组报告结果和耗时，首个失败组的退出码作为整体退出码。测试在每个场景关闭服务、连接和临时资源。

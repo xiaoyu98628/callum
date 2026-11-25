@@ -30,7 +30,9 @@ type Repository interface {
 	Transcript(context.Context, string, ...int64) (map[string][]model.Message, error)
 	ContextTranscript(context.Context, string, int64, ...int64) (map[string][]model.Message, error)
 	ResumeTranscript(context.Context, string, string) ([]model.Message, error)
-	RejectedOperationHashes(context.Context, string) ([]string, error)
+	// CommandHistoryKey 从可信请求快照识别同一命令，用于恢复历史权限约束。
+	CommandHistoryKey(context.Context, []byte, string) (string, error)
+	RejectedOperationKeys(context.Context, string) ([]string, error)
 	// OperationFacts 独立于摘要读取待核实操作，不允许模型摘要解除安全约束。
 	OperationFacts(context.Context, string) ([]OperationFact, error)
 }

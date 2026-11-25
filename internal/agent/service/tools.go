@@ -38,6 +38,8 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 		}
 	}
 	var step agent.Step
+	var historyKey string
+	var command bool
 	result := tool.Result{Outcome: tool.OutcomeNotApplied}
 	// 先关闭固定调用资源，再保存操作结果；关闭失败也保留在受控错误和执行状态中。
 	defer func() {
@@ -45,9 +47,9 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 			closeErr := prepared.Close()
 			operationErr = errors.Join(operationErr, closeErr)
 			if result.Outcome == tool.OutcomeUnknown || result.Outcome == tool.OutcomePartial || (result.Outcome == tool.OutcomeApplied && operationErr != nil) {
-				uncertain[prepared.Hash()] = true
-			} else if operationErr == nil && (result.Outcome == tool.OutcomeApplied || result.Outcome == tool.OutcomeNone) {
-				delete(uncertain, prepared.Hash())
+				uncertain[historyKey] = true
+			} else if operationErr == nil && uncertain[historyKey] && confirmsToolResult(result, command) {
+				delete(uncertain, historyKey)
 			}
 			if step.ID == "" {
 				retErr = errors.Join(retErr, closeErr)
@@ -62,7 +64,17 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 			retErr = errors.Join(retErr, err)
 		}
 	}()
-	decision := toolDecision(prepared, denied, uncertain, ex.Run.SettingsSnapshot)
+	if prepared != nil {
+		historyKey = prepared.Hash()
+		command = prepared.CommandBoundary() != nil
+		if command {
+			historyKey, operationErr = e.repository.CommandHistoryKey(ctx, prepared.Request(), prepared.Hash())
+			if operationErr != nil {
+				return message, operationStorageError(ctx, operationErr)
+			}
+		}
+	}
+	decision := toolDecision(prepared, denied[historyKey], uncertain[historyKey], ex.Run.SettingsSnapshot)
 	var err error
 	var directoryIDs []string
 	if decision.Action == policy.Ask && decision.Reason == "outside_workspace" && e.options.Approvals != nil {
@@ -83,7 +95,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 	if operationErr != nil {
 		return
 	}
-	approvalID, err := e.authorizeTool(ctx, ex, resolved, steering, &step, prepared, decision, denied)
+	approvalID, err := e.authorizeTool(ctx, ex, resolved, steering, &step, prepared, decision, historyKey, denied)
 	if err != nil {
 		operationErr = err
 		if errors.Is(err, tool.ErrDenied) || errors.Is(err, conversation.ErrSteered) {
@@ -140,7 +152,19 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 	return
 }
 
-func toolDecision(prepared *toolexecutor.Prepared, denied, uncertain map[string]bool, snapshot *settings.Snapshot) policy.Decision {
+func confirmsToolResult(result tool.Result, command bool) bool {
+	if command {
+		// 命令的 applied 表示已运行至正常退出，仍需核验退出码才能清除上次的待核实状态。
+		var report struct {
+			ExitCode *int `json:"exit_code"`
+		}
+		return result.Outcome == tool.OutcomeApplied && json.Unmarshal(result.Output, &report) == nil &&
+			report.ExitCode != nil && *report.ExitCode == 0
+	}
+	return result.Outcome == tool.OutcomeApplied || result.Outcome == tool.OutcomeNone
+}
+
+func toolDecision(prepared *toolexecutor.Prepared, denied, uncertain bool, snapshot *settings.Snapshot) policy.Decision {
 	if snapshot == nil || !snapshot.Valid() {
 		return policy.Decision{Action: policy.Deny, Reason: "invalid_settings_snapshot"}
 	}
@@ -150,7 +174,7 @@ func toolDecision(prepared *toolexecutor.Prepared, denied, uncertain map[string]
 	return policy.EvaluateOperation(snapshot.ApprovalPolicy, policy.Operation{
 		Effects: prepared.Definition().Effects, OutsideWorkspace: prepared.OutsideWorkspace(),
 		SandboxMode: snapshot.SandboxMode, Command: prepared.CommandBoundary(),
-		PreviouslyRejected: denied[prepared.Hash()], ResultUnconfirmed: uncertain[prepared.Hash()],
+		PreviouslyRejected: denied, ResultUnconfirmed: uncertain,
 	})
 }
 
@@ -188,7 +212,7 @@ func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, 
 	return step, nil
 }
 
-func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, steering *runSteering, step *agent.Step, prepared *toolexecutor.Prepared, decision policy.Decision, denied map[string]bool) (string, error) {
+func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, steering *runSteering, step *agent.Step, prepared *toolexecutor.Prepared, decision policy.Decision, historyKey string, denied map[string]bool) (string, error) {
 	switch decision.Action {
 	case policy.Allow:
 		return "", nil
@@ -239,7 +263,7 @@ func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, r
 	if decided.Status == agent.ApprovalApproved {
 		return decided.ID, nil
 	}
-	denied[prepared.Hash()] = true
+	denied[historyKey] = true
 	if err := e.repository.Resume(ctx, ex.Run.ID); err != nil {
 		return "", operationStorageError(ctx, err)
 	}

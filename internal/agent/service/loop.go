@@ -35,12 +35,12 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 				current.current = append(current.current, message)
 			}
 		}
-		hashes, err := e.repository.RejectedOperationHashes(ctx, ex.Run.ID)
+		keys, err := e.repository.RejectedOperationKeys(ctx, ex.Run.ID)
 		if err != nil {
 			return operationStorageError(ctx, err)
 		}
-		for _, hash := range hashes {
-			denied[hash] = true
+		for _, key := range keys {
+			denied[key] = true
 		}
 	}
 	facts, err := e.repository.OperationFacts(ctx, ex.Conversation.ID)
@@ -49,7 +49,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 	}
 	uncertain := map[string]bool{}
 	for _, fact := range facts {
-		uncertain[fact.RequestHash] = true
+		uncertain[fact.HistoryKey] = true
 	}
 	extra := e.extraTools(ctx, true, ex.Run.SettingsSnapshot.MCPRevision)
 	extraByName := make(map[string]tool.Tool, len(extra))
