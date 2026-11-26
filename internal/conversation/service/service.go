@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -10,34 +11,33 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/agent/executor"
-	agentservice "github.com/xiaoyu98628/callum/internal/agent/service"
 	"github.com/xiaoyu98628/callum/internal/attachment"
 	"github.com/xiaoyu98628/callum/internal/conversation"
+	identifier "github.com/xiaoyu98628/callum/internal/id"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/skills"
 )
 
-// Service 负责会话业务与发送受理；异步执行由注入的 Engine 完成。
+// Service 负责会话业务与发送受理；异步执行由装配层注入的执行协调器完成。
 type Service struct {
 	repository  conversation.Repository
 	resolve     agent.Resolver
 	manager     *executor.Manager
-	engine      *agentservice.Engine
+	engine      ExecutionCoordinator
+	emit        func(agent.Event) error
+	logger      *slog.Logger
 	attachments *attachment.Store
 	skills      *skills.Store
 }
 
-func New(repository conversation.Repository, resolve agent.Resolver, manager *executor.Manager, engine *agentservice.Engine, attachments *attachment.Store, skillStore *skills.Store) (*Service, error) {
-	if repository == nil || resolve == nil || manager == nil || engine == nil || attachments == nil || skillStore == nil {
+func New(repository conversation.Repository, resolve agent.Resolver, manager *executor.Manager, engine ExecutionCoordinator, attachments *attachment.Store, skillStore *skills.Store, emit func(agent.Event) error, logger *slog.Logger) (*Service, error) {
+	if repository == nil || resolve == nil || manager == nil || engine == nil || attachments == nil || skillStore == nil || emit == nil || logger == nil {
 		return nil, conversation.ErrInvalid
 	}
-	return &Service{repository: repository, resolve: resolve, manager: manager, engine: engine, attachments: attachments, skills: skillStore}, nil
+	return &Service{repository: repository, resolve: resolve, manager: manager, engine: engine, attachments: attachments, skills: skillStore, emit: emit, logger: logger}, nil
 }
 
-func validID(id string) bool {
-	parsed, err := uuid.Parse(id)
-	return err == nil && parsed.Version() == 7 && parsed.String() == id
-}
+func validID(id string) bool { return identifier.ValidV7(id) }
 
 func newID() (string, error) {
 	id, err := uuid.NewV7()
@@ -99,7 +99,7 @@ func (s *Service) Update(ctx context.Context, id string, in conversation.Update)
 	}
 	value, err := s.repository.Update(ctx, id, change)
 	if err == nil {
-		s.engine.ConversationUpdated(value)
+		s.publish(agent.Event{Type: "conversation.updated", ConversationID: value.ID, Data: value})
 	}
 	return value, err
 }
@@ -322,4 +322,15 @@ func (s *Service) start(lease *executor.Lease, ex conversation.Execution, accept
 	lease.Start(execute)
 	started = true
 	return nil
+}
+
+// publish 在业务提交后尽力通知，订阅故障不改变已经提交的会话操作结果。
+func (s *Service) publish(event agent.Event) {
+	if err := s.emit(event); err != nil {
+		s.logger.Warn("发布会话变更事件失败", "module", "conversation", "conversation_id", event.ConversationID, "event", event.Type)
+	}
+}
+
+func (s *Service) followUpsUpdated(conversationID, runID string) {
+	s.publish(agent.Event{Type: "conversation.follow_ups_updated", ConversationID: conversationID, RunID: runID})
 }

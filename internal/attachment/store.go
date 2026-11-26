@@ -14,8 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
-
+	identifier "github.com/xiaoyu98628/callum/internal/id"
 	"github.com/xiaoyu98628/callum/internal/model"
 	"github.com/xiaoyu98628/callum/internal/model/imageinput"
 )
@@ -75,10 +74,7 @@ var extensions = map[string]string{
 	"image/webp": ".webp",
 }
 
-func validID(value string) bool {
-	id, err := uuid.Parse(value)
-	return err == nil && id.Version() == 7 && id.String() == value
-}
+func validID(value string) bool { return identifier.ValidV7(value) }
 
 func validReference(ref, conversationID string) bool {
 	parts := strings.Split(ref, "/")

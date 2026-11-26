@@ -80,6 +80,8 @@ func failure(err error) (status, kind, message string) {
 		return status, "invalid_response", "模型响应格式无效"
 	case errors.Is(err, model.ErrImageLimit):
 		return status, "image_limit", model.ErrImageLimit.Error()
+	case errors.Is(err, model.ErrAttachment):
+		return status, "attachment_unavailable", model.ErrAttachment.Error()
 	case errors.Is(err, model.ErrImageRead):
 		return status, "image_read", "图片文件不可读取"
 	case errors.Is(err, model.ErrImageFormat):

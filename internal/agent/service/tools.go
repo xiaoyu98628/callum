@@ -18,7 +18,7 @@ import (
 	"github.com/xiaoyu98628/callum/internal/tool/policy"
 )
 
-func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, steering *runSteering, parent agent.Step, call model.ToolCall, denied, uncertain map[string]bool, external tool.Tool) (message model.Message, retErr error) {
+func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, steering *runSteering, guidance []model.Message, parent agent.Step, call model.ToolCall, denied, uncertain map[string]bool, external tool.Tool) (message model.Message, retErr error) {
 	scope, operationErr := e.toolScope(ctx, ex)
 	var prepared *toolexecutor.Prepared
 	if operationErr == nil {
@@ -95,7 +95,7 @@ func (e *Engine) callTool(ctx context.Context, ex conversation.Execution, resolv
 	if operationErr != nil {
 		return
 	}
-	approvalID, err := e.authorizeTool(ctx, ex, resolved, steering, &step, prepared, decision, historyKey, denied)
+	approvalID, err := e.authorizeTool(ctx, ex, resolved, steering, guidance, &step, prepared, decision, historyKey, denied)
 	if err != nil {
 		operationErr = err
 		if errors.Is(err, tool.ErrDenied) || errors.Is(err, conversation.ErrSteered) {
@@ -212,7 +212,7 @@ func (e *Engine) createToolStep(ctx context.Context, ex conversation.Execution, 
 	return step, nil
 }
 
-func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, steering *runSteering, step *agent.Step, prepared *toolexecutor.Prepared, decision policy.Decision, historyKey string, denied map[string]bool) (string, error) {
+func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, resolved agent.Resolved, steering *runSteering, guidance []model.Message, step *agent.Step, prepared *toolexecutor.Prepared, decision policy.Decision, historyKey string, denied map[string]bool) (string, error) {
 	switch decision.Action {
 	case policy.Allow:
 		return "", nil
@@ -227,7 +227,7 @@ func (e *Engine) authorizeTool(ctx context.Context, ex conversation.Execution, r
 	var review *agent.ApprovalReview
 	if ex.Run.SettingsSnapshot.ApprovalsReviewer == policy.AutoReview && canReviewTool(prepared, decision) {
 		var err error
-		review, err = e.reviewTool(ctx, ex, resolved, step, prepared)
+		review, err = e.reviewTool(ctx, ex, resolved, guidance, step, prepared)
 		if err != nil {
 			return "", err
 		}

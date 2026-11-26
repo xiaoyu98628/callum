@@ -3,15 +3,11 @@ package service
 import (
 	"context"
 
-	"github.com/google/uuid"
-
 	"github.com/xiaoyu98628/callum/internal/agent"
+	identifier "github.com/xiaoyu98628/callum/internal/id"
 )
 
-func validID(id string) bool {
-	value, err := uuid.Parse(id)
-	return err == nil && value.Version() == 7 && value.Variant() == uuid.RFC4122 && value.String() == id
-}
+func validID(id string) bool { return identifier.ValidV7(id) }
 
 // Get 查询持久化执行，不把旧 model.invoke 的临时标识当作数据库主键。
 func (e *Engine) Get(ctx context.Context, id string) (agent.Run, error) {

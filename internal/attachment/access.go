@@ -23,6 +23,14 @@ type RunFiles struct {
 	Inputs         string
 	Work           string
 	Artifacts      []model.Block
+}
+
+// runAccess 的 gate 串行化本执行的文件操作与回收；ready、closing 和公共快照由 Access.mu 保护。
+// 配额和导出索引仅在持有 gate 时访问，不把长时间 I/O 放进全局锁。
+type runAccess struct {
+	RunFiles
+	gate           chan struct{}
+	ready, closing bool
 	directory      string
 	bytes          int64
 	files          map[string]string
@@ -34,7 +42,7 @@ type Access struct {
 	resolve            func(context.Context, string, string) (model.Block, error)
 	markers, temporary string
 	mu                 sync.Mutex
-	runs               map[string]*RunFiles
+	runs               map[string]*runAccess
 	closed             bool
 }
 
@@ -51,7 +59,7 @@ func OpenAccess(ctx context.Context, dataDir string, store *Store, resolve func(
 	if err != nil {
 		return nil, err
 	}
-	a := &Access{store: store, resolve: resolve, markers: markers, temporary: temporary, runs: make(map[string]*RunFiles)}
+	a := &Access{store: store, resolve: resolve, markers: markers, temporary: temporary, runs: make(map[string]*runAccess)}
 	if err := a.recover(ctx); err != nil {
 		return nil, err
 	}
@@ -65,13 +73,50 @@ func (a *Access) Files(conversationID, runID string) (RunFiles, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	run := a.runs[runID]
-	if a.closed || run == nil || run.ConversationID != conversationID {
+	if a.closed || run == nil || !run.ready || run.closing || run.ConversationID != conversationID {
 		return RunFiles{}, false
 	}
-	copy := *run
-	copy.Artifacts = append([]model.Block(nil), run.Artifacts...)
-	return copy, true
+	return runSnapshot(run), true
 }
+
+// runSnapshot 必须在 Access.mu 内调用，只复制公开快照，不读写由 gate 保护的配额与索引。
+func runSnapshot(run *runAccess) RunFiles {
+	return RunFiles{ConversationID: run.ConversationID, Inputs: run.Inputs, Work: run.Work,
+		Artifacts: append([]model.Block(nil), run.Artifacts...)}
+}
+
+func (a *Access) acquire(ctx context.Context, conversationID, runID string) (*runAccess, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	a.mu.Lock()
+	run := a.runs[runID]
+	allowed := !a.closed && run != nil && run.ready && !run.closing && run.ConversationID == conversationID
+	a.mu.Unlock()
+	if !allowed {
+		return nil, model.ErrAttachment
+	}
+	select {
+	case run.gate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		run.release()
+		return nil, err
+	}
+	// 等待本执行的其他操作时，End 或 Close 可能已撤销入口，取得 gate 后再次核验。
+	a.mu.Lock()
+	allowed = !a.closed && a.runs[runID] == run && !run.closing
+	a.mu.Unlock()
+	if !allowed {
+		run.release()
+		return nil, model.ErrAttachment
+	}
+	return run, nil
+}
+
+func (r *runAccess) release() { <-r.gate }
 
 func (a *Access) recover(ctx context.Context) (retErr error) {
 	file, err := os.Open(a.markers)
@@ -149,20 +194,43 @@ func (a *Access) Begin(ctx context.Context, conversationID, runID string, publis
 		return RunFiles{}, err
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.closed || a.runs[runID] != nil || len(a.runs) >= 64 {
+		a.mu.Unlock()
 		return RunFiles{}, model.ErrAttachment
 	}
+	run := &runAccess{gate: make(chan struct{}, 1)}
+	run.gate <- struct{}{}
+	a.runs[runID] = run
+	a.mu.Unlock()
+	// 预留项使并发 End/Close 能等待初始化，失败时移除本次预留，保留清理错误。
+	defer func() {
+		if retErr != nil {
+			a.mu.Lock()
+			if a.runs[runID] == run {
+				delete(a.runs, runID)
+			}
+			a.mu.Unlock()
+		}
+		run.release()
+	}()
 	directory, err := os.MkdirTemp(a.temporary, "callum-attachments-"+runID+"-")
 	if err != nil {
 		return RunFiles{}, err
 	}
+	markerWritten := false
 	defer func() {
 		if retErr != nil {
-			retErr = errors.Join(retErr, os.RemoveAll(directory))
+			cleanupErr := os.RemoveAll(directory)
+			retErr = errors.Join(retErr, cleanupErr)
+			// 回收失败时保留已写入的恢复标记，重启后仍能定位自有临时目录。
+			if markerWritten && cleanupErr == nil {
+				if err := os.Remove(a.marker(runID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+					retErr = errors.Join(retErr, err)
+				}
+			}
 		}
 	}()
-	value := &RunFiles{ConversationID: conversationID, Inputs: filepath.Join(directory, "inputs"), Work: filepath.Join(directory, "work"), directory: directory, files: make(map[string]string), Artifacts: append([]model.Block(nil), published...)}
+	value := RunFiles{ConversationID: conversationID, Inputs: filepath.Join(directory, "inputs"), Work: filepath.Join(directory, "work"), Artifacts: append([]model.Block(nil), published...)}
 	for _, path := range []string{value.Inputs, value.Work} {
 		if err := os.Mkdir(path, 0700); err != nil {
 			return RunFiles{}, err
@@ -171,8 +239,17 @@ func (a *Access) Begin(ctx context.Context, conversationID, runID string, publis
 	if err := a.writeMarker(runID, directory); err != nil {
 		return RunFiles{}, err
 	}
-	a.runs[runID] = value
-	return *value, nil
+	markerWritten = true
+	if err := ctx.Err(); err != nil {
+		return RunFiles{}, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.closed || run.closing {
+		return RunFiles{}, model.ErrAttachment
+	}
+	run.RunFiles, run.directory, run.files, run.ready = value, directory, make(map[string]string), true
+	return runSnapshot(run), nil
 }
 
 func (a *Access) writeMarker(runID, directory string) (retErr error) {
@@ -221,7 +298,7 @@ func (a *Access) writeMarker(runID, directory string) (retErr error) {
 func (a *Access) Metadata(ctx context.Context, conversationID, runID, ref string) (model.Block, *File, error) {
 	a.mu.Lock()
 	run := a.runs[runID]
-	allowed := !a.closed && run != nil && run.ConversationID == conversationID
+	allowed := !a.closed && run != nil && run.ready && !run.closing && run.ConversationID == conversationID
 	a.mu.Unlock()
 	if !allowed || !validReference(ref, conversationID) {
 		return model.Block{}, nil, model.ErrAttachment
@@ -236,18 +313,17 @@ func (a *Access) Metadata(ctx context.Context, conversationID, runID, ref string
 
 // Export 在审批完成后校验原件哈希并生成独立副本，不使用硬链接。
 func (a *Access) Export(ctx context.Context, conversationID, runID string, block model.Block, file *File) (string, string, error) {
+	run, err := a.acquire(ctx, conversationID, runID)
+	if err != nil {
+		return "", "", err
+	}
+	defer run.release()
 	if _, err := a.resolve(ctx, conversationID, block.AttachmentRef); err != nil {
 		return "", "", errors.Join(model.ErrAttachment, err)
 	}
 	data, err := file.Read(ctx)
 	if err != nil {
 		return "", "", err
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	run := a.runs[runID]
-	if a.closed || run == nil || run.ConversationID != conversationID {
-		return "", "", model.ErrAttachment
 	}
 	if path := run.files[block.AttachmentRef]; path != "" {
 		cached, err := os.OpenFile(path, readFlags, 0)
@@ -297,9 +373,20 @@ func (a *Access) Export(ctx context.Context, conversationID, runID string, block
 // End 可重复调用，正常、取消与失败共用清理。失败保留恢复标记供重启处理。
 func (a *Access) End(runID string) error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	run := a.runs[runID]
 	if run == nil {
+		a.mu.Unlock()
+		return nil
+	}
+	run.closing = true
+	a.mu.Unlock()
+	// 禁止新操作后只等待本执行，其他执行仍可查询与读写。
+	run.gate <- struct{}{}
+	defer run.release()
+	a.mu.Lock()
+	current := a.runs[runID] == run
+	a.mu.Unlock()
+	if !current {
 		return nil
 	}
 	if err := os.RemoveAll(run.directory); err != nil {
@@ -308,7 +395,9 @@ func (a *Access) End(runID string) error {
 	if err := os.Remove(a.marker(runID)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	a.mu.Lock()
 	delete(a.runs, runID)
+	a.mu.Unlock()
 	return nil
 }
 

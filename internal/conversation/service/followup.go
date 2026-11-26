@@ -77,7 +77,7 @@ func (s *Service) AddFollowUp(ctx context.Context, in conversation.FollowUpInput
 	} else {
 		_, err = write()
 		if err == nil {
-			s.engine.FollowUpsUpdated(in.ConversationID, in.ExpectedRunID)
+			s.followUpsUpdated(in.ConversationID, in.ExpectedRunID)
 		}
 	}
 	return out, err
@@ -141,7 +141,7 @@ func (s *Service) ChangeFollowUp(ctx context.Context, in conversation.FollowUpCh
 	} else {
 		_, err = write()
 		if err == nil {
-			s.engine.FollowUpsUpdated(in.ConversationID, in.ExpectedRunID)
+			s.followUpsUpdated(in.ConversationID, in.ExpectedRunID)
 		}
 	}
 	if err != nil {
@@ -195,7 +195,7 @@ func (s *Service) StartFollowUp(ctx context.Context, in conversation.FollowUpSta
 		}
 	}
 	return s.send(ctx, conversation.Send{ConversationID: in.ConversationID, ModelID: modelID, Content: content}, &in, func(ex conversation.Execution) error {
-		s.engine.FollowUpsUpdated(ex.Conversation.ID, ex.Run.ID)
+		s.followUpsUpdated(ex.Conversation.ID, ex.Run.ID)
 		return accepted(ex)
 	})
 }

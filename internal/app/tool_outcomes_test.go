@@ -173,7 +173,7 @@ func outcomeService(t *testing.T, rt *Runtime, instance *outcomeTestTool, client
 	snapshot := model.Snapshot{ID: id, DisplayName: "测试模型", RemoteModelID: "test", Provider: model.ProviderSnapshot{ID: policyTestID(t), Name: "测试厂商"}}
 	svc, err := conversationservice.New(conversations, func(context.Context, string) (agent.Resolved, error) {
 		return agent.Resolved{Client: client, Snapshot: snapshot, ContextWindow: 1000000, Protocol: "chatcompletions"}, nil
-	}, rt.manager, engine, rt.attachments, rt.skills)
+	}, rt.manager, engine, rt.attachments, rt.skills, rt.events.Publish, rt.logger)
 	if err != nil {
 		t.Fatal(err)
 	}

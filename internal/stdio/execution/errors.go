@@ -44,7 +44,7 @@ func protocolError(f inference.Failure) *protocol.Error {
 		code = 1010
 	case "closing":
 		code = 1011
-	case "image_read", "image_format", "image_limit", "input_limit":
+	case "image_read", "image_format", "image_limit", "input_limit", "attachment_unavailable":
 		code = 1013
 	case "credentials_unavailable":
 		code = 1012

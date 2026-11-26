@@ -28,6 +28,8 @@ type Notification struct {
 func DescribeError(err error) Failure {
 	e := Failure{Kind: "internal", Message: "内部处理失败"}
 	switch {
+	case errors.Is(err, agent.ErrStorage):
+		e.Message, e.Kind = "保存执行数据失败", "internal"
 	case errors.Is(err, context.DeadlineExceeded):
 		e.Message, e.Kind = "操作超时", "timeout"
 	case errors.Is(err, context.Canceled):
@@ -54,6 +56,8 @@ func DescribeError(err error) Failure {
 		e.Message, e.Kind = "服务正在关闭", "closing"
 	case errors.Is(err, ErrOutputLimit):
 		e.Message, e.Kind = "模型文本超过大小限制", "output_limit"
+	case errors.Is(err, model.ErrAttachment):
+		e.Message, e.Kind = model.ErrAttachment.Error(), "attachment_unavailable"
 	case errors.Is(err, model.ErrImageRead):
 		e.Message, e.Kind = "图片文件不可读取，请重新添加", "image_read"
 	case errors.Is(err, model.ErrImageFormat):

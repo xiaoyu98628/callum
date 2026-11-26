@@ -53,3 +53,25 @@ func environmentValue(environment []string, key string) string {
 	}
 	return ""
 }
+
+// sandboxEnvironment 将常用缓存统一定向到本次私有目录，保留平台环境变量名比较规则。
+func sandboxEnvironment(environment []string, directory string) []string {
+	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOCACHE", "GOTMPDIR", "npm_config_cache", "PIP_CACHE_DIR"} {
+		environment = slices.DeleteFunc(environment, func(entry string) bool {
+			name, _, _ := strings.Cut(entry, "=")
+			if runtime.GOOS == "windows" {
+				return strings.EqualFold(name, key)
+			}
+			return name == key
+		})
+		value := directory
+		switch key {
+		case "GOCACHE":
+			value = filepath.Join(directory, "go-build")
+		case "npm_config_cache":
+			value = filepath.Join(directory, "npm-cache")
+		}
+		environment = append(environment, key+"="+value)
+	}
+	return environment
+}

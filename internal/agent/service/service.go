@@ -88,10 +88,3 @@ func (e *Engine) Abandon(lease *executor.Lease, ex conversation.Execution, cause
 	}
 	e.steeringRequeued(ex, pending)
 }
-
-// ConversationUpdated 在会话变更提交后发布通知，订阅故障不能回滚已提交的修改。
-func (e *Engine) ConversationUpdated(value conversation.Conversation) {
-	if err := e.emit(agent.Event{Type: "conversation.updated", ConversationID: value.ID, Data: value}); err != nil {
-		e.logger.Warn("发布会话变更事件失败", "module", "conversation", "conversation_id", value.ID)
-	}
-}

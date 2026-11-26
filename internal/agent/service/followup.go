@@ -47,7 +47,7 @@ func (e *Engine) AcceptSteering(lease *executor.Lease, write func() (conversatio
 		return err
 	}
 	e.publishSteering("message.created", followUp.Receipt)
-	e.FollowUpsUpdated(followUp.ConversationID, state.runID)
+	e.followUpsUpdated(followUp.ConversationID, state.runID)
 	state.generation++
 	if state.cancel != nil {
 		state.cancel(conversation.ErrSteered)
@@ -131,7 +131,7 @@ func (e *Engine) steeringRequeued(ex conversation.Execution, pending []conversat
 	_ = e.emit(agent.Event{Type: "conversation.steering_requeued", ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, RemovedMessageIDs: ids})
 }
 
-func (e *Engine) FollowUpsUpdated(conversationID, runID string) {
+func (e *Engine) followUpsUpdated(conversationID, runID string) {
 	if err := e.emit(agent.Event{Type: "conversation.follow_ups_updated", ConversationID: conversationID, RunID: runID}); err != nil {
 		e.logger.Warn("发布后续消息更新失败", "module", "conversation", "conversation_id", conversationID)
 	}

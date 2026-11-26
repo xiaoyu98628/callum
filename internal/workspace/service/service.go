@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	identifier "github.com/xiaoyu98628/callum/internal/id"
 	"github.com/xiaoyu98628/callum/internal/workspace"
 )
 
@@ -80,10 +81,7 @@ func realDirectory(path string) (string, os.FileInfo, error) {
 	return actual, info, nil
 }
 
-func validID(id string) bool {
-	parsed, err := uuid.Parse(id)
-	return err == nil && parsed.Version() == 7 && parsed.String() == id
-}
+func validID(id string) bool { return identifier.ValidV7(id) }
 
 func (s *Service) Get(ctx context.Context, id string) (workspace.Workspace, error) {
 	if !validID(id) {

@@ -9,20 +9,9 @@ import (
 )
 
 func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionPermissions, _ tool.ProtectedData) error {
-	if permissions.SandboxMode != "" && !permissions.SandboxMode.Valid() {
-		return tool.ErrDenied
-	}
-	p.boundary = tool.CommandBoundary{Mode: permissions.SandboxMode, Escalated: a.SandboxPermissions == sandboxEscalated, Risk: commandRisk(p.command)}
-	if permissions.SandboxMode == tool.SandboxFullAccess {
-		p.boundary.Escalated = false
-		return nil
-	}
-	projectWrite := a.SandboxPermissions == sandboxProjectWrite
-	if projectWrite && (permissions.SandboxMode != tool.SandboxWorkspaceWrite || p.workspace == nil) {
-		return tool.ErrDenied
-	}
-	if p.boundary.Escalated || permissions.SandboxMode == "" {
-		return nil
+	projectWrite, handled, err := p.sandboxRequest(a, permissions)
+	if err != nil || handled {
+		return err
 	}
 	if projectWrite {
 		return tool.ErrUnavailable

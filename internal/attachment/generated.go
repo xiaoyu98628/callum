@@ -68,10 +68,12 @@ func (s *Store) saveGenerated(ctx context.Context, conversationID, runID, kind, 
 
 // SaveGenerated 将本轮工具输出保留为视觉上下文或最终交付物，受本轮资源配额限制。
 func (a *Access) SaveGenerated(ctx context.Context, conversationID, runID, kind, name string, data []byte, publish bool) (model.Block, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	run := a.runs[runID]
-	if a.closed || run == nil || run.ConversationID != conversationID || run.bytes+int64(len(data)) > 128<<20 || len(run.files) >= 1024 || (publish && len(run.Artifacts) >= 63) {
+	run, err := a.acquire(ctx, conversationID, runID)
+	if err != nil {
+		return model.Block{}, err
+	}
+	defer run.release()
+	if run.bytes+int64(len(data)) > 128<<20 || len(run.files) >= 1024 || (publish && len(run.Artifacts) >= 63) {
 		return model.Block{}, model.ErrAttachment
 	}
 	block, err := a.store.saveGenerated(ctx, conversationID, runID, kind, name, data)
@@ -89,7 +91,9 @@ func (a *Access) SaveGenerated(ctx context.Context, conversationID, runID, kind,
 				return block, nil
 			}
 		}
+		a.mu.Lock()
 		run.Artifacts = append(run.Artifacts, block)
+		a.mu.Unlock()
 	}
 	return block, nil
 }

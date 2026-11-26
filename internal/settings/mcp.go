@@ -3,6 +3,7 @@ package settings
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/url"
 	"path/filepath"
 	"regexp"
@@ -10,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/google/uuid"
+	"github.com/xiaoyu98628/callum/internal/id"
 )
 
 const MCPKey = "mcp"
@@ -52,6 +53,23 @@ type MCPServer struct {
 
 func DefaultMCP() MCP { return MCP{Servers: []MCPServer{}} }
 
+// Clone 复制所有可变字段，使配置持有者与调用方分别拥有数据。
+func (s MCPServer) Clone() MCPServer {
+	s.Args = slices.Clone(s.Args)
+	s.Env = maps.Clone(s.Env)
+	s.AllowedTools = slices.Clone(s.AllowedTools)
+	return s
+}
+
+// Clone 为整个配置创建独立快照，保留 nil 与空集合的区别。
+func (v MCP) Clone() MCP {
+	v.Servers = slices.Clone(v.Servers)
+	for i := range v.Servers {
+		v.Servers[i] = v.Servers[i].Clone()
+	}
+	return v
+}
+
 func DecodeMCP(raw json.RawMessage) (MCP, error) {
 	var value MCP
 	if len(raw) > MaxValueBytes || json.Unmarshal(raw, &value) != nil || value.Servers == nil || len(value.Servers) > 16 {
@@ -76,8 +94,7 @@ func DecodeMCPRecord(record Record) (MCP, error) {
 }
 
 func (s MCPServer) Valid() bool {
-	id, err := uuid.Parse(s.ID)
-	if err != nil || id.Version() != 7 || id.String() != s.ID || strings.TrimSpace(s.Name) != s.Name || s.Name == "" || len(s.Name) > 240 || len(s.AllowedTools) > 128 {
+	if !id.ValidV7(s.ID) || strings.TrimSpace(s.Name) != s.Name || s.Name == "" || len(s.Name) > 240 || len(s.AllowedTools) > 128 {
 		return false
 	}
 	if s.Scope != "" {

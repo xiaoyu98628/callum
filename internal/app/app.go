@@ -266,7 +266,7 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 	if err != nil {
 		return nil, err
 	}
-	r.conversations, err = conversationservice.New(conversationRepository, newConversationResolver(r.providers, client, r.attachments), r.manager, r.engine, r.attachments, r.skills)
+	r.conversations, err = conversationservice.New(conversationRepository, newConversationResolver(r.providers, client, r.attachments), r.manager, r.engine, r.attachments, r.skills, r.events.Publish, r.logger)
 	if err != nil {
 		return nil, err
 	}

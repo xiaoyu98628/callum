@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 
@@ -18,31 +17,10 @@ import (
 
 // configureSandbox 只固定边界、路径及系统启动器，不创建文件或运行探测命令。
 func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionPermissions, protection tool.ProtectedData) error {
-	if permissions.SandboxMode != "" && !permissions.SandboxMode.Valid() {
-		return tool.ErrDenied
+	projectWrite, handled, err := p.sandboxRequest(a, permissions)
+	if err != nil || handled {
+		return err
 	}
-	p.boundary = tool.CommandBoundary{Mode: permissions.SandboxMode, Escalated: a.SandboxPermissions == sandboxEscalated, Risk: commandRisk(p.command)}
-	if permissions.SandboxMode == tool.SandboxFullAccess {
-		// 完全访问由受理快照明确选定，模型的单次沙箱参数不改变该模式。
-		p.boundary.Escalated = false
-		return nil
-	}
-	projectWrite := a.SandboxPermissions == sandboxProjectWrite
-	if projectWrite && (permissions.SandboxMode != tool.SandboxWorkspaceWrite || p.workspace == nil) {
-		return tool.ErrDenied
-	}
-	if p.boundary.Escalated || permissions.SandboxMode == "" {
-		return nil
-	}
-	// 未接入系统沙箱的平台保留明确的逐次审批，不能宣称受系统边界保护。
-	if runtime.GOOS != "darwin" {
-		if projectWrite {
-			return tool.ErrUnavailable
-		}
-		p.boundary.Risk = "sandbox_backend_unsupported"
-		return nil
-	}
-	var err error
 	p.sandboxExecutable, err = pinPath("/usr/bin/sandbox-exec", false)
 	if err != nil {
 		return errors.Join(tool.ErrUnavailable, err)
@@ -103,17 +81,7 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 	p.launchArguments = append(p.launchArguments, "--")
 	p.launchArguments = append(p.launchArguments, p.command...)
 	// 不把真实用户缓存目录自动加入写入范围。常用工具缓存转入此次受控临时目录。
-	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOCACHE", "GOTMPDIR", "npm_config_cache", "PIP_CACHE_DIR"} {
-		p.environment = slices.DeleteFunc(p.environment, func(entry string) bool { return strings.HasPrefix(entry, key+"=") })
-		value := p.temporaryPath
-		if key == "GOCACHE" {
-			value = filepath.Join(value, "go-build")
-		}
-		if key == "npm_config_cache" {
-			value = filepath.Join(value, "npm-cache")
-		}
-		p.environment = append(p.environment, key+"="+value)
-	}
+	p.environment = sandboxEnvironment(p.environment, p.temporaryPath)
 	return nil
 }
 

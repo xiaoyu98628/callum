@@ -141,6 +141,7 @@ func New(initCtx, ctx context.Context, repo Repository, client, oauthClient *htt
 	if err != nil {
 		return nil, err
 	}
+	cfg = cfg.Clone()
 	ctx, cancel := context.WithCancel(ctx)
 	s := &Service{ctx: ctx, cancel: cancel, repo: repo, http: client, oauthHTTP: oauthClient,
 		logger: logger.With("module", "mcp"), cfg: cfg, revision: revision, entries: make(map[string]*entry)}
@@ -208,7 +209,7 @@ func (s *Service) List(ctx context.Context) (Catalog, error) {
 		if err != nil {
 			return Catalog{}, err
 		}
-		view := View{MCPServer: e.cfg, Authorized: secret.Token != "" && (secret.Expires.IsZero() || time.Now().Before(secret.Expires) || secret.Refresh != ""), SecretEnvKeys: []string{}, Tools: []ToolInfo{}}
+		view := View{MCPServer: e.cfg.Clone(), Authorized: secret.Token != "" && (secret.Expires.IsZero() || time.Now().Before(secret.Expires) || secret.Refresh != ""), SecretEnvKeys: []string{}, Tools: []ToolInfo{}}
 		if !secret.Expires.IsZero() {
 			view.ExpiresAt = secret.Expires.UnixMilli()
 		}
@@ -225,6 +226,7 @@ func (s *Service) List(ctx context.Context) (Catalog, error) {
 }
 
 func (s *Service) Save(ctx context.Context, revision int64, cfg settings.MCPServer, secrets SecretInput, options SaveOptions) (string, error) {
+	cfg = cfg.Clone()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
@@ -295,7 +297,7 @@ func (s *Service) Save(ctx context.Context, revision int64, cfg settings.MCPServ
 					return "", settings.ErrInvalid
 				}
 			}
-			value.Env = *secrets.Env
+			value.Env = maps.Clone(*secrets.Env)
 		}
 		credential = &value
 	}
@@ -317,7 +319,7 @@ func (s *Service) Save(ctx context.Context, revision int64, cfg settings.MCPServ
 		i := slices.IndexFunc(next.Servers, func(v settings.MCPServer) bool { return v.ID == cfg.ID })
 		next.Servers[i] = cfg
 	}
-	if err := s.repo.Save(ctx, next, revision, cfg.ID, credential); err != nil {
+	if err := s.repo.Save(ctx, next.Clone(), revision, cfg.ID, credential); err != nil {
 		return "", err
 	}
 	s.cfg, s.revision = next, revision+1
@@ -350,7 +352,7 @@ func (s *Service) Delete(ctx context.Context, revision int64, id string) error {
 		return ErrNotFound
 	}
 	next := settings.MCP{Servers: slices.DeleteFunc(slices.Clone(s.cfg.Servers), func(v settings.MCPServer) bool { return v.ID == id })}
-	if err := s.repo.Save(ctx, next, revision, id, &Credential{}); err != nil {
+	if err := s.repo.Save(ctx, next.Clone(), revision, id, &Credential{}); err != nil {
 		return err
 	}
 	s.cfg, s.revision = next, revision+1

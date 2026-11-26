@@ -21,11 +21,20 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		return err
 	}
 	current := executionContext{traces: transcripts, past: messages}
+	var reviewGuidance []model.Message
 	denied := map[string]bool{}
 	if ex.Resumed {
 		saved, err := e.repository.ResumeTranscript(ctx, ex.Conversation.ID, ex.Run.ID)
 		if err != nil {
 			return operationStorageError(ctx, err)
+		}
+		checkpoint, err := e.repository.LatestCheckpoint(ctx, ex.Conversation.ID, ex.Run.ID)
+		if err != nil {
+			return operationStorageError(ctx, err)
+		}
+		reviewGuidance, err = restoredReviewGuidance(saved, checkpoint)
+		if err != nil {
+			return err
 		}
 		// 引导和模型批次分开保留，与执行过程中新增引导的组装方式一致。
 		for _, message := range saved {
@@ -82,7 +91,10 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if err != nil {
 			return operationStorageError(ctx, err)
 		}
-		current.steering = append(current.steering[:appliedSteering], steeringMessages(pending)...)
+		pendingMessages := steeringMessages(pending)
+		current.steering = append(current.steering[:appliedSteering], pendingMessages...)
+		// 审核只保留真实用户来源；恢复轨迹中的历史摘要即使使用 user 角色，也不能成为授权依据。
+		roundGuidance := append(append([]model.Message(nil), reviewGuidance...), pendingMessages...)
 		if err := current.fit(ctx, e, &ex, resolved, requestFixed, definitions, &meter, 0, nil); err != nil {
 			return err
 		}
@@ -140,6 +152,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 				return err
 			}
 			appliedSteering = len(current.steering)
+			reviewGuidance = roundGuidance
 		}
 		if errors.Is(callErr, conversation.ErrSteered) && !errors.Is(callErr, agent.ErrStorage) && ctx.Err() == nil {
 			if err := e.saveAnswer(ctx, ex, []model.Block{}, ""); err != nil {
@@ -208,7 +221,7 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 				if call.Name == agent.UserInputTool {
 					value, err = e.askUser(ctx, ex, steering, step, call)
 				} else {
-					value, err = e.callTool(ctx, ex, resolved, steering, step, call, denied, uncertain, extraByName[call.Name])
+					value, err = e.callTool(ctx, ex, resolved, steering, reviewGuidance, step, call, denied, uncertain, extraByName[call.Name])
 				}
 			}
 			if errors.Is(err, conversation.ErrSteered) {
@@ -303,6 +316,8 @@ func toolFailure(err error) json.RawMessage {
 		kind, message = "cancelled", "操作已取消"
 	case errors.Is(err, context.DeadlineExceeded):
 		kind, message = "timeout", "工具执行超时"
+	case errors.Is(err, model.ErrAttachment):
+		kind, message = "attachment_unavailable", model.ErrAttachment.Error()
 	}
 	value, _ := json.Marshal(map[string]any{"error": map[string]string{"kind": kind, "message": message}})
 	return value

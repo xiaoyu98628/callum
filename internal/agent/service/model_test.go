@@ -21,6 +21,33 @@ type interruptedMessageRepository struct {
 	cleanupError error
 }
 
+func TestAttachmentFailurePreservesCancellation(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		kind string
+	}{
+		{model.ErrAttachment, "attachment_unavailable"},
+		{errors.Join(model.ErrAttachment, context.Canceled), "cancelled"},
+		{errors.Join(model.ErrAttachment, context.DeadlineExceeded), "timeout"},
+	} {
+		var output struct {
+			Error struct {
+				Kind string `json:"kind"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(toolFailure(tc.err), &output); err != nil {
+			t.Fatal(err)
+		}
+		_, kind, _ := failure(tc.err)
+		if output.Error.Kind != tc.kind || kind != tc.kind {
+			t.Fatalf("附件错误覆盖了执行边界: tool=%s run=%s want=%s", output.Error.Kind, kind, tc.kind)
+		}
+	}
+	if _, kind, _ := failure(errors.Join(agent.ErrStorage, model.ErrAttachment, context.Canceled)); kind != "internal" {
+		t.Fatalf("持久化故障被附件错误掩盖: %s", kind)
+	}
+}
+
 func (r *interruptedMessageRepository) SaveMessage(ctx context.Context, _ string, _ []model.Block, _ string) error {
 	return r.write(ctx)
 }

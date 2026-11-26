@@ -95,20 +95,9 @@ func (s *sandboxState) close() error {
 func (*fixedCommand) sandboxBackend() string { return "windows-appcontainer" }
 
 func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionPermissions, protection tool.ProtectedData) error {
-	if permissions.SandboxMode != "" && !permissions.SandboxMode.Valid() {
-		return tool.ErrDenied
-	}
-	p.boundary = tool.CommandBoundary{Mode: permissions.SandboxMode, Escalated: a.SandboxPermissions == sandboxEscalated, Risk: commandRisk(p.command)}
-	if permissions.SandboxMode == tool.SandboxFullAccess {
-		p.boundary.Escalated = false
-		return nil
-	}
-	projectWrite := a.SandboxPermissions == sandboxProjectWrite
-	if projectWrite && (permissions.SandboxMode != tool.SandboxWorkspaceWrite || p.workspace == nil) {
-		return tool.ErrDenied
-	}
-	if p.boundary.Escalated || permissions.SandboxMode == "" {
-		return nil
+	projectWrite, handled, err := p.sandboxRequest(a, permissions)
+	if err != nil || handled {
+		return err
 	}
 	if protection.Directory == "" {
 		return fmt.Errorf("Windows 沙箱需要持有应用数据目录的恢复记录: %w", tool.ErrUnavailable)
@@ -124,7 +113,6 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 			return errors.Join(tool.ErrUnavailable, err)
 		}
 	}
-	var err error
 	p.protectedDirectory, err = pinPath(protection.Directory, true)
 	if err != nil {
 		return err
@@ -188,17 +176,7 @@ func (p *fixedCommand) configureSandbox(a arguments, permissions tool.ExecutionP
 	}
 	p.profile = string(profile)
 	// 随机私有目录不进入权限指纹；实际读写根目录由快照绑定。
-	for _, key := range []string{"TMPDIR", "TMP", "TEMP", "GOCACHE", "GOTMPDIR", "npm_config_cache", "PIP_CACHE_DIR"} {
-		p.environment = slices.DeleteFunc(p.environment, func(entry string) bool { name, _, _ := strings.Cut(entry, "="); return strings.EqualFold(name, key) })
-		value := p.temporaryPath
-		if key == "GOCACHE" {
-			value = filepath.Join(value, "go-build")
-		}
-		if key == "npm_config_cache" {
-			value = filepath.Join(value, "npm-cache")
-		}
-		p.environment = append(p.environment, key+"="+value)
-	}
+	p.environment = sandboxEnvironment(p.environment, p.temporaryPath)
 	return nil
 }
 

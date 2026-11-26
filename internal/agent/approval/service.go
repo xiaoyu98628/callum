@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/xiaoyu98628/callum/internal/agent"
+	identifier "github.com/xiaoyu98628/callum/internal/id"
 )
 
 // Service 由应用持有，等待与所属执行共享取消信号，不启动独立后台任务。
@@ -28,10 +29,7 @@ func New(repository agent.ApprovalRepository, lookup func(context.Context, strin
 	}
 	return &Service{repository: repository, lookup: lookup, emit: emit, signals: map[string]chan struct{}{}}, nil
 }
-func validID(id string) bool {
-	value, err := uuid.Parse(id)
-	return err == nil && value.Version() == 7 && value.String() == id
-}
+func validID(id string) bool { return identifier.ValidV7(id) }
 
 func (s *Service) Get(ctx context.Context, id string) (agent.Approval, error) {
 	if !validID(id) {
