@@ -48,6 +48,11 @@ go run ./cmd/callum
 | [上下文统计与压缩](docs/context-compaction.md) | Token 估算、预算、压缩设置、摘要版本与恢复 |
 | [Agent 工具与审批](docs/tools-and-approvals.md) | 工具循环、目录授权、审批设置、文件补丁与命令执行 |
 | [对话、执行与上下文设计](docs/design/conversations.md) | 数据一致性、事务、轨迹恢复及平台沙箱设计 |
+| [中文代码对照](docs/code-zh/README.md) | 全部 Go 代码、检查脚本与回调页面的中文对照、翻译规则和逐文件导航 |
+
+## 中文代码对照
+
+中文对照统一存放在 `docs/code-zh/`，按源文件相对路径一一对应，并在原文件名后追加 `.md`。例如 `internal/agent/service/loop.go` 对应 `docs/code-zh/internal/agent/service/loop.go.md`。当前覆盖全部 440 个 Go 文件（含测试和平台实现），以及检查脚本和 OAuth 回调页面，共 442 份代码对照。每份对应文件只放翻译代码；翻译规则和完整文件导航集中维护在[中文代码对照说明](docs/code-zh/README.md)中。
 
 ## 协作
 
