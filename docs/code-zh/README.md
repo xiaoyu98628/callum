@@ -2,7 +2,7 @@
 
 本目录对应 Callum Go 仓库中的全部代码，按源码相对路径存放，并在原文件名后追加 `.md`。例如 `internal/agent/service/loop.go` 对应 `docs/code-zh/internal/agent/service/loop.go.md`。
 
-当前覆盖 440 个 Go 文件（含 151 个测试文件、全部平台实现及测试辅助程序）、1 个 Shell 脚本和 1 个 HTML 回调页面，共 442 份代码对照、54,964 行原代码。
+当前覆盖 440 个 Go 文件（含 151 个测试文件、全部平台实现及测试辅助程序）、1 个 Shell 脚本和 1 个 HTML 回调页面，共 442 份代码对照、54,970 行原代码。
 
 ## 翻译规则
 
