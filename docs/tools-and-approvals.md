@@ -269,7 +269,9 @@ Seatbelt 是共享文件系统上的路径访问边界，不是容器或独立�
 sequence 在单个步骤内从 1 递增；两个流各自保持读取顺序，不承诺还原跨 stdout/stderr 的原始写入顺序。客户端应持续读取 JSONL、按 step_id 分流并解码字节，不把片段当作完整 UTF-8 字符或最终成功信号。
 每片最多 4 KiB 原始字节，每次调用实时推送最多 64 KiB、128 片。保存 stdout/stderr 各自前 16 KiB 原始字节，编码后各不超过 24 KiB JSON，最终结果仍不超过 64 KiB。达到上限继续排空管道，分别设置 truncated 和 stream_truncated，并保留实际读取字节数；输出片段只即时发布，不逐片落库或承诺重放。慢订阅者沿用有界队列规则，断开对应消费者，不取消共享执行；最终结果通过 step.data 查询。
 
-结果包含 execution_boundary（sandboxed、sandbox_mode、escalated 及可选 risk）、started、pid（未启动时为 null，仅供核实，不作为重启后的进程控制凭据）、exit_code（未获得时为 null）、可选 signal、timed_out、cancelled、cleanup_complete、stdout、stderr、stream_truncated。每个输出对象为 encoding（utf-8 或 base64）、data、bytes、truncated；二进制或不能构成完整 UTF-8 的保留前缀使用 base64；UTF-8 文本按实际 JSON 转义长度和字符边界截断。
+结果包含 execution_boundary（sandboxed、sandbox_mode、escalated 及可选 risk）、started、pid（未启动时为 null，仅供核实，不作为重启后的进程控制凭据）、exit_code（未获得时为 null）、可选 signal、timed_out、cancelled、cleanup_complete、stdout、stderr、stream_truncated。清理失败时附带 cleanup_errors，每项只保存固定 stage、kind 及可用的 system_code 系统错误码，不包含原始错误文本、路径、命令或环境；阶段区分启动后收尾、进程组终止、主进程等待、管道读取与关闭、进程句柄关闭和执行环境清理。成功时省略此字段。每个输出对象为 encoding（utf-8 或 base64）、data、bytes、truncated；二进制或不能构成完整 UTF-8 的保留前缀使用 base64；UTF-8 文本按实际 JSON 转义长度和字符边界截断。
+
+macOS 在主进程已退出、进程组没有可接收信号的成员但尚未完全消退时，终止组也可能返回 EPERM。此时只用信号 0 在最多 2 秒内确认原组消失，不再次发送终止信号；只有系统明确返回 ESRCH 才认定该组已不存在。仍存在或无法确认时保留清理失败，已经启动的命令结果继续记为 unknown，不忽略真实权限错误。
 启动失败为 not_applied；若权限建立后的回收失败则保守记录 unknown 并保留恢复日志。正常退出且生命周期收尾成功为 applied，仅证明命令调用已经执行完毕，非零 exit_code 仍原样交给模型判断业务失败。启动后取消、超时、信号终止或结果不明为 unknown，并保留已经收到的输出。未记录结果的中断命令沿用持久化保守未知及重新审批规则，不自动重试。
 
 平台原生验证使用 `go.mod` 指定的 Go 版本，在对应系统上运行[检查与构建](development.md#检查与构建)中的命令。交叉编译验证目标平台可构建，原生运行以对应系统上的测试结果为准。

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/xiaoyu98628/callum/internal/config"
@@ -39,6 +40,9 @@ func TestLargeModelResultUsesBoundedUTF8Fragments(t *testing.T) {
 	mid := setupConversationModel(t, p, upstream.URL)
 	accepted := p.call(t, "conversation.send", map[string]any{"model_id": mid, "stream": false, "content": messageBlocks("原始结果测试")})
 	rid := resultString(t, accepted, "run_id")
+	// 本用例解析并保存 9 MiB 原始响应；race 下可超过普通请求的 3 秒测试期限。
+	// 只调整该连接的有界读取预算，生产超时、大小和 UTF-8 分片断言保持不变。
+	p.readTimeout = 10 * time.Second
 	p.event(t, "run.completed")
 	stepID := resultStringFromSteps(t, p.call(t, "step.list", map[string]any{"run_id": rid}))
 	first := p.call(t, "step.data", map[string]any{"step_id": stepID, "field": "output"})

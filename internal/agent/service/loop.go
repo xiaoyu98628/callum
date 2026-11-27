@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,18 +33,10 @@ func (e *Engine) loop(ctx context.Context, ex conversation.Execution, resolved a
 		if err != nil {
 			return operationStorageError(ctx, err)
 		}
-		reviewGuidance, err = restoredReviewGuidance(saved, checkpoint)
-		if err != nil {
+		if err := current.restore(saved, checkpoint); err != nil {
 			return err
 		}
-		// 引导和模型批次分开保留，与执行过程中新增引导的组装方式一致。
-		for _, message := range saved {
-			if message.Role == model.RoleUser {
-				current.steering = append(current.steering, message)
-			} else {
-				current.current = append(current.current, message)
-			}
-		}
+		reviewGuidance = slices.Clone(current.steering)
 		keys, err := e.repository.RejectedOperationKeys(ctx, ex.Run.ID)
 		if err != nil {
 			return operationStorageError(ctx, err)

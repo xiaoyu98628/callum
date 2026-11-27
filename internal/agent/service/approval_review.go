@@ -46,29 +46,6 @@ func canReviewTool(prepared *toolexecutor.Prepared, decision policy.Decision) bo
 	})
 }
 
-// restoredReviewGuidance 按仓储的恢复契约排除置于首位的可信检查点，只返回用户引导。
-// 不能仅按模型角色或文本前缀推断授权来源；检查点必须与仓储读取的服务端记录完全匹配。
-func restoredReviewGuidance(saved []model.Message, checkpoint *agent.ContextCheckpoint) ([]model.Message, error) {
-	if checkpoint != nil {
-		if len(saved) == 0 {
-			return nil, model.ErrInvalidResponse
-		}
-		first, expected := saved[0], checkpoint.Message()
-		if first.Role != expected.Role || first.Content != expected.Content || len(first.Blocks) != 0 ||
-			len(first.ToolCalls) != 0 || first.ToolCallID != "" || first.Reasoning != nil {
-			return nil, model.ErrInvalidResponse
-		}
-		saved = saved[1:]
-	}
-	var guidance []model.Message
-	for _, message := range saved {
-		if message.Role == model.RoleUser {
-			guidance = append(guidance, message)
-		}
-	}
-	return guidance, nil
-}
-
 func reviewMessages(ex conversation.Execution, guidance []model.Message, prepared *toolexecutor.Prepared) ([]model.Message, error) {
 	// 只接收执行上下文中已生效的用户输入，不把模型回答或工具结果当作用户授权。
 	intent, err := reviewText(ex.User.Content, "", 8192)

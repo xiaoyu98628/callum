@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -14,9 +15,11 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/agent"
 	"github.com/xiaoyu98628/callum/internal/agent/events"
+	"github.com/xiaoyu98628/callum/internal/conversation"
 	"github.com/xiaoyu98628/callum/internal/conversation/compaction"
 	"github.com/xiaoyu98628/callum/internal/conversation/history"
 	"github.com/xiaoyu98628/callum/internal/model"
+	"github.com/xiaoyu98628/callum/internal/model/adapter/chatcompletions"
 	"github.com/xiaoyu98628/callum/internal/settings"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
 	"github.com/xiaoyu98628/callum/internal/tool"
@@ -179,6 +182,138 @@ func TestSingleExecutionCompactsMessageBoundaryAndRestoresAfterRestart(t *testin
 	next := sendOutcome(t, resumedSvc, id, ex.Conversation.ID, "继续", nil)
 	if terminal := capacityTerminal(t, restarted, resumedSub, next.Run.ID); terminal.Type != "run.completed" || !checked.Load() || instance.calls.Load() != 420 {
 		t.Fatal("重启未恢复摘要或重放了已完成工具")
+	}
+}
+
+// resumeCapacityClient 同时使用真实协议的配对校验和较小的字节预算，
+// 让短工具链也能跨过多个检查点；模型响应仍完全由测试控制，不访问网络。
+type resumeCapacityClient struct {
+	byteLimitedClient
+	validator model.InputValidator
+}
+
+func (c resumeCapacityClient) ValidateInput(ctx context.Context, req model.Request) error {
+	if err := c.validator.ValidateInput(ctx, req); err != nil {
+		return err
+	}
+	return c.byteLimitedClient.ValidateInput(ctx, req)
+}
+
+func TestResumedExecutionCompactsAgainWithoutLosingToolPairsOrGuidance(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restart=%t", restart), func(t *testing.T) {
+			rt, cfg := runtimeFixture(t, 1)
+			capacitySettings(t, rt, true, 900000)
+			instance := &outcomeTestTool{path: filepath.Join(t.TempDir(), "evidence"), outcome: tool.OutcomeApplied}
+			validator, err := chatcompletions.New(chatcompletions.Config{BaseURL: "https://example.test/v1"}, &http.Client{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			const request = "保留原始需求，完成所有操作"
+			const guide = "只处理已经指定的目录，保留此用户约束"
+			var resumed atomic.Bool
+			var initialRounds, resumedRounds, toolRounds, summaries atomic.Int32
+			client := resumeCapacityClient{
+				validator: validator,
+				limit:     16 << 10,
+				outcomeTestModel: outcomeTestModel(func(_ context.Context, req model.Request) (model.Response, error) {
+					if req.Messages[0].Content == compaction.Prompt {
+						summaries.Add(1)
+						return model.Response{Text: capacitySummary}, nil
+					}
+					if len(req.Tools) == 0 {
+						return model.Response{Text: "标题"}, nil
+					}
+					var hasRequest, hasGuide bool
+					for _, message := range req.Messages {
+						text := message.Content + history.Text(message.Blocks)
+						hasRequest = hasRequest || strings.Contains(text, request)
+						hasGuide = hasGuide || strings.Contains(text, guide)
+					}
+					if !hasRequest || !hasGuide {
+						t.Error("压缩或继续后丢失原始需求或已生效引导")
+					}
+					if !resumed.Load() {
+						if initialRounds.Add(1) > 24 {
+							return model.Response{}, context.Canceled
+						}
+					} else if resumedRounds.Add(1) > 28 {
+						return model.Response{Text: "操作完成"}, nil
+					}
+					round := toolRounds.Add(1)
+					return model.Response{ToolCalls: []model.ToolCall{
+						{ID: fmt.Sprintf("a-%d", round), Name: "operation", Arguments: json.RawMessage(`{}`)},
+						{ID: fmt.Sprintf("b-%d", round), Name: "operation", Arguments: json.RawMessage(`{}`)},
+					}}, nil
+				}),
+			}
+			id := policyTestID(t)
+			svc, runs := outcomeService(t, rt, instance, client, id, nil)
+			sub, err := rt.Subscribe(events.Filter{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sub.Close()
+			ex := sendOutcome(t, svc, id, "", request, func(accepted conversation.Execution) {
+				if _, err := svc.AddFollowUp(t.Context(), conversation.FollowUpInput{
+					ConversationID: accepted.Conversation.ID, ExpectedRunID: accepted.Run.ID, Mode: "steer",
+					Content: []model.Block{{Type: "text", Text: guide}},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			})
+			if terminal := capacityTerminal(t, rt, sub, ex.Run.ID); terminal.Type != "run.cancelled" {
+				t.Fatalf("未建立停止的长任务: %+v", terminal.Data)
+			}
+			previous, err := runs.LatestCheckpoint(t.Context(), ex.Conversation.ID, ex.Run.ID)
+			if err != nil || previous == nil {
+				t.Fatalf("停止前缺少有效检查点: %+v %v", previous, err)
+			}
+			priorSummaries := summaries.Load()
+			if restart {
+				if err := rt.Close(); err != nil {
+					t.Fatal(err)
+				}
+				rt, err = newTestRuntime(t.Context(), cfg, rt.logger)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() {
+					if err := rt.Close(); err != nil {
+						t.Error(err)
+					}
+				})
+				svc, runs = outcomeService(t, rt, instance, client, id, nil)
+				sub, err = rt.Subscribe(events.Filter{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer sub.Close()
+			}
+			resumed.Store(true)
+			if err := svc.Continue(t.Context(), conversation.Continue{ConversationID: ex.Conversation.ID, RunID: ex.Run.ID, ModelID: id}, func(accepted conversation.Execution) error {
+				if !accepted.Resumed || accepted.Run.ID != ex.Run.ID || accepted.Assistant.ID != ex.Assistant.ID {
+					t.Fatal("继续任务未复用原执行和回答")
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if terminal := capacityTerminal(t, rt, sub, ex.Run.ID); terminal.Type != "run.completed" {
+				t.Fatalf("继续后再次压缩失败: %+v", terminal.Data)
+			}
+			latest, err := runs.LatestCheckpoint(t.Context(), ex.Conversation.ID, ex.Run.ID)
+			if err != nil || latest == nil || latest.ID == previous.ID || latest.Through <= previous.Through || summaries.Load()-priorSummaries < 2 {
+				t.Fatalf("继续后未连续推进摘要: previous=%+v latest=%+v summaries=%d err=%v", previous, latest, summaries.Load()-priorSummaries, err)
+			}
+			var savedTools int64
+			if err := rt.db.DB.Model(&schema.Step{}).Where("run_id=? AND type='tool_call' AND status='completed'", ex.Run.ID).Count(&savedTools).Error; err != nil {
+				t.Fatal(err)
+			}
+			if toolRounds.Load() != 52 || instance.calls.Load() != 104 || savedTools != 104 {
+				t.Fatalf("工具被重放或原始审计丢失: rounds=%d calls=%d saved=%d", toolRounds.Load(), instance.calls.Load(), savedTools)
+			}
+		})
 	}
 }
 

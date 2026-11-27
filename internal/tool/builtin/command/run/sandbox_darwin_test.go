@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -43,6 +44,45 @@ func prepareSandboxTest(t *testing.T, root string, command []string, mode tool.S
 		t.Fatal("准备期间创建了沙箱目录")
 	}
 	return invocation, invocation.fixed.temporaryPath
+}
+
+func TestSeatbeltCleanupFailureIsReportedWithoutPrivatePath(t *testing.T) {
+	call, temporary := prepareSandboxTest(t, t.TempDir(), []string{"/bin/pwd"}, tool.SandboxReadOnly, false)
+	blocked := filepath.Join(temporary, "private-secret-directory")
+	t.Cleanup(func() {
+		if err := os.Chmod(blocked, 0700); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Error(err)
+		}
+		if err := os.RemoveAll(temporary); err != nil {
+			t.Error(err)
+		}
+	})
+	created := false
+	result, err := call.ExecuteStream(t.Context(), func(tool.OutputChunk) error {
+		if created {
+			return nil
+		}
+		created = true
+		if err := os.Mkdir(blocked, 0700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(blocked, "private-secret-file"), nil, 0600); err != nil {
+			return err
+		}
+		// 在本次私有临时目录制造真实删除失败，验证命令已正常退出也不能误报成功。
+		return os.Chmod(blocked, 0)
+	})
+	if !created || (!errors.Is(err, syscall.EACCES) && !errors.Is(err, syscall.EPERM)) || result.Outcome != tool.OutcomeUnknown {
+		t.Fatalf("清理失败事实不符: %s %v", result.Output, err)
+	}
+	report := decodeReport(t, result)
+	if report.ExitCode == nil || *report.ExitCode != 0 || report.CleanupComplete || len(report.CleanupErrors) != 1 {
+		t.Fatalf("清理失败报告不符: %s", result.Output)
+	}
+	failure := report.CleanupErrors[0]
+	if failure.Stage != "execution_cleanup" || failure.Kind != "system" || failure.SystemCode == 0 || strings.Contains(string(result.Output), "private-secret") {
+		t.Fatalf("清理失败诊断不符或泄漏路径: %s", result.Output)
+	}
 }
 
 func TestSeatbeltKeepsBundledResourcesReadOnlyInsideWorkspace(t *testing.T) {

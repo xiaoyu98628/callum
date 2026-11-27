@@ -32,14 +32,15 @@ type wireFrame struct {
 	} `json:"error"`
 }
 type appPeer struct {
-	conn     net.Conn
-	decoder  *json.Decoder
-	done     chan error
-	cancel   context.CancelFunc
-	pending  []wireFrame
-	sequence int
-	stopped  bool
-	seen     strings.Builder
+	conn        net.Conn
+	decoder     *json.Decoder
+	done        chan error
+	cancel      context.CancelFunc
+	pending     []wireFrame
+	sequence    int
+	stopped     bool
+	seen        strings.Builder
+	readTimeout time.Duration
 }
 
 func startApp(t *testing.T, cfg config.Config, logs io.Writer) *appPeer {
@@ -71,7 +72,11 @@ func startApp(t *testing.T, cfg config.Config, logs io.Writer) *appPeer {
 }
 func (p *appPeer) read(t *testing.T) wireFrame {
 	t.Helper()
-	if err := p.conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+	timeout := p.readTimeout
+	if timeout <= 0 {
+		timeout = 3 * time.Second
+	}
+	if err := p.conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
 		t.Fatal(err)
 	}
 	var f wireFrame

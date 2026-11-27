@@ -50,8 +50,7 @@ func (p *invocation) ExecuteStream(ctx context.Context, emit func(tool.OutputChu
 		return tool.Result{Outcome: outcome}, err
 	}
 	report, err := runProcess(runCtx, p.fixed, emit)
-	if cleanupErr := cleanup(); cleanupErr != nil {
-		report.CleanupComplete = false
+	if cleanupErr := report.cleanupError("execution_cleanup", cleanup()); cleanupErr != nil {
 		err = errors.Join(err, cleanupErr)
 	}
 	output, marshalErr := json.Marshal(report)

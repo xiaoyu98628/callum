@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"syscall"
 	"time"
 
 	"github.com/xiaoyu98628/callum/internal/tool"
@@ -21,9 +22,42 @@ type processReport struct {
 	TimedOut        bool                 `json:"timed_out"`
 	Cancelled       bool                 `json:"cancelled"`
 	CleanupComplete bool                 `json:"cleanup_complete"`
+	CleanupErrors   []cleanupFailure     `json:"cleanup_errors,omitempty"`
 	Stdout          outputData           `json:"stdout"`
 	Stderr          outputData           `json:"stderr"`
 	StreamTruncated bool                 `json:"stream_truncated"`
+}
+
+type cleanupFailure struct {
+	Stage      string `json:"stage"`
+	Kind       string `json:"kind"`
+	SystemCode uint64 `json:"system_code,omitempty"`
+}
+
+// cleanupError 只保留固定阶段、错误类别及系统码，避免将路径、命令或环境写入诊断。
+// 原始错误仍沿调用链返回；每次资源收尾只记录对应步骤，条目数量由固定资源数量限定。
+func (r *processReport) cleanupError(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+	failure := cleanupFailure{Stage: stage, Kind: "unknown"}
+	if code, ok := errors.AsType[syscall.Errno](err); ok {
+		failure.Kind, failure.SystemCode = "system", uint64(code)
+	} else {
+		switch {
+		case errors.Is(err, context.DeadlineExceeded):
+			failure.Kind = "timeout"
+		case errors.Is(err, context.Canceled):
+			failure.Kind = "cancelled"
+		case errors.Is(err, os.ErrClosed):
+			failure.Kind = "closed"
+		case errors.Is(err, tool.ErrUnavailable):
+			failure.Kind = "unavailable"
+		}
+	}
+	r.CleanupComplete = false
+	r.CleanupErrors = append(r.CleanupErrors, failure)
+	return err
 }
 
 type processExit struct {
@@ -40,13 +74,11 @@ func runProcess(ctx context.Context, fixed *fixedCommand, emit func(tool.OutputC
 	var files []*os.File
 	defer func() {
 		var closeErr error
-		for _, file := range files {
-			closeErr = errors.Join(closeErr, file.Close())
+		stages := [...]string{"stdin_close", "stdout_close", "stderr_close"}
+		for i, file := range files {
+			closeErr = errors.Join(closeErr, report.cleanupError(stages[i], file.Close()))
 		}
 		retErr = errors.Join(retErr, closeErr)
-		if closeErr != nil {
-			report.CleanupComplete = false
-		}
 	}()
 	stdin, err := os.Open(os.DevNull)
 	if err != nil {
@@ -60,42 +92,43 @@ func runProcess(ctx context.Context, fixed *fixedCommand, emit func(tool.OutputC
 	files = append(files, stdout)
 	stderr, stderrWriter, err := os.Pipe()
 	if err != nil {
-		return report, errors.Join(tool.ErrUnavailable, err, stdoutWriter.Close())
+		return report, errors.Join(tool.ErrUnavailable, err, report.cleanupError("stdout_writer_close", stdoutWriter.Close()))
 	}
 	files = append(files, stderr)
 	if err := fixed.check(ctx); err != nil {
-		return report, errors.Join(err, stdoutWriter.Close(), stderrWriter.Close())
+		return report, errors.Join(err, report.cleanupError("stdout_writer_close", stdoutWriter.Close()), report.cleanupError("stderr_writer_close", stderrWriter.Close()))
 	}
 	process, startErr := startProcess(fixed, stdin, stdoutWriter, stderrWriter)
 	// 仅子进程持有写端；父进程必须及时关闭，否则读取者永远等不到 EOF。
-	closeWriters := errors.Join(stdoutWriter.Close(), stderrWriter.Close())
+	closeWriters := errors.Join(report.cleanupError("stdout_writer_close", stdoutWriter.Close()), report.cleanupError("stderr_writer_close", stderrWriter.Close()))
 	if process == nil {
 		return report, errors.Join(tool.ErrUnavailable, startErr, closeWriters)
 	}
 	report.Started = true
 	report.PID = new(process.processID())
 	defer func() {
-		closeErr := process.close()
+		closeErr := report.cleanupError("process_close", process.close())
 		retErr = errors.Join(retErr, closeErr)
-		if closeErr != nil {
-			report.CleanupComplete = false
-		}
 	}()
-	readers := make(chan error, 2)
-	go func() { readers <- drain(stdout, "stdout", output) }()
-	go func() { readers <- drain(stderr, "stderr", output) }()
+	type readResult struct {
+		stage string
+		err   error
+	}
+	readers := make(chan readResult, 2)
+	go func() { readers <- readResult{"stdout_read", drain(stdout, "stdout", output)} }()
+	go func() { readers <- readResult{"stderr_read", drain(stderr, "stderr", output)} }()
 	// 两个读取任务只等待本次管道；终止进程后仍不结束时关闭读端并等待它们返回。
 	exit, waitErr := waitProcess(runCtx, process)
-	stopErr := process.stop()
+	stopErr := report.cleanupError("process_stop", process.stop())
 	retErr = errors.Join(startErr, closeWriters, waitErr, stopErr)
-	cleanupErr := errors.Join(startErr, closeWriters, stopErr)
+	report.cleanupError("process_start", startErr)
 	if waitErr != nil {
 		// 调用方取消、超时或输出回调失败均结束本次进程组/Job，再有界等待主进程。
 		cleanup, end := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
 		exit, err = waitProcess(cleanup, process)
 		end()
 		retErr = errors.Join(retErr, err)
-		cleanupErr = errors.Join(cleanupErr, err)
+		report.cleanupError("process_wait", err)
 		if err == nil {
 			report.ExitCode, report.Signal = new(exit.code), exit.signal
 		}
@@ -115,22 +148,22 @@ func runProcess(ctx context.Context, fixed *fixedCommand, emit func(tool.OutputC
 	defer timer.Stop()
 	for remaining := 2; remaining > 0; {
 		select {
-		case readErr := <-readers:
-			retErr = errors.Join(retErr, readErr)
-			cleanupErr = errors.Join(cleanupErr, readErr)
+		case read := <-readers:
+			retErr = errors.Join(retErr, report.cleanupError(read.stage, read.err))
 			remaining--
 		case <-timer.C:
 			// 后代保留管道或主动脱离进程组时，不让读取任务拖住运行时关闭。
 			retErr = errors.Join(retErr, tool.ErrUnavailable)
-			cleanupErr = errors.Join(cleanupErr, tool.ErrUnavailable)
-			retErr = errors.Join(retErr, stdout.Close(), stderr.Close())
+			report.cleanupError("output_wait", context.DeadlineExceeded)
+			retErr = errors.Join(retErr, report.cleanupError("stdout_close", stdout.Close()), report.cleanupError("stderr_close", stderr.Close()))
 			files = files[:1] // 读端已经关闭，由此处收回所有权，避免重复关闭掩盖错误。
 			for ; remaining > 0; remaining-- {
-				retErr = errors.Join(retErr, <-readers)
+				read := <-readers
+				retErr = errors.Join(retErr, report.cleanupError(read.stage, read.err))
 			}
 		}
 	}
-	report.CleanupComplete = report.ExitCode != nil && cleanupErr == nil
+	report.CleanupComplete = report.ExitCode != nil && len(report.CleanupErrors) == 0
 	return report, retErr
 }
 

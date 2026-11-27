@@ -20,6 +20,34 @@ type executionContext struct {
 	steering []model.Message
 }
 
+// restore 按仓储契约核对首位检查点，把真实用户引导与模型及工具轨迹分开。
+// 检查点虽使用 user 角色，仍须留在 current 首位，供后续压缩替换；只有
+// steering 可以进入审批意图，不能仅凭模型角色或文本前缀推断摘要来源。
+func (c *executionContext) restore(saved []model.Message, checkpoint *agent.ContextCheckpoint) error {
+	var current, steering []model.Message
+	if checkpoint != nil {
+		if len(saved) == 0 {
+			return model.ErrInvalidResponse
+		}
+		first, expected := saved[0], checkpoint.Message()
+		if first.Role != expected.Role || first.Content != expected.Content || len(first.Blocks) != 0 ||
+			len(first.ToolCalls) != 0 || first.ToolCallID != "" || first.Reasoning != nil {
+			return model.ErrInvalidResponse
+		}
+		current = append(current, first)
+		saved = saved[1:]
+	}
+	for _, message := range saved {
+		if message.Role == model.RoleUser {
+			steering = append(steering, message)
+		} else {
+			current = append(current, message)
+		}
+	}
+	c.current, c.steering = current, steering
+	return nil
+}
+
 func historyBoundary(ex conversation.Execution) (int64, int64) {
 	floor := int64(0)
 	if ex.Context != nil {
