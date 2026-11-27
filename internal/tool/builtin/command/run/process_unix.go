@@ -3,14 +3,12 @@
 package run
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
-	"runtime"
 	"syscall"
-	"time"
 
+	"github.com/xiaoyu98628/callum/internal/processgroup"
 	"github.com/xiaoyu98628/callum/internal/tool"
 )
 
@@ -64,40 +62,7 @@ func (p *process) poll() (processExit, bool, error) {
 // stop 只作用于本次独立进程组，不使用进程名或遍历全局进程表。
 // 主动 setsid/setpgid 脱离的后代不在此边界内；这不是操作系统沙箱。
 func (p *process) stop() error {
-	err := syscall.Kill(-p.pid, syscall.SIGKILL)
-	if errors.Is(err, syscall.ESRCH) {
-		return nil
-	}
-	if runtime.GOOS == "darwin" && p.finished && errors.Is(err, syscall.EPERM) {
-		// macOS 对尚在消退、没有可发信号成员的进程组也可能返回 EPERM。
-		// 只读确认该组消失，不能直接忽略权限错误或再次向已回收的组号发信号。
-		if confirmErr := waitForProcessGroupRemoval(func() error { return syscall.Kill(-p.pid, 0) }, cleanupTimeout); confirmErr != nil {
-			return errors.Join(err, confirmErr)
-		}
-		return nil
-	}
-	return err
-}
-
-func waitForProcessGroupRemoval(probe func() error, timeout time.Duration) error {
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		err := probe()
-		if errors.Is(err, syscall.ESRCH) {
-			return nil
-		}
-		if err != nil && !errors.Is(err, syscall.EPERM) {
-			return err
-		}
-		select {
-		case <-deadline.C:
-			return context.DeadlineExceeded
-		case <-ticker.C:
-		}
-	}
+	return processgroup.Stop(p.pid, p.finished, cleanupTimeout)
 }
 
 func (*process) close() error { return nil }

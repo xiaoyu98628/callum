@@ -45,8 +45,8 @@ func TestOfflinePreparationRejectsMissingArchivesWithoutDownloading(t *testing.T
 		t.Fatalf("离线准备没有直接报告缺失的本地归档: %v", err)
 	}
 	entries, err := os.ReadDir(output)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("离线失败遗留了资源或锁: %v %v", entries, err)
+	if err != nil || len(entries) != 1 || entries[0].Name() != ".prepare-target.lock" || !entries[0].Type().IsRegular() {
+		t.Fatalf("离线失败除固定锁文件外遗留了资源: %v %v", entries, err)
 	}
 }
 
@@ -115,8 +115,8 @@ func TestInstallChecksArchiveAndNeverOverwritesExistingResources(t *testing.T) {
 		t.Fatal("未校验归档内容")
 	}
 	entries, err := os.ReadDir(output)
-	if err != nil || len(entries) != 1 || entries[0].Name() != "target" {
-		t.Fatalf("失败后遗留暂存目录或准备锁: %v %v", entries, err)
+	if err != nil || len(entries) != 3 || entries[0].Name() != ".prepare-checksum-failure.lock" || entries[1].Name() != ".prepare-target.lock" || entries[2].Name() != "target" || !entries[0].Type().IsRegular() || !entries[1].Type().IsRegular() {
+		t.Fatalf("失败后除固定锁文件与已有资源外遗留了暂存内容: %v %v", entries, err)
 	}
 }
 

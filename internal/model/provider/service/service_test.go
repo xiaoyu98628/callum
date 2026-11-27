@@ -27,8 +27,9 @@ func (r repositoryStub) LoadRuntime(ctx context.Context, id string) (provider.Ru
 func (r repositoryStub) GetModel(ctx context.Context, id string) (provider.Model, error) {
 	return r.getModel(ctx, id)
 }
-func (r repositoryStub) ListModels(ctx context.Context, only bool) ([]provider.Model, error) {
-	return r.listModels(ctx, only)
+func (r repositoryStub) ListModels(ctx context.Context, only bool, _ ...provider.ListOptions) (provider.Page[provider.Model], error) {
+	items, err := r.listModels(ctx, only)
+	return provider.Page[provider.Model]{Items: items}, err
 }
 
 func TestServiceValidatesBeforeStorageAndAssignsID(t *testing.T) {
@@ -108,7 +109,7 @@ func TestServiceValidatesReadModelsAndPreservesStorageError(t *testing.T) {
 	if _, err := service.GetModel(t.Context(), testID); !errors.Is(err, provider.ErrInvalidConfig) {
 		t.Fatalf("查询未校验配置: %v", err)
 	}
-	if rows, err := service.ListModels(t.Context(), false); !errors.Is(err, provider.ErrInvalidConfig) || rows != nil {
+	if rows, err := service.ListModels(t.Context(), false); !errors.Is(err, provider.ErrInvalidConfig) || rows.Items != nil {
 		t.Fatalf("返回了无效列表: %v", err)
 	}
 	if _, err := service.CreateProvider(t.Context(), provider.ProviderInput{Name: "p", Protocol: "chatcompletions", BaseURL: "https://example.invalid"}); !errors.Is(err, storageErr) {

@@ -6,6 +6,7 @@ import (
 
 	"github.com/xiaoyu98628/callum/internal/model/provider"
 	"github.com/xiaoyu98628/callum/internal/storage/sqlite/schema"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -55,16 +56,34 @@ func (s *Repository) GetProvider(ctx context.Context, id string) (provider.Provi
 }
 
 // ListProviders 按本地标识排序返回厂商信息，查询结果不包含明文凭据。
-func (s *Repository) ListProviders(ctx context.Context) ([]provider.Provider, error) {
-	var rows []providerSummary
-	if err := s.db.WithContext(ctx).Model(&schema.Provider{}).Select(publicProviderColumns).Order("id").Find(&rows).Error; err != nil {
-		return nil, storageError(err)
+func (s *Repository) ListProviders(ctx context.Context, options ...provider.ListOptions) (out provider.Page[provider.Provider], err error) {
+	value, err := provider.NormalizeListOptions(options...)
+	if err != nil {
+		return out, err
 	}
-	out := make([]provider.Provider, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, row.toProvider())
-	}
-	return out, nil
+	out.Items = []provider.Provider{}
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		ids, more, err := listPageIDs(tx.Model(&schema.Provider{}), value, `length(CAST(name AS BLOB))+length(CAST(protocol AS BLOB))+length(CAST(base_url AS BLOB))+1024`)
+		if err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		var rows []providerSummary
+		if err := tx.Model(&schema.Provider{}).Select(publicProviderColumns).Where("id IN ?", ids).Order("id").Find(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			out.Items = append(out.Items, row.toProvider())
+		}
+		out.HasMore = more
+		if more {
+			out.NextAfterID = ids[len(ids)-1]
+		}
+		return nil
+	})
+	return out, storageError(err)
 }
 
 // DeleteProvider 删除厂商配置，仍被模型引用时返回 provider.ErrReferenced。

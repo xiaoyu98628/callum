@@ -48,17 +48,21 @@ func (s *Service) GetModel(ctx context.Context, id string) (provider.Model, erro
 }
 
 // ListModels 返回经过校验的配置；selectableOnly 只筛选启用状态，不代替适配器能力检查。
-func (s *Service) ListModels(ctx context.Context, selectableOnly bool) ([]provider.Model, error) {
-	models, err := s.repository.ListModels(ctx, selectableOnly)
+func (s *Service) ListModels(ctx context.Context, selectableOnly bool, options ...provider.ListOptions) (provider.Page[provider.Model], error) {
+	value, err := provider.NormalizeListOptions(options...)
 	if err != nil {
-		return nil, err
+		return provider.Page[provider.Model]{}, err
 	}
-	for _, m := range models {
+	page, err := s.repository.ListModels(ctx, selectableOnly, value)
+	if err != nil {
+		return provider.Page[provider.Model]{}, err
+	}
+	for _, m := range page.Items {
 		if err := validateModel(m.ModelInput); err != nil {
-			return nil, err
+			return provider.Page[provider.Model]{}, err
 		}
 	}
-	return models, nil
+	return page, nil
 }
 
 // SetModelEnabled 控制模型是否能用于新的运行配置解析。

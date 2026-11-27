@@ -3,22 +3,25 @@
 package mcp
 
 import (
-	"errors"
 	"os/exec"
 	"syscall"
+
+	"github.com/xiaoyu98628/callum/internal/processgroup"
 )
 
-func startProcess(cmd *exec.Cmd) (func() error, error) {
+func startProcess(cmd *exec.Cmd, done <-chan struct{}) (func() error, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
 	pid := cmd.Process.Pid
 	return func() error {
-		err := syscall.Kill(-pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return nil
+		exited := false
+		select {
+		case <-done:
+			exited = true
+		default:
 		}
-		return err
+		return processgroup.Stop(pid, exited, processStopWait)
 	}, nil
 }

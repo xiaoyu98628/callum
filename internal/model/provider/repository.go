@@ -10,12 +10,12 @@ type Repository interface {
 	CreateProvider(context.Context, string, ProviderInput) error
 	UpdateProvider(context.Context, string, ProviderInput) error
 	GetProvider(context.Context, string) (Provider, error)
-	ListProviders(context.Context) ([]Provider, error)
+	ListProviders(context.Context, ...ListOptions) (Page[Provider], error)
 	DeleteProvider(context.Context, string) error
 	CreateModel(context.Context, string, ModelInput) error
 	UpdateModel(context.Context, string, ModelInput) error
 	GetModel(context.Context, string) (Model, error)
-	ListModels(context.Context, bool) ([]Model, error)
+	ListModels(context.Context, bool, ...ListOptions) (Page[Model], error)
 	SetModelEnabled(context.Context, string, bool) error
 	DeleteModel(context.Context, string) error
 	LoadRuntime(context.Context, string) (RuntimeConfig, error)

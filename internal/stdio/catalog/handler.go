@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"encoding/json"
 
 	"github.com/xiaoyu98628/callum/internal/model/provider"
 	providerservice "github.com/xiaoyu98628/callum/internal/model/provider/service"
@@ -39,18 +40,19 @@ func (s *Handler) Handle(ctx context.Context, req protocol.Request) (any, *proto
 		}
 		return viewProvider(row), nil
 	case "provider.list":
-		if err := protocol.DecodeParams(req.Params, &struct{}{}); err != nil {
+		var p provider.ListOptions
+		if err := protocol.DecodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
-		rows, err := s.providers.ListProviders(ctx)
+		page, err := s.providers.ListProviders(ctx, p)
 		if err != nil {
 			return nil, publicError(err)
 		}
-		out := make([]providerView, 0, len(rows))
-		for _, row := range rows {
+		out := make([]providerView, 0, len(page.Items))
+		for _, row := range page.Items {
 			out = append(out, viewProvider(row))
 		}
-		return out, nil
+		return publicPage(out, page.HasMore, func(v providerView) string { return v.ID })
 	case "model.create", "model.update":
 		return s.saveModel(ctx, req)
 	case "model.get", "model.delete":
@@ -75,19 +77,20 @@ func (s *Handler) Handle(ctx context.Context, req protocol.Request) (any, *proto
 	case "model.list":
 		var p struct {
 			SelectableOnly bool `json:"selectable_only"`
+			provider.ListOptions
 		}
 		if err := protocol.DecodeParams(req.Params, &p); err != nil {
 			return nil, err
 		}
-		rows, err := s.providers.ListModels(ctx, p.SelectableOnly)
+		page, err := s.providers.ListModels(ctx, p.SelectableOnly, p.ListOptions)
 		if err != nil {
 			return nil, publicError(err)
 		}
-		out := make([]modelView, 0, len(rows))
-		for _, row := range rows {
+		out := make([]modelView, 0, len(page.Items))
+		for _, row := range page.Items {
 			out = append(out, viewModel(row))
 		}
-		return out, nil
+		return publicPage(out, page.HasMore, func(v modelView) string { return v.ID })
 	case "model.set_enabled":
 		var p struct {
 			ID      string `json:"id"`
@@ -168,4 +171,28 @@ func (s *Handler) saveModel(ctx context.Context, req protocol.Request) (any, *pr
 		return nil, publicError(err)
 	}
 	return idResult{p.ID}, nil
+}
+
+// 实际序列化后再次限制一页的 JSON 字节，给响应包装和请求标识保留余量。
+func publicPage[T any](items []T, more bool, itemID func(T) string) (any, *protocol.Error) {
+	total := 0
+	for i, item := range items {
+		raw, err := json.Marshal(item)
+		if err != nil {
+			return nil, publicError(err)
+		}
+		if total+len(raw)+1 > 6<<20 {
+			if i == 0 {
+				return nil, publicError(provider.ErrInvalidConfig)
+			}
+			items, more = items[:i], true
+			break
+		}
+		total += len(raw) + 1
+	}
+	page := provider.Page[T]{Items: items, HasMore: more}
+	if more {
+		page.NextAfterID = itemID(items[len(items)-1])
+	}
+	return page, nil
 }

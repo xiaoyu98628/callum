@@ -221,7 +221,7 @@ func TestCatalogThroughProtocol(t *testing.T) {
 	}
 	f = p.call(t, "model.list", map[string]any{"selectable_only": true})
 	assertOK(t, f)
-	if string(f.Result) != "[]" {
+	if string(f.Result) != `{"items":[],"has_more":false,"next_after_id":""}` {
 		t.Fatal(string(f.Result))
 	}
 	assertOK(t, p.call(t, "model.set_enabled", map[string]any{"id": modelID.ID, "enabled": true}))

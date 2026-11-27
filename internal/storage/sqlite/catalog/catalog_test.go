@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -40,7 +41,7 @@ func TestCatalogPersistenceAndConstraints(t *testing.T) {
 		t.Fatal(err)
 	}
 	list, err := s.ListProviders(t.Context())
-	if err != nil || len(list) != 1 || !list[0].HasAPIKey {
+	if err != nil || len(list.Items) != 1 || !list.Items[0].HasAPIKey {
 		t.Fatalf("providers=%+v err=%v", list, err)
 	}
 	public, err := json.Marshal(list)
@@ -120,7 +121,7 @@ func TestCatalogPersistenceAndConstraints(t *testing.T) {
 		t.Fatalf("禁用模型: %v", err)
 	}
 	models, err := s.ListModels(t.Context(), true)
-	if err != nil || len(models) != 0 {
+	if err != nil || len(models.Items) != 0 {
 		t.Fatalf("可选模型: %+v %v", models, err)
 	}
 	p.APIKey = new("")
@@ -185,5 +186,97 @@ func TestUnknownAndEmptyMetadata(t *testing.T) {
 	m, err = s.GetModel(t.Context(), id)
 	if err != nil || m.Capabilities == nil || m.ReasoningLevels == nil {
 		t.Fatalf("空元数据未保持: %+v %v", m, err)
+	}
+}
+
+func TestCatalogPagesKeepStableCursorAndByteBounds(t *testing.T) {
+	db, err := sqlite.Open(t.Context(), filepath.Join(t.TempDir(), "data", "callum.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	service, err := newService(db.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := service.CreateProvider(t.Context(), provider.ProviderInput{Name: "p", Protocol: "chatcompletions", BaseURL: "https://example.invalid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 501 {
+		_, err := service.CreateModel(t.Context(), provider.ModelInput{ProviderID: pid, DisplayName: "模型", RemoteModelID: fmt.Sprint(i), Enabled: i%2 == 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, only := range []bool{false, true} {
+		after, count := "", 0
+		for {
+			page, err := service.ListModels(t.Context(), only, provider.ListOptions{AfterID: after, Limit: 200})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range page.Items {
+				if row.ID <= after || (only && !row.Enabled) {
+					t.Fatal("游标或筛选错误")
+				}
+				after = row.ID
+				count++
+			}
+			if !page.HasMore {
+				if page.NextAfterID != "" {
+					t.Fatal("末页有游标")
+				}
+				break
+			}
+			if page.NextAfterID != after || len(page.Items) == 0 {
+				t.Fatal("分页没有推进")
+			}
+		}
+		want := 501
+		if only {
+			want = 251
+		}
+		if count != want {
+			t.Fatalf("读取 %d，期望 %d", count, want)
+		}
+	}
+	for _, options := range []provider.ListOptions{{Limit: -1}, {Limit: 201}, {AfterID: "invalid"}} {
+		if _, err := service.ListModels(t.Context(), false, options); !errors.Is(err, provider.ErrInvalidConfig) {
+			t.Fatalf("接受错误分页: %v", err)
+		}
+	}
+	first, err := service.ListModels(t.Context(), false, provider.ListOptions{Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := first.NextAfterID
+	if err := service.DeleteModel(t.Context(), cursor); err != nil {
+		t.Fatal(err)
+	}
+	next, err := service.ListModels(t.Context(), false, provider.ListOptions{AfterID: cursor, Limit: 1})
+	if err != nil || len(next.Items) != 1 || next.Items[0].ID <= cursor {
+		t.Fatalf("删除游标后分页漂移: %+v %v", next, err)
+	}
+	// 单条配置合法，但合计超过存储页预算时仍可按游标读完，不默默截断。
+	for i := range 12 {
+		if _, err := service.CreateProvider(t.Context(), provider.ProviderInput{Name: strings.Repeat("中", 70000), Protocol: "chatcompletions", BaseURL: fmt.Sprintf("https://example.invalid/%d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := service.ListProviders(t.Context(), provider.ListOptions{Limit: 200})
+	if err != nil || !page.HasMore || len(page.Items) >= 13 {
+		t.Fatalf("字节预算未生效: %d %v", len(page.Items), err)
+	}
+	total := len(page.Items)
+	for page.HasMore {
+		page, err = service.ListProviders(t.Context(), provider.ListOptions{AfterID: page.NextAfterID, Limit: 200})
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += len(page.Items)
+	}
+	if total != 13 {
+		t.Fatalf("字节分片丢失记录: %d", total)
 	}
 }

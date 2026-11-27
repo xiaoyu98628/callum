@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xiaoyu98628/callum/internal/filelock"
 	"github.com/xiaoyu98628/callum/internal/runtimeassets"
 )
 
@@ -124,11 +125,11 @@ func Install(ctx context.Context, target Target, outputRoot, cacheRoot string, o
 	if err := os.MkdirAll(outputRoot, 0755); err != nil {
 		return err
 	}
-	lock := filepath.Join(outputRoot, ".prepare-"+target.Directory+".lock")
-	if err := os.Mkdir(lock, 0700); err != nil {
-		return fmt.Errorf("资源准备锁已存在或不可创建: %w", err)
+	lock, err := acquirePreparationLock(outputRoot, target.Directory)
+	if err != nil {
+		return err
 	}
-	defer func() { retErr = errors.Join(retErr, os.Remove(lock)) }()
+	defer func() { retErr = errors.Join(retErr, lock.Close()) }()
 	archives := make(map[string]string, 3)
 	packageArchives := make([]string, 0, len(target.PythonPackages))
 	var workspaceArchives []string
@@ -260,6 +261,34 @@ func Install(ctx context.Context, target Target, outputRoot, cacheRoot string, o
 		return err
 	}
 	return os.Rename(stage, destination)
+}
+
+// 保留锁文件的身份。旧版目录锁可能由仍在运行的旧进程持有，不能推测为陈旧后删除。
+func acquirePreparationLock(outputRoot, target string) (*os.File, error) {
+	path := filepath.Join(outputRoot, ".prepare-"+target+".lock")
+	if info, err := os.Lstat(path); err == nil {
+		if info.IsDir() {
+			return nil, errors.New("检测到旧格式资源准备目录锁，请确认旧准备进程已退出后处理该锁目录")
+		}
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("资源准备锁必须是普通文件")
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	opened, statErr := file.Stat()
+	current, pathErr := os.Lstat(path)
+	if statErr != nil || pathErr != nil || !current.Mode().IsRegular() || !os.SameFile(opened, current) {
+		return nil, errors.Join(errors.New("资源准备锁身份已变化"), statErr, pathErr, file.Close())
+	}
+	if err := filelock.Try(file); err != nil {
+		return nil, errors.Join(fmt.Errorf("无法取得资源准备锁: %w", err), file.Close())
+	}
+	return file, nil
 }
 
 func removeStage(directory string) error {

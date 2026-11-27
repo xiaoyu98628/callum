@@ -99,12 +99,13 @@ func (t *processTransport) Connect(ctx context.Context) (sdk.Connection, error) 
 	}
 	cmd.Stdin, cmd.Stdout = readIn, writeOut
 	// 第三方 stderr 可包含令牌，沿用 os/exec 默认丢弃。
-	stop, err := startProcess(cmd)
+	done := make(chan struct{})
+	stop, err := startProcess(cmd, done)
 	parentErr := errors.Join(readIn.Close(), writeOut.Close())
 	if err != nil {
 		return nil, errors.Join(err, parentErr, writeIn.Close(), readOut.Close())
 	}
-	p := &childProcess{in: writeIn, out: readOut, stop: stop, done: make(chan struct{})}
+	p := &childProcess{in: writeIn, out: readOut, stop: stop, done: done}
 	go func() { _ = cmd.Wait(); close(p.done) }()
 	if parentErr != nil {
 		return nil, errors.Join(parentErr, p.Close())

@@ -108,7 +108,7 @@ func TestGORMZeroValues(t *testing.T) {
 		t.Fatalf("无效更新: %v", err)
 	}
 	all, err := s.ListModels(t.Context(), false)
-	if err != nil || len(all) != 1 {
+	if err != nil || len(all.Items) != 1 {
 		t.Fatalf("更新错误地新增了记录: %+v %v", all, err)
 	}
 }

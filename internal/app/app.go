@@ -100,16 +100,19 @@ func newRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, key
 			retErr = errors.Join(retErr, r.Close())
 		}
 	}()
-	initCtx, initCancel := context.WithTimeout(runtimeCtx, 10*time.Second)
-	defer initCancel()
 	var err error
 	var bundle *runtimeassets.Bundle
 	if cfg.RuntimeDir != "" {
-		bundle, err = runtimeassets.Load(initCtx, cfg.RuntimeDir)
+		// 完整资源树校验的文件 I/O 独立计时，不能消耗后续数据库初始化预算。
+		resourceCtx, resourceCancel := context.WithTimeout(runtimeCtx, 30*time.Second)
+		bundle, err = runtimeassets.Load(resourceCtx, cfg.RuntimeDir)
+		resourceCancel()
 		if err != nil {
 			return nil, fmt.Errorf("加载内置运行时: %w", err)
 		}
 	}
+	initCtx, initCancel := context.WithTimeout(runtimeCtx, 10*time.Second)
+	defer initCancel()
 	// 实例锁覆盖迁移与恢复，另一个运行时不能在启动失败前改写活动实例的结构。
 	r.ownership, err = sqlite.AcquireOwnership(cfg.DatabasePath)
 	if err != nil {

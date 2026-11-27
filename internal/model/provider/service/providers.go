@@ -41,8 +41,12 @@ func (s *Service) GetProvider(ctx context.Context, id string) (provider.Provider
 }
 
 // ListProviders 返回不含明文密钥的厂商列表，按本地标识排序。
-func (s *Service) ListProviders(ctx context.Context) ([]provider.Provider, error) {
-	return s.repository.ListProviders(ctx)
+func (s *Service) ListProviders(ctx context.Context, options ...provider.ListOptions) (provider.Page[provider.Provider], error) {
+	value, err := provider.NormalizeListOptions(options...)
+	if err != nil {
+		return provider.Page[provider.Provider]{}, err
+	}
+	return s.repository.ListProviders(ctx, value)
 }
 
 // DeleteProvider 删除未被模型引用的厂商，关联约束由存储原子检查。

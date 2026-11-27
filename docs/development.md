@@ -1,193 +1,158 @@
-# 运行与开发
+# 后端架构
 
-本文包含 Go 后端的实现现状、开发规划、运行参数、构建及验证命令。所有命令均从仓库根目录执行；数据路径和存储兼容性见 [存储与模型配置](storage.md)，接口及联调见 [JSON-RPC 协议](jsonrpc.md)。
+本文件说明 Callum Go 后端的模块职责、依赖方向和装配边界。桌面界面、Electron 进程与客户端状态由独立的 `callum-desktop` 仓库维护。
 
-## 当前状态
+运行和验证见 [运行与开发](development.md)，配置与存储见 [存储与模型配置](storage.md)，工具行为见 [Agent 工具与审批](tools-and-approvals.md)；通信字段与请求示例见 [JSON-RPC 协议](jsonrpc.md)；数据一致性、执行恢复、压缩与平台沙箱设计见 [对话、执行与上下文设计](design/conversations.md)。
 
-已有统一模型接口，以及基于 OpenAI Go SDK v3 的 Chat Completions 文本和图片输入适配器，
-支持非流式请求、流式事件、上下文取消和错误处理，SDK 版本以 `go.mod` 为准。
-入口 `cmd/callum/main.go` 已装配数据库、模型适配器与标准输入输出通信服务。
-Go 版本以 `go.mod` 为准，当前为 Go 1.27.3。
+## 模块职责
 
-已新增 GORM + SQLite 的厂商与模型配置持久化模块，提供路径计算、版本迁移、配置增删改查、
-模型启用控制和内部运行配置解析。启动程序后可以逐行输入 JSON 请求，管理配置、
-根据本地模型 ID 调用模型、接收生成事件并取消独立执行。支持并发调用，超出上限时拒绝新调用。
-客户端与 Go 之间采用 stdio，Go 调用模型厂商使用 HTTP；Electron 桌面客户端位于独立的 `callum-desktop` 仓库。
-普通对话通过 `conversation.send` 发送当前输入，服务保存历史并组装上下文，支持工作区、并行标题、编辑重发、步骤查询和原始 usage。
-兼容的 `model.invoke` 继续接收完整文本消息列表，不保存历史。
-普通对话按输入 Token 预算规划摘要压缩，并在请求触及消息数量或实际编码字节边界前尝试压缩；预算估算与厂商实际 usage 分开，请求、响应和内存安全上限继续生效。远端仍负责最终容量校验。
+当前模块与后续规划按职责组织如下：
 
-适配器通过运行时配置接收 API 根地址和凭据，并由调用方传入 HTTP 客户端，
-请求中的模型 ID 使用远端模型 ID。连接池由调用方管理，每次请求的超时与取消通过 `context.Context` 传递。
-适配器不会自行读取 `OPENAI_*` 环境变量，也不会继承其中的组织、项目或自定义请求头。
-普通对话支持文本和本地图片输入；已接通支持可选工作区的文件读取与补丁工具、跨平台非交互命令执行、模型自主工具调用与审批；已接通手动与自动上下文压缩；图片输出尚未接入。非流式请求失败时可能返回部分文本，
-流式事件的接收方应以 `Stream` 返回 `nil` 作为整个调用成功的依据。
-非流式响应和流式分片都会校验消息结构及所消费字段的 JSON 类型，合法空文本仍可正常返回。
-响应或分片包含非 NULL 的 `audio` 生成字段时，明确返回不支持的输出错误；`audio:null` 和未知厂商元数据不影响正常文本处理。
-非流式响应体关闭失败会作为调用错误返回，并保留同时发生的读取、解析或供应商错误。
-已收到结束原因后，兼容 `usage` 对象附带单个空 `delta` choice 的用量分片，
-但不接受其中新的生成内容或结束原因。
-
-## 开发规划
-
-以下为分阶段开发目标：
-
-1. **模型接入**：接入一个模型供应商，支持文本请求、流式输出、上下文取消和错误处理。
-2. **普通对话**：管理多轮消息历史、组装模型上下文，支持多个对话异步执行和独立取消。
-3. **Agent 与工具**：实现工具注册、参数与权限校验、工具执行，以及结果回传模型的执行循环。
-4. **上下文压缩与恢复**：已实现手动与自动压缩、来源追溯及摘要版本切换；中断状态已持久化，不自动重试执行。
-
-已确认的表结构、事件和后续功能约定见 [对话设计](design/conversations.md)。当前已完成模型接入、普通对话、文件读取、补丁与命令工具循环及审批；上下文压缩已接通；用户补充输入已通过问题工具与 stdio 接入，更多工具随对应功能引入。
-
-模块清单、业务与存储边界、工具组织及装配依赖见 [后端架构](architecture.md)。
-
-## 运行
-
-从仓库根目录执行：
-
-```sh
-go run ./cmd/callum
-```
-
-就绪后 stdout 输出 `system.ready` JSON 通知，随后持续接收 stdin 请求。
-诊断日志使用 `log/slog` 输出 JSON 到 stderr，stdout 不输出欢迎语或命令提示符。
-`--help` 将帮助文本写入 stderr 并退出，不打开数据库。
-
-| 启动参数 | 默认值 | 说明 |
+| 目录 | 职责 | 状态 |
 | --- | --- | --- |
-| `--data-dir` | 见[数据路径约定](storage.md#数据路径与访问权限) | 显式数据目录优先，相对路径按工作目录计算 |
-| `--max-concurrent-runs` | `4` | 同时执行的调用上限，范围 `1` 至 `64`，超出时立即返回忙碌错误 |
-| `--call-timeout` | `5m` | 普通对话和上下文摘要每次模型请求的超时。兼容 `model.invoke` 按配置解析及调用整体计时。取值必须大于零 |
-| `--tool-timeout` | `30s` | 单次工具执行超时，必须大于零 |
-| `--runtime-dir` | 空 | 可选的内置 Python/Node/Git 平台资源目录，必须为绝对路径；指定后启动时校验全部文件和链接 |
+| `internal/model` | 模型接口、内容块、响应、usage 和流式结果契约 | 已实现 |
+| `internal/model/adapter/chatcompletions` | Chat Completions 请求、认证、响应转换和流式解析 | 已实现，含模拟测试 |
+| `internal/model/provider` | 厂商与模型配置类型、存储接口、错误与标识校验 | 已实现契约 |
+| `internal/model/provider/service` | 配置业务校验、UUIDv7 分配及启用规则 | 已实现业务服务 |
+| `internal/credentials`、`system` | 凭据加密、系统主密钥及关闭时清理 | 已实现，平台验证分别说明 |
+| `internal/config` | 应用配置加载及启动参数 | 已实现 |
+| `internal/id` | 统一标准 UUIDv7 文本及 RFC4122 variant 校验，业务模块保留自己的错误类型 | 已实现 |
+| `internal/skills` | 从数据目录发现通用技能及生成有界目录上下文，不安装或内嵌技能 | 已实现 |
+| `internal/attachment` | 托管输入和交付副本、本轮工作副本及异常退出清理 | 已实现 |
+| `internal/runtimeassets`、`prepare` | 运行时清单及文件校验；开发侧固定归档下载、安全解压与资源准备 | 已实现；运行期只读，不修改全局环境 |
+| `internal/settings`、`service` | 配置组契约、执行快照、值校验与版本更新 | 已实现 |
+| `internal/storage/sqlite/settings` | 应用设置持久化和版本冲突校验 | 已实现 |
+| `internal/stdio/settings` | 应用设置查询、更新接口 | 已实现 |
+| `internal/config/paths` | 开发与发布构建的数据路径计算 | 已实现 |
+| `internal/filelock` | 调用方持有文件的非阻塞跨进程锁，关闭或进程退出时由系统释放 | 已实现 |
+| `internal/processgroup` | Unix 进程组停止及 macOS 已退出组的有界消失确认 | 已实现 |
+| `internal/storage/sqlite` | SQLite 连接池、私有文件检查、服务实例文件锁 | 已实现 |
+| `internal/storage/sqlite/schema` | 仓储与迁移共用的 GORM 表映射 | 已实现 |
+| `internal/storage/sqlite/catalog` | 厂商与模型配置仓储、映射转换及存储错误处理 | 已实现 |
+| `internal/storage/sqlite/migrations` | 事务建表、结构版本检查及迁移测试 | 已实现 |
+| `internal/app` | 独立运行时装配、业务入口、stdio 连接接入及资源清理 | 已实现 |
+| `internal/stdio` | 通信服务入口、就绪信息及请求路由 | 已实现 |
+| `internal/stdio/protocol` | JSON-RPC 消息结构及请求、参数解析 | 已实现 |
+| `internal/stdio/transport` | 标准流适配、连接、输出队列及通信关闭 | 已实现 |
+| `internal/stdio/catalog` | 厂商与模型配置接口、参数和业务错误转换 | 已实现 |
+| `internal/stdio/execution` | 模型调用、取消接口及执行事件转换 | 已实现 |
+| `internal/inference` | 模型调用请求、执行事件及错误契约 | 已实现 |
+| `internal/inference/executor` | 兼容无历史调用，复用统一运行调度 | 已实现 |
+| `internal/workspace/service` | 工作区管理、软删除和恢复 | 已实现 |
+| `internal/conversation/service`、`history` | 会话管理、发送与重发、标题和来源指纹 | 已实现 |
+| `internal/agent/executor`、`service` | 统一调度、模型与工具循环、并行标题及终态保存 | 已实现 |
+| `internal/agent/approval` | 审批快照、决定及等待协调 | 已实现 |
+| `internal/agent/transcript` | 执行轨迹配对、失败回答过滤及中断工具输出恢复 | 已实现 |
+| `internal/tool/registry`、`executor` | 工具注册、规范化、权限边界及执行 | 已实现 |
+| `internal/tool/policy` | 根据可信操作事实、历史决定、沙箱边界及目录授权计算审批要求 | 已实现 |
+| `internal/tool/builtin/filesystem` | 文件工具统一装配入口 | 已实现 |
+| `internal/tool/builtin/filesystem/list`、`read`、`search`、`patch` | 独立的目录查看、按行读取、字面搜索及文件补丁工具 | 已实现 |
+| `internal/tool/builtin/filesystem/internal/fileaccess` | 文件工具内部共享的固定目标、身份检查、句柄及有界文本读取 | 已实现 |
+| `internal/tool/builtin/command` | 命令工具统一装配入口 | 已实现 |
+| `internal/tool/builtin/command/run` | 命令审批快照、进程组/Job 生命周期及有界双流输出 | 已实现，平台验证结果分别说明 |
+| `internal/tool/builtin/internal/arguments` | 文件与命令工具共用的严格 JSON 参数结构校验 | 已实现 |
+| `internal/stdio/approval` | 审批查询和决定接口 | 已实现 |
+| `internal/agent/events` | 有界事件订阅、过滤及慢订阅者隔离 | 已实现 |
+| `internal/storage/sqlite/workspace`、`conversation`、`agent` | 普通对话仓储及跨表事务 | 已实现 |
+| `internal/stdio/workspace`、`conversation` | 工作区和对话接口 | 已实现 |
 
-运行数量和实际模型请求数量分别受同一个配置上限约束；标题使用空闲模型请求容量，不排队争用。
-活动任务占满运行容量时立即返回忙碌；已确定终态的任务正在清理时，允许在受理请求的短期超时内等待其释放。
+## 业务边界与执行恢复
 
-例如：
+技能正文、脚本、参考资料、解释器和原生依赖由客户端持有，默认技能安装也在客户端完成。Go 从 `DataDir/skills` 扫描 `SKILL.md`，只向模型提供名称、说明和绝对入口；模型通过通用文件与命令工具按需加载。Go 不包含 Word、Excel、PowerPoint 或 PDF 的解析、生成、编辑和渲染实现。`load_workspace_dependencies` 只返回资源清单中的通用 Python、Node、模块及原生命令目录，不依赖特定文档格式。
 
-```sh
-go run ./cmd/callum --max-concurrent-runs 2 --call-timeout 3m
-```
+`attachment.Access` 为已受理执行管理私有输入副本和中间目录；命令子进程结束后由 Agent 回收，Runtime 关闭等待全部执行后再关闭访问器和附件存储。`open_attachment` 按当前分支校验文件引用；`view_image` 把固定图片保存为稳定工具上下文；`publish_artifact` 保存独立交付副本，结束前追加到回答。执行中断时，存储层在标记中断的事务内从当前分支的成功步骤恢复交付物引用。图片在适配层转换为整批工具结果之后的视觉输入，原始统一轨迹保持调用和结果配对，压缩和恢复继续复用同一轨迹契约。
 
-初始化限时 10 秒，配置接口及调用前的配置查询限时 5 秒；短期初始化、配置请求上下文
-不会成为异步模型执行的运行上下文。HTTP 响应头等待及响应体读取共用对应模型请求的期限，
-建立连接限时 30 秒，TLS 握手限时 10 秒。不自动跟随重定向或重试。
+附件访问的全局锁只保护执行映射、关闭状态和短时公开快照。初始化、导出、生成与配额更新按执行独立串行化，等待文件操作时可取消；一个执行的文件 I/O 不阻塞其他执行。`End` 先撤销该执行的新操作入口，再等待在途操作并回收目录；`Close` 停止新增执行并等待已预留的初始化与文件操作。
 
-## 内置运行时资源
+`internal/runtimeassets` 返回启动时校验的不可变资源描述，不持有文件、进程或后台任务；`Runtime` 将其借给命令工具并把实际资源根目录登记为只读保护范围。资源描述同时固定 Python、Node、Git 入口及 Git 配套资源路径，子进程专用环境由命令工具生成。命令调用仍独立持有并关闭固定入口和资源目录句柄，沿用审批、进程组/Job 与输出生命周期。`prepare` 同时由随附 `callum prepare-runtimes` 离线子命令及独立维护入口 `cmd/prepare-runtimes` 使用：前者严格禁止下载且不创建应用 Runtime，后者仅在显式 `--download` 时获取缺失归档；正常 stdio 服务不调用准备流程。
 
-客户端携带资源，在实例锁内安装到实际 `DataDir/runtimes/`，Go 校验和执行。四平台 Python 固定 3.12.14，Node 26.13.0，Git 2.56.1（Windows 为 2.56.1.windows.1）。macOS ARM64 Python 使用用户提供的完整技能环境；其他三个平台使用 Astral `20260929 install_only_stripped` 与 cp312 wheel。实际目录不带版本或平台层级，清单记录全部元数据。
+`internal/conversation/compaction` 负责完整轮次的压缩规划、来源指纹与摘要校验，执行编排位于 `internal/agent/service`。用户补充输入使用现有步骤持久化，支持选项、文字、跳过和取消。工具和审批业务不依赖 stdio，后续入口复用同一 Agent 与审批服务。
+会话更新通过 `conversation.Update` 接收模型 ID 及可更新字段，业务服务校验后生成仓储使用的 `conversation.Change`，模型快照由服务端解析；JSON-RPC 的请求、响应和通知字段保持兼容。
+会话服务通过自身使用的 `ExecutionCoordinator` 接口受理、继续和协调执行，由 app 注入 Agent Engine；会话更新及会话侧队列操作的提交后通知由会话服务发布。Agent 继续负责执行过程中的引导和运行事件，不代办会话管理通知。
+`policy.Operation` 只保存可信的判定事实，不持有设置快照或工具资源；Agent 校验执行快照并查询授权，policy 统一计算历史拒绝、未知结果、沙箱及目录授权的最终判定，执行认领仍在事务内复核授权。
+`agent/transcript` 不依赖 ORM 或通信协议；SQLite 保留有界查询、分支筛选和事务写入，历史读取与压缩检查点共用轨迹恢复规则，`conversation/history` 负责将轨迹装配到对应用户消息后。
+会话展示历史由 `conversation.HistoryPage` 统一返回当前分支的执行和消息；SQLite 同一读事务按执行游标分页，独立手动压缩与普通轮次使用相同排序，不依赖固定数量的最新执行来补齐旧消息。
+其他协议和供应商兼容差异按实际需求接入。
 
-四平台的十二份基础归档、固定 Python wheel 及技能依赖归档位于客户端仓库 `resources/runtimes/archives/`；完整资源和来源校验值由客户端持有。开发、构建、测试前，客户端调用随附服务的严格离线子命令：
+## 工具组织与契约
 
-```sh
-/absolute/path/callum-desktop/resources/backend/darwin-arm64/callum prepare-runtimes \
-  --sources /absolute/path/callum-desktop/resources/runtimes/sources.json \
-  --output /absolute/path/callum-desktop/resources/runtimes/unpacked \
-  --cache /absolute/path/callum-desktop/resources/runtimes/archives \
-  --target darwin-arm64
-```
+目录按业务与职责划分；契约保留在模块根包，具体业务、存储和通信实现进入职责明确的子包。
+测试跟随对应实现，跨模块测试通过公开入口组装；不为规划能力创建空包或占位实现。
+文件和命令工具分别由 `filesystem.Tools(protection)` 和 `command.ToolsWithRuntime(environment, protection, bundle)` 汇总，根包提供工具集合入口。
+具体工具子包通过 `New()` 提供统一工具契约，各自负责定义、业务参数校验、准备及执行。
+命令实现位于 `command/run`，工具定义、参数解析和调用生命周期分别放置；环境由装配层显式传入。
+沙箱请求的公共前置判定和私有缓存环境在该包内共用，系统隔离、权限和进程清理仍由对应平台实现。
+各工具通过内部 `arguments` 包统一校验 JSON 结构，共享文件访问仍由 `filesystem/internal/fileaccess` 提供。
 
-其他平台使用相同目录名的原生服务，Windows 程序名为 `callum.exe`；省略 `--target` 准备全部四个平台。该子命令不打开数据库或启动 stdio 服务，禁止启用网络下载。客户端 `npm run prepare:runtimes` 自动选择当前平台，`dev`、`build`、`test` 已挂接前置步骤，不需要本机 Go 或后端源码。归档缺失或损坏直接失败，不联网补取。
+## 配置服务、通信与装配
 
-维护者升级资源时，可以从本仓库使用独立入口，并显式允许获取缺失归档：
+`provider/service.Service` 通过 `provider.Repository` 接口访问配置，由 `sqlite/catalog.Repository` 实现该接口。
+GORM 映射和驱动错误处理集中在存储包，业务服务不导入 ORM 或数据库驱动。
+stdio 路由调用 catalog、execution 接口处理器，后者将协议参数转换为业务输入；
+protocol 和 transport 包不依赖配置业务、模型执行或 stdio 根包。
+执行管理器只依赖统一模型接口，具体适配器由 app 中的工厂装配。
+app 创建连接、配置服务及执行管理器，并负责资源关闭顺序。无历史调用借用共享调度器，共享调度器由 Runtime 关闭。程序入口处理参数、信号和退出码。
 
-```sh
-go run -mod=readonly ./cmd/prepare-runtimes \
-  --sources /absolute/path/callum-desktop/resources/runtimes/sources.json \
-  --output /absolute/path/new-runtime-output \
-  --cache /absolute/path/callum-desktop/resources/runtimes/archives \
-  --download
-```
+## 存储查询与恢复
 
-该独立入口默认也保持离线，只有 `--download` 启用网络；随附 `callum prepare-runtimes` 始终拒绝这个参数。进度与错误使用结构化 JSON 写入 stderr，stdout 为空，`--help` 正常退出。
+业务仓储的操作事实、最新检查点及恢复子查询使用 GORM 组合构造，JSON 与窗口表达式继续在 SQLite 内执行。查询保持最新结果的筛选顺序、当前分支隔离、容量检查和事务清理范围；检查点继续逐行读取。
 
-来源清单与生成清单格式均为 `3`，该编号只用于格式校验，不加入资源目录。客户端固定使用 `unpacked/<平台>/`。已有目录不符合当前清单时仍拒绝覆盖；更新前应在新输出目录校验，在服务关闭后备份并替换生成资源。
+表结构、事务、迁移、审批与压缩的具体约束见 [对话、执行与上下文设计](design/conversations.md)，运行数据路径与数据库兼容行为见 [存储与模型配置](storage.md)。
 
-准备过程检查归档 SHA-256，限制大小、条目和解压总量，拒绝越界路径、硬链接、特殊文件及越界链接，延后建立符号链接。校验成功后生成 `manifest.json` 并将资源设置为只读，再激活平台目录；失败清理本次暂存目录和锁。重复准备检查归档及所有已解压内容，不替换有效目录；损坏、版本不符或缺少清单均拒绝覆盖。版本更新应在新输出目录核验后，在服务关闭时替换生成资源，不在服务运行期升级解释器。
+## 运行时与资源所有权
 
-独立服务可显式接入：
+`app.New(ctx, cfg, logger)` 创建独立运行时，不需要 stdin/stdout。运行时持有数据库、实例锁、HTTP 连接池、
+共享调度器、凭据 Vault 和事件发布器；初始化上下文仅用于启动，已接受的执行使用应用运行上下文。
+`Providers()`、`Workspaces()`、`Conversations()`、`Runs()` 返回业务服务，`Invoke` 提供无历史调用，
+`Approvals()` 返回审批查询与决定服务，`Settings()` 返回应用设置查询与更新服务，`Cancel` 请求独立取消。无历史调用和普通对话共享运行及实际模型请求的并发限制。
+调用 `Send` 或 `Invoke` 时，`accepted` 回调获得执行标识；回调成功后才启动执行和发布执行事件。
+回调失败时释放预留容量，已写入的普通对话执行保存为取消状态。
 
-```sh
-go run -mod=readonly ./cmd/callum --data-dir /absolute/path/isolated-data \
-  --runtime-dir /absolute/path/callum-desktop/resources/runtimes/unpacked/darwin-arm64
-```
+业务事件通过 `Runtime.Subscribe(events.Filter{...})` 订阅，可同时按会话、执行标识和事件类型过滤；
+空过滤器接收全部事件。每个运行时最多 32 个订阅，每个订阅最多排队 64 个事件，调用者负责关闭订阅，事件内容只读。
+订阅读取使用 `Next(ctx)`，正常关闭后排空队列并返回 `io.EOF`；读取上下文取消后仍需关闭订阅。
+队列溢出立即断开该订阅并返回 `events.ErrSlowConsumer`，其他订阅和业务执行继续运行，不提供逐事件重放。
+步骤通知在进入队列前投影为元数据，完整输出、usage 和定义仍通过步骤查询读取；无历史调用事件不保留原始错误链。
 
-`python`、`python3`、`node`、`git` 裸命令固定到清单的绝对入口，子进程 PATH 优先使用同套运行时。缺失或损坏明确失败，显式程序路径继续采用既有校验和审批；每次命令准备复核目录身份、三个程序入口和 Git 配置内容，完整资源校验在启动时完成。设置中不提供多版本切换。v9 工具说明及执行前校验明确要求默认直接使用 `python3`/`node`/`git`，无需用户重复提醒；多个独立操作分别调用工具，目录查看优先用 `list_directory`，不为打印分隔标题或串联独立操作套 Shell。确需 Shell 语法时，使用非登录 Shell 和工具说明给出的内置绝对入口，详见 [命令调用规则](tools-and-approvals.md#非交互命令执行)。
+`Runtime.ServeStdio(ctx, in, out)` 接管一个 stdio 连接，通过订阅将业务事件转成 JSON-RPC，
+先发送 `system.ready`，再转发事件并处理请求。EOF 或 `system.shutdown` 只结束该连接，
+取消并等待该连接发起的执行，随后排空订阅与协议输出；其他调用方的执行和共享运行时继续运行。
+外部取消或通信失败会关闭该连接的标准流以解除阻塞。关闭订阅本身不会取消任务；连接所属任务由接入层单独登记和清理。
 
-真实解释器及 Git 仓库操作测试使用本次准备的资源，测试数据仍在临时目录：
+现有 `app.Run` 仍是独立 stdio 进程入口：创建运行时、接入连接，并在连接退出后调用 `Runtime.Close()`。
+`Close` 停止入口、取消并等待所有任务及连接，关闭发布器、HTTP 空闲连接，清空 Vault 主密钥缓存并关闭数据库，最后释放实例锁，可以重复调用。
+HTTP、WebSocket 和 CLI 入口尚未实现；接入时复用同一运行时和业务事件，各自转换请求、错误、响应和推送格式。
+macOS/Linux 标准流副本与非阻塞标志的恢复封装在 `stdio/transport`，入口不直接操作文件描述符。
 
-```sh
-CALLUM_TEST_RUNTIME_DIR=/absolute/path/callum-desktop/resources/runtimes/unpacked/darwin-arm64 \
-  go test -mod=readonly -race -timeout 60s ./internal/tool/builtin/command/run -run 'Bundled'
-```
+工具参数纠正由模型适配器报告完整响应中的参数错误，再由 Agent 服务在确认本轮未执行任何工具后编排新请求；适配器不依赖 Agent 或审批层。临时纠正信息由单次执行持有、计入请求预算，失败响应及 usage 由模型步骤持久化；不改变数据库结构。命令工具的 Shell 语法解析仅发生在参数校验阶段，不启动 Shell 或解释脚本。
 
-macOS ARM64 实际运行已验证；其他架构的归档校验及交叉构建不能替代对应设备的原生验收。安装包的 ASAR 外资源复制尚未配置，以上命令不生成安装包。
+## MCP 连接
 
-## 检查与构建
+运行时持有 `internal/mcp` 的连接与授权管理器，`internal/stdio/mcp` 将桌面请求转为业务操作。MCP 进程的 stdin/stdout 与 Go 面向 Electron 的 stdio 独立。远程会话使用单独的 HTTP 连接池。OAuth 发现的远程授权端点使用受限连接池，临时回调由发起连接和运行时共同持有，取消、超时和退出时释放。
 
-技能 YAML 元数据使用固定 `go.yaml.in/yaml/v3` v3.0.4，标准库没有对应解析能力。该依赖不执行技能脚本或加载供应商 SDK。
+启用的服务在需要工具目录时连接，MCP 工具目录与执行设置版本绑定并参与 Token 预算。已发布的工具目录以只读快照读取，缺失或过期的目录在同一执行预算内最多并行发现四个服务。发现超时后仍可使用本轮有效的其他目录。工具执行时使用本轮固定的实例。停用、删除、修改连接或更换授权会使旧调用失效。退出时停止运行并关闭 MCP 会话，再关闭凭据库、数据库与实例锁。
 
-技能包不放入 Go 仓库。客户端 `resources/skills/.system/` 保存自带技能并安装到 `DataDir/skills/.system/`，用户技能平铺，用户 name 覆盖同名系统技能。`callum resource-lock --data-dir <路径>` 持有同一实例锁，提供就绪、关闭和只读的 `runtime.validate`。该方法只接受数据目录直属的 `runtimes` 或安装器暂存目录名称，使用正式服务的完整资源校验，不打开业务数据库。可选参数 `manifest_sha256` 核对完整校验实际使用的清单原始字节，旧请求可只传 `name`。客户端通过校验后激活资源，释放锁并启动正式服务，正式服务独立复核已安装目录。
+MCP 配置在初始化、保存输入、仓储写入和列表返回时复制切片与映射，保存的秘密环境变量也独立复制。服务内部配置不借用调用方或查询结果中的可变字段，配置变化仍须通过版本校验和连接失效流程。
 
-当前完整技能依赖来自用户指定 macOS ARM64 资源，版本 `26.1111.10934-flat`，包含 Artifact Tool、LibreOffice、Poppler。Python 库统一进入 `python/`，Node 库进入 `node/node_modules/`，原生命令进入 `native/`；裸 `python3` 和技能查询共用 Python 3.12.14。其他三个平台的完整 Office 原生依赖仍未准备。
+MCP 在条目锁内撤销旧会话的公共快照并关闭连接。预期取消和已关闭的会话保持静默。关闭失败通过应用注入的日志记录服务 ID 和错误类别，避免第三方错误原文进入日志。已持久化的配置和调用原有的结果继续按各自的业务契约返回。
 
-真实客户端技能的后端调用链验证需显式传入资源目录，测试仍仅使用临时数据：
+本地 stdio 会话关闭子进程输入后，最多等待 250 毫秒让子进程自然结束，随后关闭管道并清理所属进程组或 Windows Job。强制清理后最多再等待 2 秒确认主进程退出。超时会记录诊断并继续应用清理，子进程仍由原来的 `cmd.Wait` 回收。
 
-```sh
-CALLUM_TEST_RUNTIME_DIR=/absolute/path/callum-desktop/resources/runtimes/unpacked/darwin-arm64 \
-CALLUM_TEST_SKILLS_DIR=/absolute/path/callum-desktop/resources/skills \
-  go test -mod=readonly -race -timeout 60s ./internal/app -run BundledOfficeSkills
-```
 
-客户端负责真实格式生成、修改、重算、渲染和交付文件的集成检查。受控模型回归与真实厂商模型验收分别记录。
+## 配置目录与共用系统原语
 
-Shell 语法静态校验依赖固定的 `mvdan.cc/sh/v3` v3.14.1，仅使用 `syntax`，不使用其解释执行器；标准库没有对应 Shell 语法树解析能力。依赖更新必须同时复验简单包装拒绝与必要 Shell 保留。
+厂商和模型目录按 ID 游标分页，配置业务层校验页参数，SQLite 在每页事务内先按条目数和源数据字节预算选取 ID，再读取内容；stdio 仅转换公开字段并执行编码字节边界。后续调用方通过同一仓储契约读取，不在业务层加载全部配置。字段与容量见 [配置列表协议](jsonrpc.md#providerget--providerlist)。
 
-```sh
-gofmt -l cmd internal
-go vet -mod=readonly ./...
-go fix -mod=readonly -diff ./...
-./scripts/check-race.sh
-CGO_ENABLED=0 go build -mod=readonly -o bin/callum ./cmd/callum
-git diff --check
-```
+`internal/filelock` 不创建或删除文件，文件创建者继续持有句柄和私有路径校验责任。SQLite 实例锁与离线资源准备各自创建固定锁文件并借用该原语，关闭句柄释放锁，锁文件保留；强制终止后系统释放锁，不以删除锁文件作为解锁方式。
 
-发布程序使用固定构建标签：
+`internal/processgroup` 只管理 Unix 进程组信号，命令工具与 MCP 继续分别持有进程等待、输出和传输资源。只在 macOS、主进程已确认退出且 SIGKILL 返回 EPERM 时，用信号 0 最多等待两秒确认 ESRCH；超时或其他错误保留失败，不再发送终止信号。Windows 各自的 Job 生命周期保持独立。
 
-```sh
-CGO_ENABLED=0 go build -mod=readonly -tags release -o bin/callum ./cmd/callum
-```
 
-构建产物写入 `bin/`，该目录已加入 `.gitignore`。
-`go fix -diff` 只预览当前 Go 版本可用的现代化建议，不写入源文件。
-有建议时命令返回非零退出码。逐项审查并落实适用的建议后，再确认预览无差异。`.gitattributes` 固定 Go 文件检出为 LF，保持 Windows、macOS 和 Linux 的 gofmt 检查一致。
-代码优先使用当前 Go 版本支持且能提高清晰度的写法，例如 `errors.AsType`、`slices` 和 `t.Context()`。
+## 离线准备的并发与中断
 
-适配器测试使用可控的 HTTP transport 模拟响应，不访问真实模型服务。
-测试覆盖消息转换、异常响应、流式分片与中断、取消和超时、回调失败、错误链及响应资源释放。
-这些模拟测试不能替代具体供应商端点的真实 API 联调。
+资源准备对每个平台持有输出目录内的 `.prepare-<target>.lock` 普通文件锁。固定文件会保留，正常关闭和进程强制退出均由操作系统释放锁；不要通过删除它尝试解除正在持有的锁。并发准备同一目标明确失败，不同目标各自互斥。旧版同名锁目录仍会被拒绝且原位保留，应先确认没有旧准备进程再人工处理。准备中断不修改已激活的目标，未知遗留暂存目录不自动删除；构建或测试使用独立可丢弃输出目录。
 
-持久化测试仅使用临时数据库，覆盖配置读写与重新打开、凭据保留和清空、JSON 空值、
-GORM 零值更新、UUIDv7 主键约束、模型禁用、关联删除限制、上下文取消、初始化回滚、
-同版本整数主键结构及不支持版本的拒绝与数据保留、并发初始化和访问权限。配置业务测试使用存储替身验证业务规则与上下文传递；
-协议测试通过业务服务和内存存储替身验证请求映射，不依赖 SQLite。
-通信与执行测试覆盖响应顺序、协议错误、独立取消、并发限制、超时、输出阻塞和清理错误。
-应用集成测试通过真实临时 SQLite 与本机模拟 HTTP 服务验证
-“保存配置 → 查询 → 生成 → 并发与取消 → 重启读取”的调用链，不调用真实模型 API。
-运行该测试需要允许监听本机临时回环端口。
-可单独执行：
+`internal/filelock` 的子进程测试验证互斥及强制终止后的锁释放，`internal/runtimeassets/prepare` 验证重复获取、旧锁目录保留及失败暂存清理。桌面仓库还用随附 `prepare-runtimes` 实际执行强制终止后重试，全部使用临时资源目录。
 
-```sh
-go test -mod=readonly -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/agent/...
-go test -mod=readonly -tags release -race -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/agent/...
-CGO_ENABLED=0 go test -mod=readonly -timeout 60s ./internal/config/... ./internal/model/provider/... ./internal/storage/sqlite/... ./internal/stdio/... ./internal/inference/... ./internal/workspace/... ./internal/conversation/... ./internal/agent/...
-```
 
-## 凭据与验证隔离
-
-保存非空 API Key 需要可用的系统凭据库，平台要求与旧值迁移见 [系统凭据与迁移](storage.md#系统凭据与迁移)。普通 Go 自动化测试通过内部装配助手注入独立凭据替身，不调用真实用户钥匙串；生产入口固定使用系统实现，无环境变量回退开关。
-
-macOS 可显式运行系统集成检查：`CALLUM_LIVE_KEYRING_TEST=1 go test -mod=readonly -run TestIsolatedSystemKeychainRoundTrip -v ./internal/credentials/system`。测试只创建随机专用条目并在结束时删除。Windows Credential Manager 与 Linux Secret Service 已做纯 Go 交叉编译，原生锁定、取消和读写仍需各自系统验收，不能由 macOS 测试替代。
-
-迁移结构校验直接读取 SQLite 元数据，避免 GORM 反复解析整张表 DDL。默认竞态检查关闭测试结果缓存，顺序执行其他 Go 包、常规应用回归及逐项隔离的应用回归。其他包的单包时限为 60 秒，常规应用组限制为三个并行用例、单包时限为 120 秒。大模型响应分片、420 次工具长任务、旧轨迹恢复和多会话长历史压缩分别运行，每次的单包时限为 60 秒。420 次工具长任务的场景等待预算仍为 30 秒。脚本在启动测试前检查隔离用例是否存在，逐组报告结果和耗时，首个失败组的退出码作为整体退出码。测试在每个场景关闭服务、连接和临时资源。
+完整 Python/Node/Git 与技能依赖树的启动校验最多等待 30 秒，不消耗随后数据库等初始化的 10 秒预算。调用方取消仍会取消校验及初始化；超时或损坏仍阻止服务就绪。桌面正式服务的握手预算为 45 秒，覆盖两段有界初始化；资源锁等普通连接保持原有等待。并发隔离目录启动回归用于防止完整资源校验再次挤占数据库预算。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 
 	"github.com/xiaoyu98628/callum/internal/credentials"
@@ -42,24 +43,66 @@ func (s *Repository) GetModel(ctx context.Context, id string) (provider.Model, e
 
 // ListModels 按本地标识排序返回模型；selectableOnly 为 true 时只返回已启用记录。
 // 实际调用前还需检查协议适配器是否支持配置中启用的功能。
-func (s *Repository) ListModels(ctx context.Context, selectableOnly bool) ([]provider.Model, error) {
-	query := s.db.WithContext(ctx).Model(&schema.Model{}).Order("id")
-	if selectableOnly {
-		query = query.Where("enabled = ?", true)
+func (s *Repository) ListModels(ctx context.Context, selectableOnly bool, options ...provider.ListOptions) (out provider.Page[provider.Model], err error) {
+	value, err := provider.NormalizeListOptions(options...)
+	if err != nil {
+		return out, err
 	}
-	var rows []schema.Model
-	if err := query.Find(&rows).Error; err != nil {
-		return nil, storageError(err)
-	}
-	out := make([]provider.Model, 0, len(rows))
-	for _, row := range rows {
-		m, err := fromRecord(row)
-		if err != nil {
-			return nil, err
+	out.Items = []provider.Model{}
+	err = s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		query := tx.Model(&schema.Model{})
+		if selectableOnly {
+			query = query.Where("enabled = ?", true)
 		}
-		out = append(out, m)
+		// 只预读有界元数据，再加载同一事务内的记录，避免先把大目录全部解码。
+		ids, more, err := listPageIDs(query, value, `length(CAST(display_name AS BLOB))+length(CAST(remote_model_id AS BLOB))+length(CAST(provider_id AS BLOB))+COALESCE(length(CAST(capabilities AS BLOB)),0)+COALESCE(length(CAST(model_type AS BLOB)),0)+COALESCE(length(CAST(reasoning_levels AS BLOB)),0)+1024`)
+		if err != nil {
+			return err
+		}
+		if len(ids) == 0 {
+			return nil
+		}
+		var rows []schema.Model
+		if err := tx.Where("id IN ?", ids).Order("id").Find(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			m, err := fromRecord(row)
+			if err != nil {
+				return err
+			}
+			out.Items = append(out.Items, m)
+		}
+		out.HasMore = more
+		if more {
+			out.NextAfterID = ids[len(ids)-1]
+		}
+		return nil
+	})
+	return out, storageError(err)
+}
+
+func listPageIDs(query *gorm.DB, options provider.ListOptions, byteExpression string) ([]string, bool, error) {
+	var sizes []struct {
+		ID    string
+		Bytes int64
 	}
-	return out, nil
+	if err := query.Where("id > ?", options.AfterID).Select("id, " + byteExpression + " AS bytes").Order("id").Limit(options.Limit + 1).Scan(&sizes).Error; err != nil {
+		return nil, false, err
+	}
+	ids := make([]string, 0, min(options.Limit, len(sizes)))
+	var total int64
+	for _, row := range sizes {
+		if len(ids) == options.Limit || total+row.Bytes > provider.MaxListSourceBytes {
+			if len(ids) == 0 {
+				return nil, false, provider.ErrInvalidConfig
+			}
+			return ids, true, nil
+		}
+		ids = append(ids, row.ID)
+		total += row.Bytes
+	}
+	return ids, false, nil
 }
 
 // SetModelEnabled 控制模型能否用于新的运行配置解析。

@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func startProcess(cmd *exec.Cmd) (func() error, error) {
+func startProcess(cmd *exec.Cmd, _ <-chan struct{}) (func() error, error) {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, err

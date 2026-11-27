@@ -68,3 +68,40 @@ type RuntimeConfig struct {
 	BaseURL      string
 	APIKey       string `json:"-"`
 }
+
+// ListOptions 使用不可变标识作为游标，不依赖会因增删而漂移的 offset。
+type ListOptions struct {
+	AfterID string `json:"after_id,omitempty"`
+	Limit   int    `json:"limit,omitempty"`
+}
+
+// Page 是有界目录查询，只有 HasMore 时才提供下一页游标。
+type Page[T any] struct {
+	Items       []T    `json:"items"`
+	HasMore     bool   `json:"has_more"`
+	NextAfterID string `json:"next_after_id"`
+}
+
+const DefaultListLimit = 100
+const MaxListLimit = 200
+
+// MaxListSourceBytes 限制一页从存储读取的配置字节，通信层另检查实际 JSON 字节。
+const MaxListSourceBytes = 2 << 20
+
+// NormalizeListOptions 拒绝无效分页，不把错误参数解释成全量查询。
+func NormalizeListOptions(values ...ListOptions) (ListOptions, error) {
+	if len(values) > 1 {
+		return ListOptions{}, ErrInvalidConfig
+	}
+	var value ListOptions
+	if len(values) == 1 {
+		value = values[0]
+	}
+	if value.Limit == 0 {
+		value.Limit = DefaultListLimit
+	}
+	if value.Limit < 1 || value.Limit > MaxListLimit || (value.AfterID != "" && !ValidID(value.AfterID)) {
+		return ListOptions{}, ErrInvalidConfig
+	}
+	return value, nil
+}

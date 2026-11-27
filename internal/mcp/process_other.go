@@ -4,4 +4,4 @@ package mcp
 
 import "os/exec"
 
-func startProcess(*exec.Cmd) (func() error, error) { return nil, ErrConnection }
+func startProcess(*exec.Cmd, <-chan struct{}) (func() error, error) { return nil, ErrConnection }

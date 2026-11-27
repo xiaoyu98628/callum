@@ -36,12 +36,12 @@ func (r *memoryRepository) GetProvider(_ context.Context, id string) (provider.P
 	}
 	return provider.Provider{ID: id, Name: in.Name, Protocol: in.Protocol, BaseURL: in.BaseURL, HasAPIKey: in.APIKey != nil && *in.APIKey != ""}, nil
 }
-func (r *memoryRepository) ListProviders(ctx context.Context) ([]provider.Provider, error) {
+func (r *memoryRepository) ListProviders(ctx context.Context, options ...provider.ListOptions) (provider.Page[provider.Provider], error) {
 	out := make([]provider.Provider, 0, len(r.providers))
 	for id := range r.providers {
 		p, err := r.GetProvider(ctx, id)
 		if err != nil {
-			return nil, err
+			return provider.Page[provider.Provider]{}, err
 		}
 		out = append(out, p)
 	}
@@ -54,7 +54,7 @@ func (r *memoryRepository) ListProviders(ctx context.Context) ([]provider.Provid
 		}
 		return 0
 	})
-	return out, nil
+	return memoryPage(out, options, func(v provider.Provider) string { return v.ID })
 }
 func (r *memoryRepository) DeleteProvider(_ context.Context, id string) error {
 	if _, ok := r.providers[id]; !ok {
@@ -100,7 +100,7 @@ func (r *memoryRepository) GetModel(_ context.Context, id string) (provider.Mode
 	}
 	return m, nil
 }
-func (r *memoryRepository) ListModels(_ context.Context, enabledOnly bool) ([]provider.Model, error) {
+func (r *memoryRepository) ListModels(_ context.Context, enabledOnly bool, options ...provider.ListOptions) (provider.Page[provider.Model], error) {
 	out := make([]provider.Model, 0, len(r.models))
 	for _, m := range r.models {
 		if !enabledOnly || m.Enabled {
@@ -116,7 +116,7 @@ func (r *memoryRepository) ListModels(_ context.Context, enabledOnly bool) ([]pr
 		}
 		return 0
 	})
-	return out, nil
+	return memoryPage(out, options, func(v provider.Model) string { return v.ID })
 }
 func (r *memoryRepository) SetModelEnabled(_ context.Context, id string, enabled bool) error {
 	m, ok := r.models[id]
@@ -145,4 +145,19 @@ func (r *memoryRepository) LoadRuntime(_ context.Context, id string) (provider.R
 		key = *p.APIKey
 	}
 	return provider.RuntimeConfig{Model: m, Protocol: p.Protocol, BaseURL: p.BaseURL, APIKey: key}, nil
+}
+
+func memoryPage[T any](items []T, options []provider.ListOptions, itemID func(T) string) (provider.Page[T], error) {
+	value, err := provider.NormalizeListOptions(options...)
+	if err != nil {
+		return provider.Page[T]{}, err
+	}
+	items = slices.DeleteFunc(items, func(v T) bool { return itemID(v) <= value.AfterID })
+	page := provider.Page[T]{Items: items}
+	if len(items) > value.Limit {
+		page.Items = items[:value.Limit]
+		page.HasMore = true
+		page.NextAfterID = itemID(page.Items[len(page.Items)-1])
+	}
+	return page, nil
 }

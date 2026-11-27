@@ -213,13 +213,22 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 {"jsonrpc":"2.0","id":"provider-list","method":"provider.list","params":{}}
 ```
 
-`get` 返回单个对象，`list` 返回数组。对象字段如下：
+`get` 返回单个对象，`list` 返回分页对象。条目字段如下：
 
 ```json
 {"id":"<provider_id>","name":"我的模型厂商","protocol":"chatcompletions","base_url":"https://<api_host>/v1","has_api_key":true,"created_at":1700000000000,"updated_at":1700000000000}
 ```
 
 查询不会返回密钥明文，`has_api_key` 仅表示是否保存了非空密钥。
+
+`provider.list` 和 `model.list` 共用 `limit`（省略或为 0 时取 100，有效页大小为 1–200）及可选的 `after_id`。按 ID 升序读取，`after_id` 是上一页最后返回的 ID，即使该条目随后被删除也可继续。参数无效返回配置校验错误；不使用 offset。返回结构：
+
+```json
+{"items":[{"id":"<provider_id>","name":"我的模型厂商","protocol":"chatcompletions","base_url":"https://<api_host>/v1","has_api_key":true,"created_at":1700000000000,"updated_at":1700000000000}],"has_more":true,"next_after_id":"<provider_id>"}
+```
+
+继续读取时把 `next_after_id` 作为下一次 `after_id`，并保留筛选参数；`has_more=false` 时 `next_after_id` 为空字符串，空页的 `items` 为 `[]`。每页在同一数据库事务快照内选取并读取条目，同时限制配置源数据估计值为 2 MiB；协议层再将公开条目编码限制为 6 MiB，为通信帧预留空间。字节边界可能使条目数小于 `limit`，不能据此推断结束，应读取 `has_more`。单条记录无法容纳时明确失败。页间没有跨请求事务，配置变更后重新读取目录。此契约替换旧数组返回，客户端与随附服务需同步更新。
+
 
 ### provider.update
 
@@ -279,7 +288,7 @@ stdio 输出队列最多 64 条，单次写入或等待队列空间超过 5 秒�
 {"jsonrpc":"2.0","id":"model-list-enabled","method":"model.list","params":{"selectable_only":true}}
 ```
 
-`get` 返回单个模型对象；`list` 返回数组。对象包含上表配置字段，以及 `id`、`created_at`、`updated_at`。`selectable_only` 默认为 `false`；`true` 只过滤未启用模型，不保证当前适配器支持其选中的所有功能。
+`get` 返回单个模型对象；`list` 返回与 `provider.list` 相同的分页对象。对象包含上表配置字段，以及 `id`、`created_at`、`updated_at`。`selectable_only` 默认为 `false`；`true` 只过滤未启用模型，不保证当前适配器支持其选中的所有功能。
 
 ### model.update
 

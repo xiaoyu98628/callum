@@ -4,6 +4,8 @@ import (
 	"errors"
 	"os"
 	"sync"
+
+	"github.com/xiaoyu98628/callum/internal/filelock"
 )
 
 // Ownership 持有服务实例的文件锁；Close 在运行任务结束后释放，可重复调用。
@@ -24,7 +26,10 @@ func AcquireOwnership(databasePath string) (*Ownership, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := lockOwnership(file); err != nil {
+	if err := filelock.Try(file); err != nil {
+		if errors.Is(err, filelock.ErrLocked) {
+			err = errors.Join(errors.New("该数据目录已有运行中的 Callum 服务"), err)
+		}
 		return nil, errors.Join(err, file.Close())
 	}
 	return &Ownership{file: file}, nil
